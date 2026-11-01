@@ -612,6 +612,25 @@ test('cron endpoint needs the key', async () => {
   await new Promise((r) => setTimeout(r, 300));
 });
 
+test('forgot password: reset with account email + sign-up code', async () => {
+  const { config } = await import('../src/config.js');
+  config.signupCode = 'owner-code-123';
+  const C = new Browser();
+  let r = await C.get('/forgot'); assert.match(r.text, /Reset your password/);
+  r = await C.post('/forgot', { email: 'heba@example.com', code: 'wrong', password: 'brand-new-password' });
+  assert.equal(r.status, 400); assert.match(r.text, /do not match/);
+  r = await C.post('/forgot', { email: 'nobody@example.com', code: 'owner-code-123', password: 'brand-new-password' });
+  assert.match(r.text, /do not match/);
+  r = await C.post('/forgot', { email: 'HEBA@example.com', code: 'owner-code-123', password: 'brand-new-password' });
+  assert.match(r.text, /Password changed/);
+  // old sessions are logged out; new password works, old one does not
+  assert.equal((await A.req('GET', '/shops')).status, 303);
+  assert.equal((await C.post('/login', { email: 'heba@example.com', password: 'a-very-good-password' })).status, 401);
+  r = await C.post('/login', { email: 'heba@example.com', password: 'brand-new-password' });
+  assert.match(r.text, /Hello Heba/);
+  config.signupCode = '';
+});
+
 test('account deletion removes all data', async () => {
   await B.get('/settings');
   const r = await B.post('/settings/delete', { password: 'another-good-password' });

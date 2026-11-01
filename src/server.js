@@ -23,8 +23,8 @@ const STATIC = path.resolve(new URL('../public', import.meta.url).pathname);
 const TYPES = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
 
 // Paths that are allowed without sign-in / CSRF token (they authenticate in other ways).
-const OPEN = [/^\/(login|signup|health|privacy)$/, /^\/u\//, /^\/webhooks\//, /^\/cron\//, /^\/static\//];
-const NO_CSRF = [/^\/(login|signup)$/, /^\/u\//, /^\/webhooks\//];
+const OPEN = [/^\/(login|signup|forgot|health|privacy)$/, /^\/u\//, /^\/webhooks\//, /^\/cron\//, /^\/static\//];
+const NO_CSRF = [/^\/(login|signup|forgot)$/, /^\/u\//, /^\/webhooks\//];
 
 function setupPage(missing) {
   const secret = crypto.randomBytes(32).toString('base64url');

@@ -4,7 +4,7 @@ import { HttpError, rateLimit, clientIp, sendHtml, sendJson } from '../http.js';
 import { q, one, rows } from '../db.js';
 import { config } from '../config.js';
 import { createUser, login, logout, verifyLogin, passwordProblem } from '../auth.js';
-import { verifySigned, decryptJson, safeEqual } from '../crypto.js';
+import { verifySigned, decryptJson, safeEqual, hashPassword } from '../crypto.js';
 import { normalizeEmail } from '../contacts.js';
 import * as wa from '../providers/whatsapp.js';
 import { tick } from '../worker.js';
@@ -21,7 +21,7 @@ const authForm = (mode, err, vals = {}) => layout({
     ${mode === 'signup' && config.signupCode ? html`<label>Sign-up code<input name="code" required autocomplete="off"><small>Ask the owner of this app for the code.</small></label>` : ''}
     <button class="primary">${mode === 'login' ? 'Log in' : 'Create account'}</button>
   </form>
-  <p class="muted">${mode === 'login' ? html`New here? <a href="/signup">Create an account</a>` : html`Already have an account? <a href="/login">Log in</a>`}</p>
+  <p class="muted">${mode === 'login' ? html`New here? <a href="/signup">Create an account</a> · <a href="/forgot">Forgot password?</a>` : html`Already have an account? <a href="/login">Log in</a>`}</p>
   </section>`,
 });
 
@@ -51,6 +51,33 @@ export default function register(r) {
     const u = await createUser({ email, name, password });
     await login(ctx.res, u.id);
     ctx.go('/', { ok: 'Welcome! Follow the three steps below to send your first campaign.' });
+  });
+
+
+  // ----- Forgot password: reset with the account email + the app's sign-up code (set in the hosting settings) -----
+  const forgotPage = (err, ok) => layout({ title: 'Reset password', error: err, notice: ok, body: html`<section class="card narrow">
+    <h1>Reset your password</h1>
+    ${config.signupCode ? html`<p class="muted">Enter your account email, the app's sign-up code (in Render → sheetsender → Environment → SIGNUP_CODE) and a new password.</p>
+    <form method="post" action="/forgot" class="stack">
+      <label>Account email<input type="email" name="email" required autocomplete="email"></label>
+      <label>Sign-up code<input name="code" required autocomplete="off"></label>
+      <label>New password<input type="password" name="password" required minlength="10" autocomplete="new-password"><small>At least 10 characters.</small></label>
+      <button class="primary">Set new password</button>
+    </form>` : html`<p>Password reset is not available because no sign-up code is set for this app.</p>`}
+    <p class="muted"><a href="/login">Back to log in</a></p></section>` });
+  r.get('/forgot', (ctx) => sendHtml(ctx.res, 200, forgotPage()));
+  r.post('/forgot', async (ctx) => {
+    if (!rateLimit('forgot:' + clientIp(ctx.req), 10, 60 * 60000)) return sendHtml(ctx.res, 429, forgotPage('Too many attempts. Try again in an hour.'));
+    if (!config.signupCode) return sendHtml(ctx.res, 400, forgotPage('Password reset is not available.'));
+    const email = normalizeEmail(ctx.body.email); const pw = String(ctx.body.password || '');
+    const generic = 'That email and sign-up code do not match an account.';
+    if (!email || !safeEqual(String(ctx.body.code || '').trim(), config.signupCode)) return sendHtml(ctx.res, 400, forgotPage(generic));
+    const pwErr = passwordProblem(pw); if (pwErr) return sendHtml(ctx.res, 400, forgotPage(pwErr));
+    const u = await one('SELECT id FROM users WHERE lower(email)=lower($1)', [email]);
+    if (!u) return sendHtml(ctx.res, 400, forgotPage(generic));
+    await q('UPDATE users SET password_hash=$2, failed_logins=0, locked_until=NULL WHERE id=$1', [u.id, await hashPassword(pw)]);
+    await q('DELETE FROM sessions WHERE user_id=$1', [u.id]);
+    sendHtml(ctx.res, 200, authForm('login', null, { email }).replace('<form method="post" action="/login"', '<div class="flash ok">Password changed. Log in with your new password.</div><form method="post" action="/login"'));
   });
 
   r.post('/logout', async (ctx) => { await logout(ctx.req, ctx.res); ctx.go('/login'); });
