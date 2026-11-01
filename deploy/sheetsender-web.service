@@ -1,0 +1,17 @@
+[Unit]
+Description=SheetSender web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sheetsender
+WorkingDirectory=/opt/sheetsender
+ExecStart=/usr/bin/node --no-warnings server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

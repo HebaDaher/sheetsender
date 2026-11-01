@@ -1,0 +1,20 @@
+[Unit]
+Description=SheetSender background worker (checks sheets and sends messages 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sheetsender
+WorkingDirectory=/opt/sheetsender
+ExecStart=/usr/bin/node --no-warnings worker.js
+Restart=always
+RestartSec=5
+# Give messages being sent time to finish before a restart (never cut a send in half)
+TimeoutStopSec=70
+KillSignal=SIGTERM
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

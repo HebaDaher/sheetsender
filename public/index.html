@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SheetSender</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar" hidden>
+    <a class="brand" href="#/"><span class="logo">S</span> SheetSender</a>
+    <button class="menu-btn" id="menuBtn" aria-label="Menu"><span></span><span></span><span></span></button>
+    <nav id="nav">
+      <a href="#/" data-nav="shops">Shops</a>
+      <a href="#/connections" data-nav="connections">Connections</a>
+      <a href="#/templates" data-nav="templates">Message Templates</a>
+      <a href="#/attachments" data-nav="attachments">Attachments</a>
+      <a href="#/automation" data-nav="automation">Automation Settings</a>
+      <a href="#/activity" data-nav="activity">Activity Log</a>
+      <button class="link" id="logoutBtn">Sign out</button>
+    </nav>
+  </header>
+  <main id="app"><p class="muted center">Loading…</p></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
