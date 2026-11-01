@@ -8,5 +8,5 @@
     "start": "node src/server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js"
   },
-  "engines": { "node": ">=22" }
+  "engines": { "node": "22.x" }
 }
