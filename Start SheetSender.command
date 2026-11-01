@@ -23,7 +23,7 @@ need_node() {
 }
 NODE="node"
 if need_node node; then
-  NODE="$APP_DIR/.runtime/node/bin/node"
+  NODE="$DATA/runtime/node/bin/node"
   if need_node "$NODE"; then
     ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="x64"
     echo "  Downloading Node.js (one time only)…"
@@ -34,8 +34,8 @@ if need_node node; then
     TMP=$(mktemp -d)
     curl -fsSL "$BASE/$FILE" -o "$TMP/node.tgz" || { echo "  Download failed."; read -r; exit 1; }
     if [ "$(shasum -a 256 "$TMP/node.tgz" | cut -d' ' -f1)" != "$SUM" ]; then echo "  Download check failed (file damaged). Try again."; read -r; exit 1; fi
-    mkdir -p "$APP_DIR/.runtime" && rm -rf "$APP_DIR/.runtime/node"
-    tar -xzf "$TMP/node.tgz" -C "$TMP" && mv "$TMP"/node-v22*-darwin-"$ARCH" "$APP_DIR/.runtime/node"
+    mkdir -p "$DATA/runtime" && rm -rf "$DATA/runtime/node"
+    tar -xzf "$TMP/node.tgz" -C "$TMP" && mv "$TMP"/node-v22*-darwin-"$ARCH" "$DATA/runtime/node"
     rm -rf "$TMP"
     echo "  Node.js ready."
   fi
