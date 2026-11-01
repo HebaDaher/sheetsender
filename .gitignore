@@ -1,8 +1,4 @@
-# Secrets and runtime data — never commit
-.env
-data/
-*.db
-*.db-wal
-*.db-shm
 node_modules/
-.runtime/
+.env
+*.log
+.DS_Store

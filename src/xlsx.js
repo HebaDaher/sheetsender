@@ -1,5 +1,4 @@
-// Minimal .xlsx reader/writer (no dependencies). Used only for Excel files on *personal* OneDrive,
-// where Microsoft does not support the Excel workbook API. Reads cell values and writes plain-text cells.
+// Excel (.xlsx) and CSV reader — no dependencies.
 import zlib from 'node:zlib';
 
 // ---------- ZIP ----------
@@ -30,39 +29,9 @@ export function unzip(buf) {
   return entries;
 }
 
-export function zip(entries) {
-  const locals = [], centrals = [];
-  let offset = 0;
-  for (const e of entries) {
-    const name = Buffer.from(e.name, 'utf8');
-    const comp = zlib.deflateRawSync(e.data);
-    const crc = zlib.crc32(e.data) >>> 0;
-    const lh = Buffer.alloc(30);
-    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(8, 8);
-    lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12);
-    lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(e.data.length, 22);
-    lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
-    locals.push(lh, name, comp);
-    const ch = Buffer.alloc(46);
-    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8); ch.writeUInt16LE(8, 10);
-    ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14);
-    ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(e.data.length, 24);
-    ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE(offset, 42);
-    centrals.push(ch, name);
-    offset += 30 + name.length + comp.length;
-  }
-  const cd = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, cd, end]);
-}
-
 // ---------- XML helpers ----------
 const decode = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
   .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d)).replace(/&amp;/g, '&');
-const encode = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 const attr = (tag, name) => { const m = tag.match(new RegExp(`\\s${name}="([^"]*)"`)); return m ? decode(m[1]) : null; };
 const textOf = (xml) => { let out = ''; for (const m of xml.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) out += decode(m[1]); return out; };
 
@@ -96,8 +65,6 @@ export function readWorkbook(buf) {
   return { entries, files, sheets, shared };
 }
 
-export function sheetNames(buf) { return readWorkbook(buf).sheets.map((s) => s.name); }
-
 // Returns rows as arrays of strings (row index 0 = sheet row 1).
 export function readSheet(buf, sheetName) {
   const wb = readWorkbook(buf);
@@ -124,48 +91,4 @@ export function readSheet(buf, sheetName) {
     rows[r - 1] = Array.from(arr, (x) => x ?? '');
   }
   return Array.from(rows, (x) => x || []);
-}
-
-// cells: [{ row: 1-based, col: 0-based, value: string }]. Writes them as text cells and returns a new .xlsx buffer.
-export function writeCells(buf, sheetName, cells) {
-  const wb = readWorkbook(buf);
-  const sheet = wb.sheets.find((s) => s.name === sheetName) || wb.sheets[0];
-  let xml = wb.files.get(sheet.path).toString('utf8');
-  if (/<sheetData\s*\/>/.test(xml)) xml = xml.replace(/<sheetData\s*\/>/, '<sheetData></sheetData>');
-  const byRow = new Map();
-  for (const c of cells) { if (!byRow.has(c.row)) byRow.set(c.row, []); byRow.get(c.row).push(c); }
-
-  const sdStart = xml.indexOf('<sheetData'); const sdOpenEnd = xml.indexOf('>', sdStart) + 1;
-  const sdEnd = xml.indexOf('</sheetData>');
-  let body = xml.slice(sdOpenEnd, sdEnd);
-  const rowRe = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
-  const rows = [];
-  for (const m of body.matchAll(rowRe)) rows.push({ r: Number(attr('<row' + m[1] + '>', 'r')), attrs: m[1], inner: m[2] || '' });
-
-  for (const [r, list] of byRow) {
-    let row = rows.find((x) => x.r === r);
-    if (!row) { row = { r, attrs: ` r="${r}"`, inner: '' }; rows.push(row); }
-    row.attrs = row.attrs.replace(/\sspans="[^"]*"/, '');
-    const cellsInRow = [];
-    for (const cm of row.inner.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
-      const ref = attr('<c' + cm[1] + '>', 'r');
-      cellsInRow.push({ col: colToIndex(ref.replace(/\d+/g, '')), xml: cm[0], attrs: cm[1] });
-    }
-    for (const c of list) {
-      const ref = indexToCol(c.col) + r;
-      const existing = cellsInRow.find((x) => x.col === c.col);
-      const style = existing ? attr('<c' + existing.attrs + '>', 's') : null;
-      const newXml = `<c r="${ref}"${style != null ? ` s="${style}"` : ''} t="inlineStr"><is><t xml:space="preserve">${encode(c.value ?? '')}</t></is></c>`;
-      if (existing) existing.xml = newXml; else cellsInRow.push({ col: c.col, xml: newXml });
-    }
-    cellsInRow.sort((a, b) => a.col - b.col);
-    row.inner = cellsInRow.map((x) => x.xml).join('');
-  }
-  rows.sort((a, b) => a.r - b.r);
-  body = rows.map((x) => `<row${x.attrs}>${x.inner}</row>`).join('');
-  xml = xml.slice(0, sdOpenEnd) + body + xml.slice(sdEnd);
-  // Remove a stale dimension so Excel recalculates it.
-  xml = xml.replace(/<dimension\b[^>]*\/>/, '');
-  const out = wb.entries.map((e) => (e.name === sheet.path ? { name: e.name, data: Buffer.from(xml, 'utf8') } : e));
-  return zip(out);
 }

@@ -1,14 +1,12 @@
 {
   "name": "sheetsender",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Multi-shop spreadsheet to Gmail + WhatsApp automation. Zero dependencies (Node.js 22.13+).",
+  "description": "Hosted web app: upload a shop's Excel file and send consented customers an email or an official WhatsApp Business template message.",
   "scripts": {
-    "start": "node --no-warnings server.js",
-    "worker": "node --no-warnings worker.js",
-    "gen-secrets": "node scripts/gen-secrets.js",
-    "test": "node --no-warnings scripts/e2e-test.js"
+    "start": "node src/server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
-  "engines": { "node": ">=22.13" }
+  "engines": { "node": ">=22" }
 }
