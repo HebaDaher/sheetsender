@@ -19,6 +19,7 @@ export function startSmtp({ key, cert, password }) {
           if (line === '.') {
             inData = false;
             const f = fail('data');
+            if (f && f.drop) { state.mails.push({ from, to, data, dropped: true }); sock.destroy(); return; }
             if (f) reply(`${f.code} ${f.text}`);
             else { state.mails.push({ from, to, data }); reply('250 2.0.0 OK queued'); }
             data = '';

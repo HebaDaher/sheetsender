@@ -1,5 +1,5 @@
 // Who receives a campaign, what each person gets, and safe activation (no duplicates).
-import { rows, one, tx } from './db.js';
+import { rows as dbRows, tx } from './db.js';
 import { sha256 } from './crypto.js';
 import { firstName } from './contacts.js';
 import { esc } from './html.js';
@@ -61,7 +61,9 @@ export function emailText(bodyText, { unsubscribeUrl, shopName }) {
 }
 
 // Computes, for every contact in the shop's current file, whether they will be sent the campaign and why not.
-export async function computeRecipients(campaign, { userId }) {
+export async function computeRecipients(campaign, { userId, db = null }) {
+  const rows = async (t, p) => (db ? (await db.query(t, p)).rows : dbRows(t, p));
+  const one = async (t, p) => (await rows(t, p))[0] || null;
   const shop = await one('SELECT * FROM shops WHERE id=$1 AND user_id=$2', [campaign.shop_id, userId]);
   if (!shop?.current_upload_id) return { shop, list: [] };
   const contacts = await rows('SELECT * FROM contacts WHERE upload_id=$1 AND user_id=$2 ORDER BY row_number', [shop.current_upload_id, userId]);
@@ -69,7 +71,7 @@ export async function computeRecipients(campaign, { userId }) {
   const supp = new Set((await rows('SELECT address FROM suppressions WHERE user_id=$1 AND channel=$2', [userId, channel])).map((r) => r.address));
   const hash = contentHash(campaign);
   const already = campaign.skip_already_received
-    ? new Set((await rows(`SELECT DISTINCT address FROM messages WHERE user_id=$1 AND channel=$2 AND content_hash=$3 AND status IN ('sent','delivered','read','unknown','sending') AND campaign_id<>$4`, [userId, channel, hash, campaign.id])).map((r) => r.address))
+    ? new Set((await rows(`SELECT DISTINCT address FROM messages WHERE user_id=$1 AND channel=$2 AND content_hash=$3 AND status IN ('queued','sending','sent','delivered','read','unknown') AND campaign_id<>$4`, [userId, channel, hash, campaign.id])).map((r) => r.address))
     : new Set();
   const selected = campaign.audience === 'selected' ? new Set((campaign.selected_ids || []).map(Number)) : null;
   const seen = new Set();
@@ -104,7 +106,7 @@ export async function activateCampaign(userId, campaignId, mode) {
     const c = (await db.query('SELECT * FROM campaigns WHERE id=$1 AND user_id=$2 FOR UPDATE', [campaignId, userId])).rows[0];
     if (!c) throw new Error('Campaign not found');
     if (c.status !== 'draft') return { already: true, campaign: c };
-    const { shop, list, hash } = await computeRecipients(c, { userId });
+    const { shop, list, hash } = await computeRecipients(c, { userId, db });
     const eligible = list.filter((r) => !r.reason);
     if (!eligible.length) throw new Error('Nobody in this file can receive this campaign. Check the reasons in the preview.');
     const recs = list.map((r) => ({
@@ -125,7 +127,7 @@ export async function activateCampaign(userId, campaignId, mode) {
 }
 
 export async function campaignCounts(campaignId) {
-  const r = await rows('SELECT status, count(*)::int AS n FROM messages WHERE campaign_id=$1 GROUP BY status', [campaignId]);
+  const r = await dbRows('SELECT status, count(*)::int AS n FROM messages WHERE campaign_id=$1 GROUP BY status', [campaignId]);
   const c = { queued: 0, sending: 0, sent: 0, delivered: 0, read: 0, failed: 0, skipped: 0, cancelled: 0, unknown: 0 };
   for (const x of r) c[x.status] = x.n;
   c.sentTotal = c.sent + c.delivered + c.read;

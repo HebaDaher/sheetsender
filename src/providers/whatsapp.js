@@ -36,7 +36,10 @@ export async function graph(token, method, path, { query, body, form } = {}) {
   try {
     res = await fetch(url, { method, headers, body: payload, signal: AbortSignal.timeout(30000) });
   } catch (e) {
-    throw new WaError(0, { message: `Could not reach WhatsApp (${e.cause?.code || e.message})`, code: 'network' });
+    const err = new WaError(0, { message: `Could not reach WhatsApp (${e.cause?.code || e.message})`, code: 'network' });
+    // Only these mean the request certainly never reached Meta; anything else (timeout, reset) might have been delivered.
+    err.notSent = ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(e.cause?.code);
+    throw err;
   }
   let data = {};
   try { data = await res.json(); } catch {}
@@ -91,8 +94,9 @@ export async function listTemplates({ token, waba_id }) {
 
 const VAR_RE = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
 const varsIn = (text) => [...new Set([...String(text || '').matchAll(VAR_RE)].map((m) => m[1]))];
-const OPT_OUT_BUTTON = /stop|unsubscribe|opt.?out|no more|إيقاف|ايقاف|الغاء|إلغاء|توقف|أوقف|اوقف/i;
-const OPT_OUT_TEXT = /\bstop\b|unsubscribe|opt.?out|إلغاء الاشتراك|الغاء الاشتراك|توقف|إيقاف|ايقاف/i;
+export const OPT_OUT_BUTTON = /^\s*(stop|unsubscribe|opt[\s-]?out|no more|إيقاف|ايقاف|الغاء|إلغاء|توقف|أوقف|اوقف|لا ترسل)/i;
+// Text must give a clear instruction ("Reply STOP", "أرسل توقف", "to unsubscribe"), not just contain the word "stop".
+const OPT_OUT_TEXT = /\b(reply|send|text|type)\s+["'“]?stop\b|\bunsubscribe\b|\bopt[\s-]?out\b|(أرسل|ارسل|اكتب)\s+(كلمة\s+)?["'“]?(توقف|إيقاف|ايقاف|stop)|(إلغاء|الغاء)\s+الاشتراك/i;
 
 // Works out what a template needs (variables, header media) and whether this app can send it.
 export function analyzeTemplate(t) {
@@ -147,8 +151,14 @@ export function buildTemplateMessage(info, values, mediaId) {
 }
 
 export async function sendTemplate({ token, phone_number_id }, to, template) {
-  const r = await graph(token, 'POST', `${phone_number_id}/messages`, { body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'template', template } });
-  return r.messages?.[0]?.id;
+  try {
+    const r = await graph(token, 'POST', `${phone_number_id}/messages`, { body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'template', template } });
+    return r.messages?.[0]?.id;
+  } catch (e) {
+    // Meta may have accepted the message even though we got no clear answer: never resend automatically.
+    if ((e.code === 'network' && !e.notSent) || e.status >= 500) e.ambiguous = true;
+    throw e;
+  }
 }
 
 export async function sendText({ token, phone_number_id }, to, text) {
@@ -203,6 +213,7 @@ export const STOP_WORDS = /^\s*(stop|stop promotions|unsubscribe|opt ?out|cancel
 
 // Decide what to do after a WhatsApp error (codes from Meta's error-code reference).
 export function classifyWaError(e) {
+  if (e.code === 'network') return { action: 'retry_message', text: e.message };
   const code = Number(e.code);
   const text = `${e.title ? e.title + ': ' : ''}${e.message}${e.details && e.details !== e.message ? ' — ' + e.details : ''}`.slice(0, 300);
   if ([130429, 80007, 4, 131057].includes(code)) return { action: 'hold_sender', seconds: e.retryAfterSec, backoff: !e.retryAfterSec, text: `WhatsApp asked to slow down (${code}).` };
@@ -215,6 +226,6 @@ export function classifyWaError(e) {
     return { action: 'pause_campaign', text: `WhatsApp could not use this template or account (${code}): ${text}. Campaign paused.` };
   }
   if ([131026, 131021, 131051, 131047, 131009, 100, 131008].includes(code)) return { action: 'fail_message', text: `Not delivered (${code}): ${text}` };
-  if (code === 'network' || [1, 2, 131000, 131016, 131053].includes(code) || e.status >= 500) return { action: 'retry_message', text: `Temporary WhatsApp problem: ${text}` };
+  if ([1, 2, 131000, 131016, 131053].includes(code) || e.status >= 500) return { action: 'retry_message', text: `Temporary WhatsApp problem: ${text}` };
   return { action: 'fail_message', text: `WhatsApp error (${code || e.status}): ${text}` };
 }

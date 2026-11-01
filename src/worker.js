@@ -84,7 +84,7 @@ export async function processCampaign(campaignId, { deadline, limit = Infinity, 
   if (!c || c.status !== 'active') return { note: 'Campaign is not active.' };
   const user = await one('SELECT * FROM users WHERE id=$1', [c.user_id]);
   const sender = c.sender_id ? await one('SELECT * FROM senders WHERE id=$1 AND user_id=$2', [c.sender_id, c.user_id]) : null;
-  const shop = await one('SELECT name FROM shops WHERE id=$1', [c.shop_id]);
+  const shop = await one('SELECT name FROM shops WHERE id=$1 AND user_id=$2', [c.shop_id, c.user_id]);
   if (!sender || sender.status !== 'verified' || sender.channel !== c.channel) {
     await pauseCampaign(c.id, 'The selected sender is missing or not verified. Reconnect it, then resume.');
     return { note: 'Sender not verified.' };
@@ -127,83 +127,90 @@ export async function processCampaign(campaignId, { deadline, limit = Infinity, 
       }
     }
 
+    // One person at a time: claim → final checks → send → record. Only that one row is ever "sending".
     while (Date.now() < deadline && sentCount < limit) {
       const fresh = await one('SELECT status FROM campaigns WHERE id=$1', [c.id]);
       if (fresh.status !== 'active') { note = 'Campaign stopped.'; break; }
-      const batchSize = Math.min(10, limit - sentCount);
-      const batch = (await q(`UPDATE messages SET status='sending', attempts=attempts+1, updated_at=now()
-        WHERE id IN (SELECT id FROM messages WHERE campaign_id=$1 AND status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-                     ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED) RETURNING *`, [c.id, batchSize])).rows.sort((a, b) => Number(a.id) - Number(b.id));
-      if (!batch.length) break;
+      const m = (await q(`UPDATE messages SET status='sending', attempts=attempts+1, updated_at=now()
+        WHERE id = (SELECT id FROM messages WHERE campaign_id=$1 AND status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+                    ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`, [c.id])).rows[0];
+      if (!m) break;
 
-      let stop = false;
-      for (let i = 0; i < batch.length; i++) {
-        const m = batch[i];
-        const rest = () => batch.slice(i + 1).map((x) => x.id);
-        if (stop || Date.now() > deadline) { await release([m.id]); continue; }
-
-        const opted = await one('SELECT 1 FROM suppressions WHERE user_id=$1 AND channel=$2 AND address=$3', [c.user_id, c.channel, m.address]);
-        if (opted) { await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE id=$1", [m.id]); continue; }
-
-        // Daily limits (checked before every new person).
-        if (c.channel === 'email' ? cap.left <= 0 : (cap.left <= 0 && !(cap.recent && cap.recent.has(m.address)))) {
-          await release([m.id, ...rest()]);
-          await holdSender(sender, Math.max(60, (cap.resumeAt - Date.now()) / 1000), `${cap.why}. Resumes automatically at the time shown.`, false);
-          note = cap.why; stop = true; break;
-        }
-
-        try {
-          let providerId;
-          if (c.channel === 'email') {
-            const unsub = unsubscribeUrl(c.user_id, 'email', m.address, shop.name);
-            const body = fillPlaceholders(c.body, m.vars);
-            const images = media.filter((x) => x.kind === 'image').map((x, n) => ({ ...x, cid: `img${n}@sheetsender` }));
-            const built = buildEmail({
-              fromName: sender.info.from_name, fromEmail: sender.info.email, replyTo: sender.info.reply_to, to: m.address, toName: m.recipient_name,
-              subject: fillPlaceholders(c.subject, m.vars), text: emailText(body, { unsubscribeUrl: unsub, shopName: shop.name }),
-              html: emailHtml(body, { images, unsubscribeUrl: unsub, shopName: shop.name }), inline: images, attachments: media.filter((x) => x.kind !== 'image'), unsubscribeUrl: unsub,
-            });
-            await session.send({ to: m.address, data: built.data });
-            providerId = built.messageId;
-          } else {
-            const tpl = wa.buildTemplateMessage(c.template.info, m.vars, c.wa_media?.id);
-            providerId = await wa.sendTemplate(creds, m.address, tpl);
-          }
-          await q("UPDATE messages SET status='sent', provider_id=$2, sent_at=now(), error=NULL, updated_at=now() WHERE id=$1", [m.id, providerId || null]);
-          sentCount++;
-          cap.left--; cap.recent?.add(m.address);
-          if (sender.hold_level) { sender.hold_level = 0; await q('UPDATE senders SET hold_level=0, hold_reason=NULL WHERE id=$1', [sender.id]); }
-        } catch (e) {
-          const k = c.channel === 'email' ? email.classifyEmailError(e) : wa.classifyWaError(e);
-          if (k.action === 'retry_message') {
-            const wait = k.pairRate ? 4 ** Math.min(m.attempts, 6) : [60, 300, 900, 3600][Math.min(m.attempts - 1, 3)];
-            if (m.attempts >= 5) await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, `${k.text} (gave up after ${m.attempts} tries)`]);
-            else await q("UPDATE messages SET status='queued', error=$2, next_attempt_at=now() + make_interval(secs => $3), updated_at=now() WHERE id=$1", [m.id, k.text, wait]);
-            if (c.channel === 'email' && /connection|reach|closed|timed out/i.test(k.text)) { await release(rest()); stop = true; break; }
-          } else if (k.action === 'fail_message') {
-            await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
-          } else if (k.action === 'opted_out') {
-            await q("INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [c.user_id, c.channel, m.address, k.text]);
-            await q("UPDATE messages SET status='skipped', skip_reason='Opted out', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
-          } else {
-            // Provider-level problem: put this message back untouched and stop.
-            await q("UPDATE messages SET status='queued', attempts=GREATEST(attempts-1,0), updated_at=now() WHERE id=$1", [m.id]);
-            await release(rest());
-            if (k.action === 'hold_sender') {
-              const secs = k.seconds || backoffSeconds(c.channel, sender.hold_level);
-              await holdSender(sender, secs, `${k.text} Waiting as instructed, then continuing automatically.`, !k.seconds);
-            } else if (k.action === 'pause_campaign') {
-              if (k.seconds) await holdSender(sender, k.seconds, k.text, false);
-              await pauseCampaign(c.id, k.text);
-            } else if (k.action === 'sender_broken') {
-              await q("UPDATE senders SET status='error', last_error=$2, updated_at=now() WHERE id=$1", [sender.id, k.text]);
-              await q("UPDATE campaigns SET status='paused', paused_reason=$2 WHERE sender_id=$1 AND status='active'", [sender.id, k.text]);
-            }
-            note = k.text; stop = true; break;
-          }
-        }
+      const opted = await one('SELECT 1 AS x FROM suppressions WHERE user_id=$1 AND channel=$2 AND address=$3', [c.user_id, c.channel, m.address]);
+      if (opted) { await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE id=$1", [m.id]); continue; }
+      if (c.skip_already_received) {
+        const dup = await one(`SELECT 1 AS x FROM messages WHERE user_id=$1 AND channel=$2 AND address=$3 AND content_hash=$4 AND campaign_id<>$5
+          AND status IN ('sending','sent','delivered','read','unknown') LIMIT 1`, [c.user_id, c.channel, m.address, c.content_hash, c.id]);
+        if (dup) { await q("UPDATE messages SET status='skipped', skip_reason='Already received this message', updated_at=now() WHERE id=$1", [m.id]); continue; }
       }
-      if (stop) break;
+      // Limits (checked before every new person).
+      if (c.channel === 'email' ? cap.left <= 0 : (cap.left <= 0 && !(cap.recent && cap.recent.has(m.address)))) {
+        await release([m.id]);
+        await holdSender(sender, Math.max(60, (cap.resumeAt - Date.now()) / 1000), `${cap.why}. Resumes automatically at the time shown.`, false);
+        note = cap.why; break;
+      }
+
+      let providerId; let sendError = null;
+      try {
+        if (c.channel === 'email') {
+          const unsub = unsubscribeUrl(c.user_id, 'email', m.address, shop.name);
+          const body = fillPlaceholders(c.body, m.vars);
+          const images = media.filter((x) => x.kind === 'image').map((x, n) => ({ ...x, cid: `img${n}@sheetsender` }));
+          const built = buildEmail({
+            fromName: sender.info.from_name, fromEmail: sender.info.email, replyTo: sender.info.reply_to, to: m.address, toName: m.recipient_name,
+            subject: fillPlaceholders(c.subject, m.vars), text: emailText(body, { unsubscribeUrl: unsub, shopName: shop.name }),
+            html: emailHtml(body, { images, unsubscribeUrl: unsub, shopName: shop.name }), inline: images, attachments: media.filter((x) => x.kind !== 'image'), unsubscribeUrl: unsub,
+          });
+          await session.send({ to: m.address, data: built.data });
+          providerId = built.messageId;
+        } else {
+          providerId = await wa.sendTemplate(creds, m.address, wa.buildTemplateMessage(c.template.info, m.vars, c.wa_media?.id));
+        }
+      } catch (e) { sendError = e; }
+
+      if (!sendError) {
+        // If this update fails the row stays "sending" and later becomes "unknown" — never resent automatically.
+        await q("UPDATE messages SET status='sent', provider_id=$2, sent_at=now(), error=NULL, updated_at=now() WHERE id=$1", [m.id, providerId || null]);
+        sentCount++;
+        cap.left--; cap.recent?.add(m.address);
+        if (sender.hold_level) { sender.hold_level = 0; await q('UPDATE senders SET hold_level=0, hold_reason=NULL WHERE id=$1', [sender.id]); }
+        continue;
+      }
+
+      if (sendError.ambiguous) {
+        await q("UPDATE messages SET status='unknown', sent_at=now(), error=$2, updated_at=now() WHERE id=$1",
+          [m.id, `No clear answer from ${c.channel === 'email' ? 'the email server' : 'WhatsApp'} after the message was handed over (${String(sendError.message).slice(0, 120)}). It may have arrived, so it was not sent again automatically.`]);
+        cap.left--; cap.recent?.add(m.address);
+        if (c.channel === 'email') { note = 'Connection problem with the email server.'; break; }
+        continue;
+      }
+
+      const k = c.channel === 'email' ? email.classifyEmailError(sendError) : wa.classifyWaError(sendError);
+      if (k.action === 'retry_message') {
+        const wait = k.pairRate ? 4 ** Math.min(m.attempts, 6) : [60, 300, 900, 3600][Math.min(m.attempts - 1, 3)];
+        if (m.attempts >= 5) await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, `${k.text} (gave up after ${m.attempts} tries)`]);
+        else await q("UPDATE messages SET status='queued', error=$2, next_attempt_at=now() + make_interval(secs => $3), updated_at=now() WHERE id=$1", [m.id, k.text, wait]);
+        if (c.channel === 'email' && k.network) { note = k.text; break; } // the mail session is broken; reconnect next round
+      } else if (k.action === 'fail_message') {
+        await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
+      } else if (k.action === 'opted_out') {
+        await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [c.user_id, c.channel, m.address, k.text]);
+        await q("UPDATE messages SET status='skipped', skip_reason='Opted out', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
+      } else {
+        // Provider-level problem: put this message back untouched and stop.
+        await release([m.id]);
+        if (k.action === 'hold_sender') {
+          const secs = k.seconds || backoffSeconds(c.channel, sender.hold_level);
+          await holdSender(sender, secs, `${k.text} Waiting as instructed, then continuing automatically.`, !k.seconds);
+        } else if (k.action === 'pause_campaign') {
+          if (k.seconds) await holdSender(sender, k.seconds, k.text, false);
+          await pauseCampaign(c.id, k.text);
+        } else if (k.action === 'sender_broken') {
+          await q("UPDATE senders SET status='error', last_error=$2, updated_at=now() WHERE id=$1", [sender.id, k.text]);
+          await q("UPDATE campaigns SET status='paused', paused_reason=$2 WHERE sender_id=$1 AND status='active'", [sender.id, k.text]);
+        }
+        note = k.text; break;
+      }
     }
   } finally {
     if (session) await session.close();
@@ -217,34 +224,42 @@ export async function finishIfDone(id) {
     AND NOT EXISTS (SELECT 1 FROM messages WHERE campaign_id=$1 AND status IN ('queued','sending'))`, [id]);
 }
 
+// Only one sender loop runs at a time (automatic ticks and manual "Send next" share this lock),
+// so limits are counted correctly and no message is claimed twice.
 let running = false;
-export async function tick({ budgetMs = 40000 } = {}) {
-  if (running || !pool) return { skipped: true };
+export async function withSendLock(fn) {
+  if (running || !pool) return { busy: true };
   running = true;
+  try {
+    return await pool.withClient(async (lockConn) => {
+      const got = (await lockConn.query('SELECT pg_try_advisory_lock(727001) AS ok')).rows[0].ok;
+      if (!got) return { busy: true };
+      try { return await fn(); } finally { await lockConn.query('SELECT pg_advisory_unlock(727001)').catch(() => {}); }
+    });
+  } finally { running = false; }
+}
+
+export async function tick({ budgetMs = 40000 } = {}) {
   const deadline = Date.now() + budgetMs;
   const out = [];
   try {
-    await pool.withClient(async (lockConn) => {
-      const got = (await lockConn.query('SELECT pg_try_advisory_lock(727001) AS ok')).rows[0].ok;
-      if (!got) return;
-      try {
-        // A message stuck in "sending" (e.g. the server restarted mid-send) might have been delivered — never resend it automatically.
-        await q(`UPDATE messages SET status='unknown', error='Sending was interrupted (server restart). It may or may not have arrived, so it was not sent again automatically.', updated_at=now()
-                 WHERE status='sending' AND updated_at < now() - interval '10 minutes'`);
-        const active = await rows("SELECT id FROM campaigns WHERE status='active' AND mode='auto' ORDER BY activated_at");
-        for (const c of active) {
-          if (Date.now() > deadline) break;
-          try { out.push({ id: c.id, ...(await processCampaign(c.id, { deadline })) }); } catch (e) { console.error('campaign', c.id, e); }
-        }
-        const stale = await rows("SELECT id FROM campaigns WHERE status='active'");
-        for (const c of stale) await finishIfDone(c.id);
-      } finally {
-        await lockConn.query('SELECT pg_advisory_unlock(727001)');
+    const r = await withSendLock(async () => {
+      // A message stuck in "sending" (e.g. the server restarted mid-send) might have been delivered — never resend it automatically.
+      await q(`UPDATE messages SET status='unknown', error='Sending was interrupted (server restart). It may or may not have arrived, so it was not sent again automatically.', updated_at=now()
+               WHERE status='sending' AND updated_at < now() - interval '10 minutes'`);
+      const active = await rows("SELECT id FROM campaigns WHERE status='active' AND mode='auto' ORDER BY activated_at");
+      for (const c of active) {
+        if (Date.now() > deadline) break;
+        try { out.push({ id: c.id, ...(await processCampaign(c.id, { deadline })) }); } catch (e) { console.error('campaign', c.id, e.message); }
       }
+      const stale = await rows("SELECT id FROM campaigns WHERE status='active'");
+      for (const c of stale) await finishIfDone(c.id);
+      return {};
     });
+    if (r?.busy) return { skipped: true };
   } catch (e) {
     console.error('tick failed:', e.message);
-  } finally { running = false; }
+  }
   return { campaigns: out };
 }
 

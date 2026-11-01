@@ -59,5 +59,5 @@ export function classifyEmailError(e) {
     return { action: 'fail_message', text: `The email address was rejected: ${text.slice(0, 200)}` };
   }
   if (code >= 500) return { action: 'fail_message', text: `The email provider refused this message: ${text.slice(0, 200)}` };
-  return { action: 'retry_message', text: `Temporary problem: ${text.slice(0, 200)}` };
+  return { action: 'retry_message', network: e.kind === 'network' || !code, text: `Temporary problem: ${text.slice(0, 200)}` };
 }

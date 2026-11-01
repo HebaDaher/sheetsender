@@ -15,8 +15,10 @@ export const FIELDS = [
 
 function cleanCell(v) {
   let s = String(v ?? '').replace(/ /g, ' ').trim();
-  // Excel sometimes stores long phone numbers as 9.71501234567E+11
-  if (/^\d(\.\d+)?E\+\d+$/i.test(s)) { const n = Number(s); if (Number.isSafeInteger(n)) s = String(n); }
+  // Excel may store long numbers as 9.71501234567E+11. Convert only when no digits were lost
+  // (e.g. "9.71502E+11" from a CSV has lost digits, so it is left as-is and later rejected as invalid).
+  const sci = s.match(/^(\d)(?:\.(\d+))?E\+(\d+)$/i);
+  if (sci && 1 + (sci[2] || '').length === Number(sci[3]) + 1) { const n = Number(s); if (Number.isSafeInteger(n)) s = String(n); }
   // Whole numbers stored as 971501234567.0
   if (/^\d{6,}\.0+$/.test(s)) s = s.replace(/\.0+$/, '');
   return s;
@@ -52,7 +54,7 @@ export function parseSpreadsheet(buf, filename) {
     try { wb = readWorkbook(buf); } catch { throw new Error('This file could not be read as an Excel workbook. Open it in Excel and use File → Save As → Excel Workbook (.xlsx).'); }
     grid = [];
     for (const s of wb.sheets) {
-      const g = readSheet(buf, s.name);
+      const g = readSheet(wb, s.name);
       if (g.some((r) => r.some((c) => String(c).trim()))) { grid = g; break; }
     }
   } else if (lower.endsWith('.xls')) {

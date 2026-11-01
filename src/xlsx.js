@@ -2,6 +2,7 @@
 import zlib from 'node:zlib';
 
 // ---------- ZIP ----------
+const MAX_TOTAL = 100 * 1024 * 1024; // protects the server against "zip bomb" files
 export function unzip(buf) {
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
@@ -11,17 +12,25 @@ export function unzip(buf) {
   const count = buf.readUInt16LE(eocd + 10);
   let p = buf.readUInt32LE(eocd + 16);
   const entries = [];
+  let budget = MAX_TOTAL;
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error('Corrupt .xlsx (central directory)');
     const method = buf.readUInt16LE(p + 10);
     const csize = buf.readUInt32LE(p + 20);
+    const usize = buf.readUInt32LE(p + 24);
     const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
     const local = buf.readUInt32LE(p + 42);
     const name = buf.subarray(p + 46, p + 46 + nameLen).toString('utf8');
     const lNameLen = buf.readUInt16LE(local + 26), lExtraLen = buf.readUInt16LE(local + 28);
     const start = local + 30 + lNameLen + lExtraLen;
     const raw = buf.subarray(start, start + csize);
-    const data = method === 0 ? Buffer.from(raw) : method === 8 ? zlib.inflateRawSync(raw) : null;
+    const wanted = name.startsWith('xl/') && name.endsWith('.xml') || name.endsWith('.rels');
+    if (!wanted) { p += 46 + nameLen + extraLen + commentLen; continue; }
+    if (usize > budget) throw new Error('This file is too large to read (more than 100 MB of data inside). Save a smaller copy with only the customer columns.');
+    let data;
+    try { data = method === 0 ? Buffer.from(raw) : method === 8 ? zlib.inflateRawSync(raw, { maxOutputLength: budget }) : null; }
+    catch { throw new Error('This file is too large or damaged to read. Save a smaller copy with only the customer columns.'); }
+    budget -= data ? data.length : 0;
     if (!data) throw new Error('Unsupported compression in .xlsx');
     entries.push({ name, data });
     p += 46 + nameLen + extraLen + commentLen;
@@ -66,8 +75,8 @@ export function readWorkbook(buf) {
 }
 
 // Returns rows as arrays of strings (row index 0 = sheet row 1).
-export function readSheet(buf, sheetName) {
-  const wb = readWorkbook(buf);
+export function readSheet(bufOrWb, sheetName) {
+  const wb = Buffer.isBuffer(bufOrWb) ? readWorkbook(bufOrWb) : bufOrWb;
   const sheet = wb.sheets.find((s) => s.name === sheetName) || wb.sheets[0];
   if (!sheet) throw new Error('Workbook has no sheets');
   const xml = wb.files.get(sheet.path)?.toString('utf8') || '';

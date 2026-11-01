@@ -34,6 +34,7 @@ export const COUNTRIES = {
 export function normalizePhone(raw, defaultCountry = 'AE') {
   let s = String(raw || '').trim();
   if (!s) return null;
+  if (/\d[.,]?\d*e[+-]?\d/i.test(s)) return null; // scientific notation: digits were lost in Excel/CSV
   s = s.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
   s = s.replace(/(ext|x|#).*$/i, '');
   const plus = /^\s*\+/.test(s);
@@ -57,7 +58,7 @@ export function normalizePhone(raw, defaultCountry = 'AE') {
 }
 
 const YES = new Set(['yes', 'y', 'true', '1', 'ok', 'opted in', 'opt-in', 'opt in', 'optin', 'opted-in', 'subscribed', 'consented', 'consent given',
-  'agreed', 'agree', 'accepted', 'granted', 'allowed', 'x', '✓', '✔', '☑', 'نعم', 'موافق', 'موافقة', 'اي', 'ايوه', 'أوافق', 'اوافق']);
+  'agreed', 'agree', 'accepted', 'granted', 'allowed', '✓', '✔', '☑', 'نعم', 'موافق', 'موافقة', 'اي', 'ايوه', 'أوافق', 'اوافق']);
 
 export function parseConsent(raw) {
   return YES.has(String(raw ?? '').trim().toLowerCase());

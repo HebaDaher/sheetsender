@@ -443,6 +443,62 @@ test('WhatsApp messaging limit (unique people per 24h) is enforced', async () =>
   assert.equal((await one("SELECT count(*)::int AS n FROM messages WHERE campaign_id=$1 AND status='queued'", [id])).n, 3);
 });
 
+test('review fixes: unclear sends become "check manually", copies while queued, any opt-out button, lost-digit phones', async () => {
+  // Email: connection dropped after the whole email was handed over → unknown, not resent.
+  await db.q('UPDATE senders SET hold_until=NULL, daily_limit=500 WHERE id=$1', [ids.emailSender]);
+  await A.get('/shops');
+  let r = await A.post('/shops', { name: 'Review shop' });
+  const shop = r.location.match(/\/shops\/(\d+)/)[1];
+  const csv = 'Name,Email,WhatsApp,Consent\nR1,r1@example.com,+971551110001,yes\nR2,r2@example.com,+971551110002,yes\nR3,r3@example.com,9.71551E+11,yes\n';
+  r = await A.post(`/shops/${shop}/upload`, {}, [{ field: 'file', name: 'r.csv', data: Buffer.from(csv) }]);
+  await A.post(`/uploads/${r.location.match(/uploads\/(\d+)/)[1]}/map`, { name: 'Name', email: 'Email', whatsapp: 'WhatsApp', consent: 'Consent', country: 'AE' });
+  assert.equal((await one("SELECT phone FROM contacts WHERE name='R3'")).phone, null); // lost digits → invalid, never a stranger's number
+  await A.get(`/campaigns/new?shop=${shop}`);
+  r = await A.post('/campaigns', { name: 'Ambiguous', shop_id: shop, sender_id: ids.emailSender });
+  const id = r.location.match(/campaigns\/(\d+)/)[1];
+  r = await A.post(`/campaigns/${id}/edit`, { subject: 'Amb', body: 'unclear', audience: 'all', skip_already: '1', action: 'preview' });
+  let key = r.text.match(/name="key" value="([^"]+)"/)[1];
+  await A.post(`/campaigns/${id}/activate`, { key, mode: 'auto', confirm: '1' });
+  // A copy activated while the original is still queued must skip everyone.
+  r = await A.post(`/campaigns/${id}/duplicate`, {});
+  const copy = r.location.match(/campaigns\/(\d+)/)[1];
+  r = await A.get(`/campaigns/${copy}/preview`);
+  assert.match(r.text, /skipped: already received this message/); assert.doesNotMatch(r.text, /Activate campaign/);
+  smtp.state.next.push({ at: 'data', drop: true });
+  const n0 = smtp.state.mails.length;
+  await worker.tick();
+  await worker.tick();
+  const st = await db.rows('SELECT address, status FROM messages WHERE campaign_id=$1 AND status<>$2 ORDER BY id', [id, 'skipped']);
+  assert.deepEqual(st.map((x) => x.status), ['unknown', 'sent', 'sent']);
+  assert.equal(smtp.state.mails.filter((m, i) => i >= n0 && m.to === st[0].address).length, 1); // handed over once only
+
+  // WhatsApp: server error after sending → unknown; "Stop offers" button tap → opt-out.
+  await db.q("UPDATE senders SET hold_until=NULL, info = info || '{\"limit\": null, \"limit_raw\": \"TIER_UNLIMITED\"}'::jsonb WHERE id=$1", [ids.waSender]);
+  await A.get(`/campaigns/new?shop=${shop}`);
+  r = await A.post('/campaigns', { name: 'WA amb', shop_id: shop, sender_id: ids.waSender });
+  const wid = r.location.match(/campaigns\/(\d+)/)[1];
+  await A.post(`/campaigns/${wid}/edit`, { template: 'plain_offer|ar', audience: 'all', skip_already: '1', action: 'save' });
+  r = await A.post(`/campaigns/${wid}/edit`, { template: 'plain_offer|ar', 'src:body:1': 'name', 'val:body:1': '', audience: 'all', skip_already: '1', action: 'preview' });
+  key = r.text.match(/name="key" value="([^"]+)"/)[1];
+  await A.post(`/campaigns/${wid}/activate`, { key, mode: 'auto', confirm: '1' });
+  await db.q("UPDATE campaigns SET status='cancelled' WHERE status='active' AND id<>$1", [wid]); // isolate from earlier tests
+  graph.state.next.push({ status: 500, code: 1, message: 'Internal error' });
+  await worker.tick();
+  const ws = await db.rows('SELECT status FROM messages WHERE campaign_id=$1 AND status<>$2 ORDER BY id', [wid, 'skipped']);
+  assert.deepEqual(ws.map((x) => x.status), ['unknown', 'sent']);
+  const payload = JSON.stringify({ entry: [{ changes: [{ value: { metadata: { phone_number_id: WA.pnid }, messages: [{ from: '971551110002', type: 'button', button: { text: 'Stop offers', payload: 'Stop offers' } }] } }] }] });
+  const sig = 'sha256=' + crypto.createHmac('sha256', WA.appSecret).update(payload).digest('hex');
+  await fetch(base + ids.hook, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': sig }, body: payload });
+  await new Promise((x) => setTimeout(x, 300));
+  assert.ok(await one("SELECT 1 AS x FROM suppressions WHERE channel='whatsapp' AND address='971551110002'"));
+  // Spoofed X-Forwarded-For does not bypass the login limit.
+  let last;
+  for (let i = 0; i < 22; i++) {
+    last = await fetch(base + '/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Forwarded-For': `10.0.0.${i}, 203.0.113.7` }, body: 'email=nobody@example.com&password=x' });
+  }
+  assert.equal(last.status, 429);
+});
+
 test('token problems pause campaigns instead of failing messages', async () => {
   const k = (await import('../src/providers/whatsapp.js')).classifyWaError({ code: 190, message: 'expired', status: 401 });
   assert.equal(k.action, 'sender_broken');

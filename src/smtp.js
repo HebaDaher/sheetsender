@@ -85,8 +85,14 @@ export class SmtpClient {
     await this.cmd('DATA', 354);
     const body = data.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
     this.sock.write(body + (body.endsWith('\r\n') ? '' : '\r\n') + '.\r\n');
-    const r = await this.cmd(null, 250, 'data');
-    return { response: r.text };
+    try {
+      const r = await this.cmd(null, 250, 'data');
+      return { response: r.text };
+    } catch (e) {
+      // The whole email was handed over but no answer came back: it may have been accepted. Never resend automatically.
+      if (!e.responseCode) e.ambiguous = true;
+      throw e;
+    }
   }
 
   async reset() { try { await this.cmd('RSET', 250); } catch {} }

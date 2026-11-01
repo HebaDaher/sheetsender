@@ -130,8 +130,10 @@ export async function handleWebhook(userId, senders, payload) {
         }
       }
       for (const msg of v.messages || []) {
-        const text = msg.text?.body ?? msg.button?.text ?? msg.button?.payload ?? msg.interactive?.button_reply?.title ?? '';
-        if (!wa.STOP_WORDS.test(text) && !/^(STOP|MARKETING_OPT_OUT)$/i.test(msg.button?.payload || '')) continue;
+        const buttonTexts = [msg.button?.text, msg.button?.payload, msg.interactive?.button_reply?.title, msg.interactive?.button_reply?.id].filter(Boolean);
+        const text = msg.text?.body ?? buttonTexts[0] ?? '';
+        const isStop = wa.STOP_WORDS.test(text) || buttonTexts.some((t) => wa.OPT_OUT_BUTTON.test(t) || /^MARKETING_OPT_OUT$/i.test(t));
+        if (!isStop) continue;
         const from = String(msg.from || '').replace(/\D/g, '');
         await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [userId, 'whatsapp', from, `Replied "${String(text).slice(0, 40)}" on WhatsApp`]);
         await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE user_id=$1 AND channel='whatsapp' AND address=$2 AND status='queued'", [userId, from]);

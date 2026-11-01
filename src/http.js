@@ -18,7 +18,7 @@ export class Router {
     for (const r of this.routes) {
       if (r.method !== method && !(method === 'HEAD' && r.method === 'GET')) continue;
       const m = pathname.match(r.re);
-      if (m) return { route: r, params: Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])) };
+      if (m) { try { return { route: r, params: Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])) }; } catch { return null; } }
     }
     return null;
   }
@@ -86,7 +86,7 @@ export function parseCookies(header = '') {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('='); if (i < 0) continue;
-    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch {}
   }
   return out;
 }
@@ -131,5 +131,6 @@ export function rateLimit(key, max, windowMs) {
 }
 
 export function clientIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+  // The hosting proxy appends the real client address as the LAST entry; earlier entries can be faked by the client.
+  return (req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean).pop() || req.socket.remoteAddress || '';
 }

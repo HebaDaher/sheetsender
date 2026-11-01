@@ -10,7 +10,7 @@ import * as wa from '../providers/whatsapp.js';
 import * as email from '../providers/email.js';
 import { buildEmail } from '../mime.js';
 import { computeRecipients, summarize, activateCampaign, campaignCounts, emailVars, waValues, renderWaPreview, fillPlaceholders, emailHtml, emailText, SOURCES } from '../campaigns.js';
-import { processCampaign, withinHours, unsubscribeUrl } from '../worker.js';
+import { processCampaign, withSendLock, withinHours, unsubscribeUrl } from '../worker.js';
 
 const EDITABLE = (c) => c.status === 'draft';
 
@@ -333,7 +333,7 @@ export default function register(r) {
 
   async function statusData(c, user) {
     const counts = await campaignCounts(c.id);
-    const sender = c.sender_id ? await one('SELECT label, hold_until, hold_reason, status FROM senders WHERE id=$1', [c.sender_id]) : null;
+    const sender = c.sender_id ? await one('SELECT label, hold_until, hold_reason, status FROM senders WHERE id=$1 AND user_id=$2', [c.sender_id, user.id]) : null;
     let waiting = null;
     if (c.status === 'active') {
       if (sender?.hold_until && new Date(sender.hold_until) > new Date()) waiting = `Waiting until ${fmtDate(sender.hold_until, user.timezone)} — ${sender.hold_reason}`;
@@ -356,7 +356,7 @@ export default function register(r) {
     const c = await owned('campaigns', ctx.params.id, ctx.user);
     if (EDITABLE(c)) return ctx.go(`/campaigns/${c.id}/edit`);
     const shop = await owned('shops', c.shop_id, ctx.user);
-    const sender = c.sender_id ? await one('SELECT * FROM senders WHERE id=$1', [c.sender_id]) : null;
+    const sender = c.sender_id ? await one('SELECT * FROM senders WHERE id=$1 AND user_id=$2', [c.sender_id, ctx.user.id]) : null;
     const d = await statusData(c, ctx.user);
     const filter = ['queued', 'sent', 'delivered', 'read', 'failed', 'skipped', 'unknown', 'cancelled'].includes(ctx.query.show) ? ctx.query.show : null;
     const msgs = await rows(`SELECT * FROM messages WHERE campaign_id=$1 ${filter ? 'AND status=$2' : ''} ORDER BY (status IN ('failed','unknown')) DESC, id LIMIT 500`, filter ? [c.id, filter] : [c.id]);
@@ -398,7 +398,7 @@ export default function register(r) {
 
   r.post('/campaigns/:id/resume', async (ctx) => {
     const c = await owned('campaigns', ctx.params.id, ctx.user);
-    const sender = c.sender_id ? await one('SELECT status FROM senders WHERE id=$1', [c.sender_id]) : null;
+    const sender = c.sender_id ? await one('SELECT status FROM senders WHERE id=$1 AND user_id=$2', [c.sender_id, ctx.user.id]) : null;
     if (sender?.status !== 'verified') return ctx.go(`/campaigns/${c.id}`, { err: 'The sender needs attention first (Senders page).' });
     await q("UPDATE campaigns SET status='active', paused_reason=NULL WHERE id=$1 AND status='paused'", [c.id]);
     ctx.go(`/campaigns/${c.id}`, { ok: 'Resumed.' });
@@ -421,7 +421,8 @@ export default function register(r) {
     const c = await owned('campaigns', ctx.params.id, ctx.user);
     if (c.status !== 'active') return ctx.go(`/campaigns/${c.id}`, { err: 'The campaign is not active.' });
     const count = Math.min(Math.max(Number(ctx.body.count) || 1, 1), 50);
-    const out = await processCampaign(c.id, { deadline: Date.now() + 25000, limit: count, manual: true });
+    const out = await withSendLock(() => processCampaign(c.id, { deadline: Date.now() + 25000, limit: count, manual: true }));
+    if (out.busy) return ctx.go(`/campaigns/${c.id}`, { err: 'The app is sending another campaign right now. Try again in a few seconds.' });
     ctx.go(`/campaigns/${c.id}`, out.sent ? { ok: `Sent ${plural(out.sent, 'message')}.${out.note ? ' ' + out.note : ''}` } : { err: out.note || 'Nothing was sent.' });
   });
 

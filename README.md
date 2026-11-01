@@ -6,7 +6,7 @@ A hosted web app for sending your own customers an **email** or an **official Wh
 
 Upload a file → choose a shop and recipients → choose your verified sender → write or attach the message → preview → activate automatic sending → track progress (queued / sent / delivered / failed), pause or cancel at any time.
 
-> The previous "run on your Mac" version is kept in git under the tag `mac-version`.
+> The previous "run on your Mac" version is kept in the git history (commit `9fbec70`).
 
 ## How it works
 

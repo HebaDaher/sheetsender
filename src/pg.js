@@ -82,47 +82,51 @@ class Connection {
 
   connect() {
     return new Promise((resolve, reject) => {
-      const fail = (e) => { this.dead = true; reject(e); };
-      let sock = net.connect({ host: this.cfg.host, port: this.cfg.port });
-      sock.setKeepAlive(true, 30000);
-      sock.setTimeout(20000, () => sock.destroy(new Error('Database connection timed out')));
-      const startup = () => {
+      let settled = false;
+      const done = (err, val) => { if (settled) return; settled = true; if (err) reject(err); else resolve(val); };
+      const raw = net.connect({ host: this.cfg.host, port: this.cfg.port });
+      raw.setKeepAlive(true, 30000);
+      raw.setTimeout(20000, () => raw.destroy(new Error('Database connection timed out')));
+      const early = (e) => { this.onDead(e); done(e); };
+      raw.on('error', early);
+      raw.on('close', () => early(new Error('Database connection closed')));
+      const startup = (sock) => {
+        raw.setTimeout(0);
         this.sock = sock;
-        sock.setTimeout(0);
         sock.on('data', (d) => this.onData(d));
-        sock.on('error', (e) => this.onDead(e));
-        sock.on('close', () => this.onDead(new Error('Database connection closed')));
-        this.authDone = { resolve, reject: fail };
+        if (sock !== raw) { sock.on('error', early); sock.on('close', () => early(new Error('Database connection closed'))); }
+        this.authDone = { resolve: (v) => done(null, v), reject: (e) => done(e) };
         const params = Buffer.concat([cstr('user'), cstr(this.cfg.user), cstr('database'), cstr(this.cfg.database),
           cstr('client_encoding'), cstr('UTF8'), Buffer.from([0])]);
         const body = Buffer.concat([i32(196608), params]);
         sock.write(Buffer.concat([i32(body.length + 4), body]));
       };
-      sock.once('error', fail);
-      sock.once('connect', () => {
-        if (!this.cfg.ssl) return startup();
-        sock.write(Buffer.concat([i32(8), i32(80877103)]));
-        sock.once('data', (d) => {
-          if (d[0] !== 0x53) return fail(new Error('Database server does not support SSL'));
-          sock.removeAllListeners('error');
-          const opts = { socket: sock };
+      raw.once('connect', () => {
+        if (!this.cfg.ssl) return startup(raw);
+        raw.write(Buffer.concat([i32(8), i32(80877103)]));
+        raw.once('data', (d) => {
+          if (d[0] !== 0x53) { raw.destroy(); return early(new Error('Database server does not support SSL')); }
+          const opts = { socket: raw };
           if (!net.isIP(this.cfg.host)) opts.servername = this.cfg.host;
           if (this.cfg.ca) { opts.ca = this.cfg.ca; opts.rejectUnauthorized = true; } else opts.rejectUnauthorized = false;
-          const t = tls.connect(opts, () => { sock = t; startup(); });
-          t.once('error', fail);
+          const t = tls.connect(opts, () => startup(t));
+          t.on('error', early);
         });
       });
     });
   }
 
   onDead(err) {
-    if (this.dead) return; this.dead = true;
+    clearTimeout(this.timer);
+    if (this.dead && !this.current && !this.queue.length && !this.authDone) return;
+    const first = !this.dead; this.dead = true;
+    try { this.sock?.destroy(); } catch {}
     const e = err || new Error('Database connection lost');
     if (this.current) { this.current.reject(e); this.current = null; }
     for (const q of this.queue) q.reject(e);
     this.queue = [];
     if (this.authDone) { this.authDone.reject(e); this.authDone = null; }
-    this.onClose?.();
+    if (first) this.onClose?.();
   }
 
   onData(d) {
@@ -149,6 +153,7 @@ class Connection {
     }
     if (type === 'Z') {
       if (this.authDone) { const a = this.authDone; this.authDone = null; this.ready = true; return a.resolve(this); }
+      clearTimeout(this.timer);
       const cur = this.current; this.current = null;
       if (cur) { if (cur.error) cur.reject(cur.error); else cur.resolve(cur.result); }
       return this.next();
@@ -218,6 +223,7 @@ class Connection {
     if (this.current || !this.queue.length || this.dead) return;
     this.current = this.queue.shift();
     this.lastUsed = Date.now();
+    this.timer = setTimeout(() => this.onDead(new Error('Database query timed out')), 120000);
     this.sock.write(this.current.packet);
   }
 

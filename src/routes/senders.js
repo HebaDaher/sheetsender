@@ -86,6 +86,7 @@ export default function register(r) {
       const hint = k.action === 'sender_broken' ? ' Check the email address and the app password (Gmail needs an App password, not your normal password).' : '';
       return ctx.go('/senders/new/email', { err: `Could not sign in to the email server: ${e.message}.${hint}` });
     }
+    if (await one("SELECT 1 AS x FROM senders WHERE user_id=$1 AND channel='email' AND lower(info->>'email')=$2", [ctx.user.id, addr])) return ctx.go('/senders', { err: 'This email address is already connected. Open it to change its app password.' });
     const s = await one(`INSERT INTO senders (user_id, channel, label, status, secrets, info, daily_limit) VALUES ($1,'email',$2,'unverified',$3,$4,$5) RETURNING *`,
       [ctx.user.id, str(b.label, 60) || addr, encryptJson({ password }), info, limit]);
     try { await sendCode(s, { password }); } catch (e) { return ctx.go(`/senders/${s.id}`, { err: `Signed in, but the code email could not be sent: ${e.message}` }); }
@@ -269,9 +270,11 @@ export default function register(r) {
     let media = null;
     const f = ctx.files.find((x) => x.field === 'media');
     if (f) { try { media = checkMedia(f, 'whatsapp'); } catch (e) { return ctx.go(back, { err: e.message }); } }
+    const buttonText = str(ctx.body.button, 25) || 'Stop promotions';
+    if (!wa.OPT_OUT_BUTTON.test(buttonText)) return ctx.go(back, { err: 'The button must clearly say it stops messages, e.g. "Stop promotions" or "إيقاف العروض".' });
     const language = ['en', 'ar', 'en_US', 'en_GB'].includes(ctx.body.language) ? ctx.body.language : 'en';
     try {
-      const out = await wa.createTemplate({ ...s.info, ...decryptJson(s.secrets) }, { name, language, bodyText, footerText: str(ctx.body.footer, 60), buttonText: str(ctx.body.button, 25) || 'Stop promotions', media });
+      const out = await wa.createTemplate({ ...s.info, ...decryptJson(s.secrets) }, { name, language, bodyText, footerText: str(ctx.body.footer, 60), buttonText, media });
       ctx.go(`/senders/${s.id}`, { ok: `Template "${name}" submitted — Meta status: ${out.status || 'PENDING'}. Reload this page later to see when it is approved.` });
     } catch (e) { ctx.go(back, { err: `Meta did not accept the template: ${e.message}` }); }
   });
