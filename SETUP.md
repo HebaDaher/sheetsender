@@ -9,7 +9,7 @@ Everything here uses free plans. The only thing that costs money is WhatsApp its
 | Database | Supabase | Stores accounts, shops, customer lists, campaigns |
 | Hosting | Render | Runs the app at a secure `https://…onrender.com` link |
 | Scheduler | cron-job.org | Wakes the app every minute so campaigns keep sending |
-| Email | Your Gmail / Google Workspace | Sends the emails from **your** address |
+| Email | Your Gmail / Google Workspace (Gmail API) | Sends the emails from **your** addresses |
 | WhatsApp | Meta WhatsApp Business Platform (Cloud API) | Sends official WhatsApp template messages from **your** number |
 
 Time needed: about 30 minutes, plus Meta's checks for WhatsApp.
@@ -80,21 +80,34 @@ Render's free plan puts the app to sleep after 15 minutes without visitors. This
 
 > Render gives each workspace **750 free hours per month**, which is enough for exactly one app running all month. If you keep another free Render app awake in the same Render account, the hours run out before the month ends and Render pauses both until the 1st.
 
-## Step 5 — Connect your Gmail (email sender)
+## Step 5 — Connect your Gmail addresses ("Continue with Google")
 
-Customers will see emails coming from this address. The customer spreadsheet is never used as the sender.
+Render's free plan blocks normal email connections (SMTP), so SheetSender sends through **Google's official Gmail API** instead. You set this up once (5a); after that every Gmail address is connected with one click (5b).
 
-1. In Google: **myaccount.google.com** → **Security** → turn on **2-Step Verification** (if it isn't already).
-2. Open **myaccount.google.com/apppasswords** → App name `SheetSender` → **Create** → copy the 16-letter password (spaces don't matter).
-3. In the app: **Senders** → **Connect an email address**:
-   - **Name for this sender:** e.g. `GoSkate Gmail`
-   - **Email address:** your Gmail address
-   - **Name customers will see:** e.g. `GoSkate Dubai`
-   - **App password:** paste it → **Test and send verification code**
-4. Open that Gmail inbox, find the email **"SheetSender verification code: 123456"**, type the 6 digits in the app → **Verify**.
-   ✅ Check: the sender shows a green **VERIFIED** badge and "Daily limit: 500 per 24 hours" (2,000 for Google Workspace addresses).
+### 5a. One-time: create the Google sign-in key (free, no card)
+1. Go to **console.cloud.google.com** and sign in with your Google account. Accept the terms if asked.
+2. At the top, click the project picker → **New project** → name `SheetSender` → **Create**, then make sure **SheetSender** is selected at the top.
+3. Search for **Gmail API** in the top search bar → open it → **Enable**.
+4. Left menu **Google Auth Platform** (or **APIs & Services → OAuth consent screen**) → **Get started**:
+   - **App name:** `SheetSender`, **User support email:** your email → **Next**
+   - **Audience:** **External** → **Next**
+   - **Contact information:** your email → **Next** → tick the agreement → **Create**
+5. **Data access** → **Add or remove scopes** → find `.../auth/gmail.send` ("Send email on your behalf") → tick it → **Update** → **Save**.
+6. **Audience** → under **Publishing status** click **Publish app** → **Confirm**. (This keeps connections working permanently; in "Testing" mode Google disconnects them every 7 days.)
+7. **Clients** → **Create client**:
+   - **Application type:** Web application, **Name:** `SheetSender`
+   - **Authorized redirect URIs** → **Add URI** → `https://sheetsender.onrender.com/oauth/google/callback` (use your own Render link)
+   - **Create**. Copy the **Client ID** and **Client secret**.
+8. In Render → your service → **Environment** → add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` with those values → **Save, rebuild, and deploy**.
 
-If you later change your Google password, Google cancels the app password — campaigns pause and the sender page asks for a new one (**Change the app password**).
+### 5b. Connect each Gmail address
+1. In the app: **Senders** → **Connect an email address**.
+2. Type a label (only you see it) and the **name customers will see** (e.g. `GoSkate Dubai`) → **Continue with Google**.
+3. Choose the Gmail account. Google may say **"Google hasn't verified this app"** — that is normal for your own private app: click **Advanced** → **Go to SheetSender (unsafe)**.
+4. Tick **"Send email on your behalf"** → **Continue**. You are back in the app and the sender shows **VERIFIED**.
+5. Repeat for every Gmail address. Each one keeps its own Google limit (500 emails/day for Gmail, 2,000 for Google Workspace) — the app stays under it automatically.
+
+If you change a Google password or remove access, campaigns from that address pause and the sender page shows **Reconnect with Google**.
 
 ## Step 6 — Connect WhatsApp (official WhatsApp Business Platform)
 
@@ -190,7 +203,7 @@ Uploading a new file for a shop **replaces** that shop's list (the old list is d
 |---|---|
 | "Almost there — finish the hosting setup" | Add the missing setting shown on the page in Render → Environment. |
 | First page load takes ~1 minute | Render free plan was asleep. The cron-job (Step 4) prevents this. |
-| Email sender: "Could not sign in" | Use an **App password**, not your Gmail password. Check 2-Step Verification is on. |
+| Google says "redirect_uri_mismatch" | The redirect URI in Google Cloud (Step 5a.7) must be exactly your Render link + `/oauth/google/callback`. |
 | Campaign "Waiting until …" | A daily/WhatsApp limit or a provider slow-down. It continues by itself — nothing to do. |
 | Campaign paused with a reason | Read the reason, fix it (e.g. reconnect sender, check WhatsApp quality rating), then **Resume**. |
 | WhatsApp messages "failed (131026)" | That number can't receive WhatsApp (not on WhatsApp, or old app). |

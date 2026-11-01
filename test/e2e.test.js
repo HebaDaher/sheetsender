@@ -4,13 +4,13 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { startSmtp, startGraph, makeXlsx } from './mocks.js';
+import { startSmtp, startGraph, startGoogle, makeXlsx } from './mocks.js';
 
 const BASE_DB = process.env.TEST_DATABASE_URL;
 const key = fs.readFileSync(process.env.TEST_TLS_KEY); const cert = fs.readFileSync(process.env.TEST_TLS_CERT);
 const WA = { token: 'EAAtest', pnid: '1234567890', waba: '9876543210', appId: '5555555', appSecret: 'appsecret123' };
 
-let smtp, graph, server, base, db, worker, pgmod;
+let smtp, graph, google, server, base, db, worker, pgmod;
 
 async function freshDb() {
   const u = new URL(BASE_DB); const admin = new URL(BASE_DB); admin.pathname = '/postgres';
@@ -26,6 +26,10 @@ before(async () => {
   process.env.DATABASE_URL = await freshDb();
   process.env.APP_SECRET = crypto.randomBytes(32).toString('base64url');
   process.env.GRAPH_API_BASE = `http://127.0.0.1:${graph.port}`;
+  google = await startGoogle();
+  process.env.GOOGLE_CLIENT_ID = 'gid.apps.googleusercontent.com'; process.env.GOOGLE_CLIENT_SECRET = 'gsecret';
+  process.env.GOOGLE_AUTH_URL = 'https://accounts.example.test/o/oauth2/v2/auth';
+  process.env.GOOGLE_TOKEN_URL = `http://127.0.0.1:${google.port}/token`; process.env.GMAIL_API_BASE = `http://127.0.0.1:${google.port}`;
   process.env.SHEETSENDER_NO_LOOP = '1';
   process.env.PUBLIC_URL = 'http://127.0.0.1:0';
   db = await import('../src/db.js');
@@ -37,14 +41,16 @@ before(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
-after(() => { server?.close(); smtp?.server.close(); graph?.server.close(); db?.pool?.end(); });
+after(() => { google?.server.close(); server?.close(); smtp?.server.close(); graph?.server.close(); db?.pool?.end(); });
 
 class Browser {
   constructor() { this.cookie = ''; this.csrf = ''; this.html = ''; }
   async req(method, path, body) {
     const res = await fetch(base + path, { method, body, redirect: 'manual', headers: { Cookie: this.cookie, Accept: 'text/html' } });
     const sc = res.headers.getSetCookie?.() || [];
-    for (const c of sc) { const [kv] = c.split(';'); if (kv.startsWith('ss=')) this.cookie = kv.endsWith('=') ? '' : kv; }
+    this.jar ||= new Map();
+    for (const c of sc) { const [kv] = c.split(';'); const i = kv.indexOf('='); const k = kv.slice(0, i); const v = kv.slice(i + 1); if (v) this.jar.set(k, v); else this.jar.delete(k); }
+    this.cookie = [...this.jar].map(([k, v]) => `${k}=${v}`).join('; ');
     const text = await res.text();
     const m = text.match(/name="_csrf" value="([^"]+)"/); if (m) this.csrf = m[1];
     if (res.headers.get('content-type')?.includes('html')) this.html = text;
@@ -497,6 +503,90 @@ test('review fixes: unclear sends become "check manually", copies while queued, 
     last = await fetch(base + '/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Forwarded-For': `10.0.0.${i}, 203.0.113.7` }, body: 'email=nobody@example.com&password=x' });
   }
   assert.equal(last.status, 429);
+});
+
+test('Gmail via "Continue with Google": connect, send, limits, unclear sends, revoked access', async () => {
+  await db.q("UPDATE campaigns SET status='cancelled' WHERE status='active'");
+  await A.get('/senders/new/email');
+  assert.match(A.html, /Continue with Google/);
+  // Start → redirect to Google with our client id, send-only scope and a signed state.
+  let r = await A.req('GET', '/senders/google/start?label=Shop+Gmail&from_name=GoSkate+Dubai&reply_to=');
+  assert.equal(r.status, 303);
+  const loc = new URL(r.location);
+  assert.equal(loc.origin, 'https://accounts.example.test');
+  assert.equal(loc.searchParams.get('client_id'), 'gid.apps.googleusercontent.com');
+  assert.match(loc.searchParams.get('scope'), /gmail\.send/);
+  assert.equal(loc.searchParams.get('access_type'), 'offline');
+  const state = loc.searchParams.get('state');
+  // A forged/other state is refused; B cannot use A's state.
+  r = await A.get('/oauth/google/callback?code=good-code&state=bad');
+  assert.match(r.text, /expired or did not match/);
+  // (the nonce cookie was cleared, so start again)
+  r = await A.req('GET', '/senders/google/start?label=Shop+Gmail&from_name=GoSkate+Dubai&reply_to=');
+  const st2 = new URL(r.location).searchParams.get('state');
+  assert.notEqual(st2, state);
+  const bR = await B.get('/oauth/google/callback?code=good-code&state=' + encodeURIComponent(st2));
+  assert.ok(bR.status === 200 || bR.status === 404);
+  assert.ok(!(await one("SELECT 1 AS x FROM senders WHERE info->>'provider'='gmail_api'")));
+  r = await A.get('/oauth/google/callback?code=good-code&state=' + encodeURIComponent(st2));
+  assert.match(r.text, /connected and verified by Google/);
+  const s = await one("SELECT * FROM senders WHERE info->>'provider'='gmail_api'");
+  assert.equal(s.status, 'verified'); assert.equal(s.info.email, 'shop.gmail@gmail.com'); assert.equal(s.daily_limit, 500); assert.equal(s.info.from_name, 'GoSkate Dubai');
+  assert.doesNotMatch(s.secrets, /rt-shop/); // refresh token stored encrypted
+
+  // Campaign through Gmail API.
+  await A.get('/shops');
+  r = await A.post('/shops', { name: 'Gmail shop' });
+  const shop = r.location.match(/\/shops\/(\d+)/)[1];
+  const csv = 'Name,Email,Consent\n' + Array.from({ length: 5 }, (_, i) => `G${i},g${i}@example.com,yes`).join('\n');
+  r = await A.post(`/shops/${shop}/upload`, {}, [{ field: 'file', name: 'g.csv', data: Buffer.from(csv) }]);
+  await A.post(`/uploads/${r.location.match(/uploads\/(\d+)/)[1]}/map`, { name: 'Name', email: 'Email', consent: 'Consent', country: 'AE' });
+  await A.get(`/campaigns/new?shop=${shop}`);
+  r = await A.post('/campaigns', { name: 'Gmail API', shop_id: shop, sender_id: s.id });
+  const id = r.location.match(/campaigns\/(\d+)/)[1];
+  r = await A.post(`/campaigns/${id}/edit`, { subject: 'Hello {{first_name}}', body: 'Gmail API test', audience: 'all', skip_already: '1', action: 'preview' });
+  // test email to self goes through the Gmail API too
+  let t = await A.post(`/campaigns/${id}/test`, {});
+  assert.match(t.location, /Test\+email\+sent|Test%20email/);
+  r = await A.get(`/campaigns/${id}/preview`);
+  const key = r.text.match(/name="key" value="([^"]+)"/)[1];
+  await A.post(`/campaigns/${id}/activate`, { key, mode: 'auto', confirm: '1' });
+  const g0 = google.state.sent.length;
+  // 1st: Gmail sending limit with a retry time → sender waits until then; 2nd tick after hold: 500 → unknown; rest sent.
+  const retry = new Date(Date.now() + 3 * 3600e3).toISOString();
+  google.state.next.push({ status: 429, reason: 'rateLimitExceeded', message: `User-rate limit exceeded.  Retry after ${retry} (Mail sending)` });
+  await worker.tick();
+  let h = await one('SELECT extract(epoch from hold_until - now())::int AS secs, hold_reason FROM senders WHERE id=$1', [s.id]);
+  assert.ok(h.secs > 3 * 3600 - 120 && h.secs <= 3 * 3600, `held ${h.secs}`);
+  assert.equal(google.state.sent.length, g0);
+  await db.q('UPDATE senders SET hold_until=NULL WHERE id=$1', [s.id]);
+  google.state.next.push({ status: 500, reason: 'backendError', message: 'Backend Error' });
+  await worker.tick();
+  await worker.tick();
+  const st = await db.rows("SELECT status FROM messages WHERE campaign_id=$1 ORDER BY id", [id]);
+  assert.deepEqual(st.map((x) => x.status), ['unknown', 'sent', 'sent', 'sent', 'sent']);
+  assert.equal(google.state.sent.length, g0 + 4);
+  const mail = google.state.sent.at(-1);
+  assert.match(mail, /From: GoSkate Dubai <shop\.gmail@gmail\.com>/); assert.match(mail, /List-Unsubscribe-Post: List-Unsubscribe=One-Click/);
+  // Access revoked → sender marked broken, campaign paused (not failed).
+  await A.get(`/campaigns/${id}`); r = await A.post(`/campaigns/${id}/duplicate`, {});
+  const copy = r.location.match(/campaigns\/(\d+)/)[1];
+  await A.post(`/campaigns/${copy}/edit`, { subject: 'Second', body: 'Another text', audience: 'all', skip_already: '1', action: 'preview' });
+  r = await A.get(`/campaigns/${copy}/preview`);
+  const key2 = r.text.match(/name="key" value="([^"]+)"/)[1];
+  await A.post(`/campaigns/${copy}/activate`, { key: key2, mode: 'auto', confirm: '1' });
+  google.state.next.push({ status: 401, reason: 'authError', message: 'Invalid Credentials' });
+  await worker.tick();
+  await worker.tick();
+  assert.equal((await one('SELECT status FROM senders WHERE id=$1', [s.id])).status, 'error');
+  assert.equal((await one('SELECT status FROM campaigns WHERE id=$1', [copy])).status, 'paused');
+  assert.equal((await one("SELECT count(*)::int AS n FROM messages WHERE campaign_id=$1 AND status='failed'", [copy])).n, 0);
+  // Reconnect with Google fixes it.
+  r = await A.req('GET', `/senders/google/start?label=Shop+Gmail&from_name=GoSkate+Dubai`);
+  r = await A.get('/oauth/google/callback?code=good-code&state=' + encodeURIComponent(new URL(r.location).searchParams.get('state')));
+  assert.match(r.text, /connected again/);
+  assert.equal((await one('SELECT status FROM senders WHERE id=$1', [s.id])).status, 'verified');
+  assert.equal((await one("SELECT count(*)::int AS n FROM senders WHERE info->>'provider'='gmail_api'")).n, 1);
 });
 
 test('token problems pause campaigns instead of failing messages', async () => {

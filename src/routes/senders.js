@@ -3,7 +3,9 @@ import { html, csrfField, fmtDate, badge } from '../html.js';
 import { q, one, rows } from '../db.js';
 import { config } from '../config.js';
 import { owned, str } from './util.js';
-import { encryptJson, decryptJson, randomCode, sha256 } from '../crypto.js';
+import { encryptJson, decryptJson, randomCode, sha256, randomToken, sign, verifySigned, safeEqual } from '../crypto.js';
+import { setCookie, parseCookies } from '../http.js';
+import * as gmail from '../providers/gmail.js';
 import { normalizeEmail, normalizePhone } from '../contacts.js';
 import * as email from '../providers/email.js';
 import * as wa from '../providers/whatsapp.js';
@@ -40,34 +42,65 @@ export default function register(r) {
   });
 
   // ---------- Email ----------
-  r.get('/senders/new/email', (ctx) => ctx.page('Connect email', html`
+  r.get('/senders/new/email', (ctx) => {
+    const smtpForm = html`<form method="post" action="/senders/email" class="card stack">${csrfField(ctx.csrf)}
+        <p class="muted">For email providers other than Gmail. Note: this needs outgoing email ports, which Render's free plan blocks — it only works on a paid or other host.</p>
+        <label>Name for this sender (only you see it)<input name="label" required maxlength="60"></label>
+        <label>Email address to send from<input type="email" name="email" required></label>
+        <label>Name customers will see<input name="from_name" maxlength="80"></label>
+        <label>Password / app password<input type="password" name="password" required autocomplete="off"></label>
+        <label>Reply-to address (optional)<input type="email" name="reply_to"></label>
+        <label>Outgoing mail server (SMTP)<input name="host" placeholder="smtp.example.com" required></label>
+        <div class="row"><label>Port<input type="number" name="port" min="1" max="65535" value="465"></label>
+        <label>Security<select name="security"><option value="ssl">SSL/TLS (usually port 465)</option><option value="starttls">STARTTLS (usually port 587)</option></select></label></div>
+        <label>Sign-in username (if different from the email address)<input name="username"></label>
+        <label>Your provider's daily sending limit<input type="number" name="daily_limit" min="1" max="100000" required placeholder="e.g. 300"></label>
+        <button>Test and send verification code</button>
+      </form>`;
+    ctx.page('Connect email', html`
     <p class="crumbs"><a href="/senders">Senders</a> ›</p>
-    <h1>Connect an email address</h1>
-    <section class="card note">
-      <h2>Before you start (Gmail or Google Workspace)</h2>
-      <ol>
-        <li>Open <b>myaccount.google.com</b> → <b>Security</b> and turn on <b>2-Step Verification</b>.</li>
-        <li>Open <b>myaccount.google.com/apppasswords</b>, type the name <i>SheetSender</i> and press <b>Create</b>.</li>
-        <li>Copy the 16-letter password Google shows and paste it below. (It is not your normal Gmail password.)</li>
-      </ol>
-      <p class="muted">Google's limit is 500 emails per day for a normal Gmail account and 2,000 per day for Google Workspace. The app stays under it automatically.</p>
-    </section>
-    <form method="post" action="/senders/email" class="card stack">${csrfField(ctx.csrf)}
+    <h1>Connect a Gmail address</h1>
+    ${gmail.enabled() ? html`
+    <form method="get" action="/senders/google/start" class="card stack">
+      <p>You will sign in to the Gmail account on Google's own page and allow SheetSender to <b>send email only</b> (it cannot read your inbox). Repeat this for every Gmail address you want to send from.</p>
       <label>Name for this sender (only you see it)<input name="label" required maxlength="60" placeholder="GoSkate Gmail"></label>
-      <label>Email address to send from<input type="email" name="email" required></label>
       <label>Name customers will see<input name="from_name" maxlength="80" placeholder="GoSkate Dubai"></label>
-      <label>App password<input type="password" name="password" required autocomplete="off"></label>
       <label>Reply-to address (optional)<input type="email" name="reply_to"></label>
-      <details><summary>I don't use Gmail (other email provider)</summary>
-        <div class="stack">
-          <label>Outgoing mail server (SMTP)<input name="host" placeholder="smtp.example.com"></label>
-          <div class="row"><label>Port<input type="number" name="port" min="1" max="65535" value="465"></label>
-          <label>Security<select name="security"><option value="ssl">SSL/TLS (usually port 465)</option><option value="starttls">STARTTLS (usually port 587)</option></select></label></div>
-          <label>Sign-in username (if different from the email address)<input name="username"></label>
-          <label>Your provider's daily sending limit<input type="number" name="daily_limit" min="1" max="100000" placeholder="e.g. 300"><small>Find it in your provider's help pages. Required for non-Gmail providers.</small></label>
-        </div></details>
-      <button class="primary">Test and send verification code</button>
-    </form>`, { active: '/senders' }));
+      <button class="primary">Continue with Google</button>
+      <p class="muted">If Google shows "Google hasn't verified this app", click <b>Advanced</b> → <b>Go to SheetSender</b>. That appears because this is your own private app.</p>
+      <p class="muted">Google's limit is 500 emails per day for a normal Gmail account and 2,000 per day for Google Workspace. The app stays under it automatically.</p>
+    </form>` : html`<section class="card attention"><p>Gmail connection is not switched on yet: the app owner must add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> in the hosting settings (see SETUP.md, "Connect Gmail").</p></section>`}
+    <details><summary>Other email provider (not Gmail)</summary>${smtpForm}</details>`, { active: '/senders' });
+  });
+
+  r.get('/senders/google/start', (ctx) => {
+    if (!gmail.enabled()) return ctx.go('/senders/new/email');
+    const nonce = randomToken(16);
+    setCookie(ctx.res, 'g_nonce', nonce, { maxAge: 900 });
+    const state = sign({ u: Number(ctx.user.id), n: nonce, l: str(ctx.query.label, 60), f: str(ctx.query.from_name, 80), r: normalizeEmail(ctx.query.reply_to) || '', exp: Date.now() + 15 * 60000 });
+    ctx.res.writeHead(303, { Location: gmail.authUrl(state) }); ctx.res.end();
+  });
+
+  r.get('/oauth/google/callback', async (ctx) => {
+    const st = verifySigned(ctx.query.state || '');
+    const cookieNonce = parseCookies(ctx.req.headers.cookie).g_nonce;
+    setCookie(ctx.res, 'g_nonce', '', { maxAge: 0 });
+    if (!st || Number(st.u) !== Number(ctx.user.id) || !cookieNonce || !safeEqual(cookieNonce, st.n)) return ctx.go('/senders/new/email', { err: 'The Google sign-in expired or did not match. Please try again.' });
+    if (ctx.query.error) return ctx.go('/senders/new/email', { err: ctx.query.error === 'access_denied' ? 'Google sign-in was cancelled. Nothing was connected.' : `Google said: ${str(ctx.query.error, 100)}` });
+    let got;
+    try { got = await gmail.exchangeCode(str(ctx.query.code, 2000)); } catch (e) { return ctx.go('/senders/new/email', { err: e.message }); }
+    const limit = /@(gmail|googlemail)\.com$/i.test(got.email) ? 500 : 2000;
+    const existing = await one("SELECT * FROM senders WHERE user_id=$1 AND channel='email' AND lower(info->>'email')=$2", [ctx.user.id, got.email]);
+    const info = { provider: 'gmail_api', email: got.email, from_name: st.f || existing?.info?.from_name || '', reply_to: st.r || existing?.info?.reply_to || null };
+    if (existing) {
+      await q("UPDATE senders SET secrets=$2, info=$3, status='verified', last_error=NULL, hold_until=NULL, hold_reason=NULL, hold_level=0, daily_limit=$4, updated_at=now() WHERE id=$1",
+        [existing.id, encryptJson({ refresh_token: got.refreshToken }), info, limit]);
+      return ctx.go(`/senders/${existing.id}`, { ok: `${got.email} is connected again. Resume any paused campaigns from the Campaigns page.` });
+    }
+    const s = await one(`INSERT INTO senders (user_id, channel, label, status, secrets, info, daily_limit) VALUES ($1,'email',$2,'verified',$3,$4,$5) RETURNING id`,
+      [ctx.user.id, st.l || got.email, encryptJson({ refresh_token: got.refreshToken }), info, limit]);
+    ctx.go(`/senders/${s.id}`, { ok: `${got.email} is connected and verified by Google. You can now choose it in a campaign.` });
+  });
 
   r.post('/senders/email', async (ctx) => {
     const b = ctx.body;
@@ -207,11 +240,12 @@ export default function register(r) {
           <form method="post" action="/senders/${s.id}/verify" class="row">${csrfField(ctx.csrf)}<input name="code" inputmode="numeric" maxlength="6" required placeholder="123456"><button class="primary">Verify</button></form>
           <form method="post" action="/senders/${s.id}/resend">${csrfField(ctx.csrf)}<button class="link">Send a new code</button></form></section>` : ''}
         <section class="card"><h2>Details</h2><dl>
-          <dt>Sends as</dt><dd>${senderLine(s)}</dd><dt>Server</dt><dd>${s.info.host}:${s.info.port}</dd>
+          <dt>Sends as</dt><dd>${senderLine(s)}</dd><dt>Connection</dt><dd>${s.info.provider === 'gmail_api' ? 'Gmail (connected with Google)' : `${s.info.host}:${s.info.port}`}</dd>
           <dt>Daily limit</dt><dd>${s.daily_limit} per 24 hours (sent in the last 24 hours: ${sentToday})</dd>
           ${s.info.reply_to ? html`<dt>Replies go to</dt><dd>${s.info.reply_to}</dd>` : ''}</dl></section>
-        <section class="card"><h2>Change the app password</h2>
-          <form method="post" action="/senders/${s.id}/password" class="row">${csrfField(ctx.csrf)}<input type="password" name="password" required autocomplete="off" placeholder="New app password"><button>Test and save</button></form></section>`
+${s.info.provider === 'gmail_api' ? html`<section class="card"><h2>Reconnect</h2><p>If Google access was removed or your Google password changed, sign in again.</p>
+          <a class="button" href="/senders/google/start?label=${encodeURIComponent(s.label)}&from_name=${encodeURIComponent(s.info.from_name || '')}&reply_to=${encodeURIComponent(s.info.reply_to || '')}">Reconnect with Google</a></section>` : html`        <section class="card"><h2>Change the app password</h2>
+          <form method="post" action="/senders/${s.id}/password" class="row">${csrfField(ctx.csrf)}<input type="password" name="password" required autocomplete="off" placeholder="New app password"><button>Test and save</button></form></section>`}`
       : html`
         <section class="card"><h2>Number</h2><dl>
           <dt>Display name</dt><dd>${s.info.verified_name}</dd><dt>Number</dt><dd>${s.info.display_phone}</dd>

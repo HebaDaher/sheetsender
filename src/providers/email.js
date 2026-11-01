@@ -1,5 +1,6 @@
-// Email sending through the user's own mailbox (SMTP). Gmail needs an "App password".
+// Email sending from the user's own mailbox: Gmail via Google's Gmail API ("Connect with Google"), or any provider via SMTP.
 import { SmtpClient } from '../smtp.js';
+import * as gmail from './gmail.js';
 import { buildEmail } from '../mime.js';
 import { esc } from '../html.js';
 
@@ -14,6 +15,9 @@ export function defaultDailyLimit(host, email) {
 }
 
 export async function openSession(secrets, info) {
+  if (info.provider === 'gmail_api') {
+    return { send: async ({ data }) => ({ id: await gmail.sendRaw(secrets.refresh_token, data) }), close: async () => {} };
+  }
   const client = new SmtpClient({ host: info.host, port: info.port, user: info.username || info.email, pass: secrets.password, secure: info.secure });
   await client.connect();
   return {
@@ -26,6 +30,7 @@ export async function openSession(secrets, info) {
 }
 
 export async function testConnection(secrets, info) {
+  if (info.provider === 'gmail_api') return gmail.checkAccess(secrets.refresh_token);
   const s = await openSession(secrets, info);
   await s.close();
 }
@@ -41,6 +46,7 @@ export async function sendPlain(secrets, info, { to, subject, text }) {
 
 // Decide what to do after an SMTP error.
 export function classifyEmailError(e) {
+  if (e.gmail) return gmail.classifyGmailError(e);
   const code = Number(e.responseCode || 0);
   const text = String(e.message || '');
   if (e.kind === 'auth' || [530, 534, 535].includes(code) || /5\.7\.(8|9|14)/.test(text)) {

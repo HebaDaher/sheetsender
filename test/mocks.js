@@ -111,3 +111,36 @@ export function makeXlsx(rows) {
   end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([...locals, cd, end]);
 }
+
+// Mock Google OAuth token endpoint + Gmail API send endpoint.
+export function startGoogle({ email = 'shop.gmail@gmail.com' } = {}) {
+  const state = { sent: [], next: [], tokenNext: [], codes: new Set(['good-code']) };
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks).toString();
+    const url = new URL(req.url, 'http://x');
+    const send = (code, obj, headers = {}) => { res.writeHead(code, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(obj)); };
+    if (url.pathname === '/token') {
+      const p = new URLSearchParams(body);
+      if (p.get('client_secret') !== 'gsecret') return send(401, { error: 'invalid_client' });
+      const tn = state.tokenNext.shift(); if (tn) return send(400, tn);
+      if (p.get('grant_type') === 'authorization_code') {
+        if (!state.codes.has(p.get('code'))) return send(400, { error: 'invalid_grant' });
+        const idt = ['x', Buffer.from(JSON.stringify({ email: state.email || email, email_verified: true })).toString('base64url'), 'sig'].join('.');
+        return send(200, { access_token: 'at1', expires_in: 3599, refresh_token: 'rt-' + (state.email || email), scope: 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.send', id_token: idt });
+      }
+      if (p.get('grant_type') === 'refresh_token') return send(200, { access_token: 'at2', expires_in: 3599 });
+      return send(400, { error: 'unsupported_grant_type' });
+    }
+    if (url.pathname === '/gmail/v1/users/me/messages/send') {
+      if (!/^Bearer at\d$/.test(req.headers.authorization || '')) return send(401, { error: { code: 401, message: 'Invalid Credentials' } });
+      const n = state.next.shift();
+      if (n) return send(n.status, { error: { code: n.status, message: n.message, errors: [{ reason: n.reason }] } });
+      const raw = Buffer.from(JSON.parse(body).raw, 'base64url').toString('utf8');
+      state.sent.push(raw);
+      return send(200, { id: 'gm' + state.sent.length, threadId: 't' });
+    }
+    send(404, { error: 'no route' });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, state })));
+}

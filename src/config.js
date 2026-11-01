@@ -19,6 +19,11 @@ export const config = {
   signupCode: env.SIGNUP_CODE || '',
   graphVersion: env.GRAPH_API_VERSION || 'v26.0',
   graphBase: env.GRAPH_API_BASE || 'https://graph.facebook.com',
+  googleClientId: env.GOOGLE_CLIENT_ID || '',
+  googleClientSecret: env.GOOGLE_CLIENT_SECRET || '',
+  googleAuthUrl: env.GOOGLE_AUTH_URL || 'https://accounts.google.com/o/oauth2/v2/auth',
+  googleTokenUrl: env.GOOGLE_TOKEN_URL || 'https://oauth2.googleapis.com/token',
+  gmailApiBase: env.GMAIL_API_BASE || 'https://gmail.googleapis.com',
   // Test-only switches (never set these on the real host).
   disableBackgroundLoop: env.SHEETSENDER_NO_LOOP === '1',
   secretOk: secret.length >= 32,

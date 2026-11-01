@@ -101,7 +101,8 @@ export function setCookie(res, name, value, { maxAge, httpOnly = true } = {}) {
 }
 
 export function securityHeaders(res) {
-  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'");
+  // form-action also allows Google's sign-in page, because "Continue with Google" redirects there.
+  res.setHeader('Content-Security-Policy', `default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; form-action 'self' ${new URL(config.googleAuthUrl).origin}; base-uri 'none'; object-src 'none'`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'DENY');
