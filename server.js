@@ -638,4 +638,4 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 15 * 60000;
-server.listen(config.port, () => console.log(`SheetSender web app on ${config.baseUrl} (port ${config.port})`));
+server.listen(config.port, config.host, () => console.log(`SheetSender web app on ${config.baseUrl} (port ${config.port})`));

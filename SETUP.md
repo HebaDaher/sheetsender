@@ -1,5 +1,23 @@
 # SheetSender — Setup Guide (step by step)
 
+## Option A (free): run it on your Mac
+
+No server, no card, no domain. SheetSender runs on your Mac and sends messages **while your Mac is on and the SheetSender window is open**. (It keeps the Mac from falling asleep by itself. If you close the laptop lid, it pauses, then catches up when you open it again.)
+
+1. Put the project folder in **Documents** (download it from GitHub: green **Code** button → **Download ZIP**, then double-click the zip).
+2. Open the folder and **double-click `Start SheetSender.command`**.
+   - The first time, macOS may say it can't verify the file. **Right-click** it → **Open** → **Open**.
+3. A window opens. The first time it downloads Node.js by itself (about 1 minute), then asks you to **choose a dashboard password** (10+ characters).
+4. Your browser opens **http://localhost:3000** → sign in with that password.
+5. Connect Gmail: follow **Step 4** below, but use this redirect address: `http://localhost:3000/oauth/google/callback` (no domain needed, no billing needed). Your settings file is at `~/Library/Application Support/SheetSender/settings.env` — put the Google Client ID and secret there, then close and re-open the SheetSender window.
+6. Continue with **Step 7** (set up your shops).
+
+> On your Mac, WhatsApp **sending** works, but "Delivered/Read" updates and STOP replies (Step 6d) need Option B, because Meta can't reach a laptop.
+
+---
+
+## Option B: run it 24/7 on a server
+
 Follow the steps **in order**. Each step ends with a ✅ check so you know it worked before moving on.
 Total time: about 2–3 hours the first time (most of it is waiting for Google / Meta screens).
 
