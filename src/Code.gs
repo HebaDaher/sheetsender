@@ -26,6 +26,10 @@ const DEFAULT_DELAY_MINUTES = 5;
 const ALLOWED_DELAYS = [1, 2, 3, 5, 10, 15, 30, 60];
 const MAX_SEND_ATTEMPTS = 3;
 const DEFAULT_COUNTRY_CODE = '971';
+const DEFAULT_DAILY_CAP = 40;      // emails per Gmail account per day (Gmail allows ~500; staying far below protects the account)
+const DEFAULT_START_HOUR = 9;      // send only from 9:00 …
+const DEFAULT_END_HOUR = 21;       // … until 21:00, UAE time
+const SAFE_DELAYS = [3, 5, 10, 15, 30, 60]; // choices shown on the Send page
 const PLACEHOLDERS = ['first_name', 'full_name', 'shop_name', 'sender_name', 'email', 'phone'];
 
 const TABS = {
@@ -55,6 +59,7 @@ const PROP = {
   OWNER_EMAIL: 'OWNER_EMAIL',
   ACCOUNTS: 'GMAIL_ACCOUNTS',          // {email: {status, connected_at, last_ok_at, last_error, ...}} — no tokens
   OAUTH_CLIENT_ID: 'OAUTH_CLIENT_ID',  // public identifier, not a secret
+  SEND_RULES: 'SEND_RULES',           // {dailyCap, startHour, endHour}
   NEXT_DUE_AT: 'NEXT_DUE_AT',
   LAST_ENGINE_RUN: 'LAST_ENGINE_RUN'
 };
@@ -174,7 +179,7 @@ function seedExamples_(ss) {
       subject: 'Still interested in {shop_name}?',
       body: 'Hi {first_name},\n\nThank you for your interest in {shop_name}. The shop is still available and ' +
         'I would be happy to share the details or arrange a visit.\n\nJust reply to this email and I will get back to you.\n\n' +
-        'Best regards,\n{sender_name}\n\nIf you would rather not receive these emails, reply STOP and we will remove you.',
+        'Best regards,\n{sender_name}\n\nIf you are no longer interested, just reply and let me know, and I will not email you again.',
       active: 'yes', updated_at: now
     },
     {
@@ -482,7 +487,8 @@ function getBootstrap() {
     setupProblems: problems,
     engine: engineStatus_(),
     defaultDelay: DEFAULT_DELAY_MINUTES,
-    allowedDelays: ALLOWED_DELAYS,
+    allowedDelays: SAFE_DELAYS,
+    sendingRules: sendingRules_(),
     placeholders: PLACEHOLDERS,
     sheetUrl: ctx.ss.getUrl()
   };
@@ -781,9 +787,12 @@ function getCampaignPreview(params) {
   const delay = cleanDelay_(params.delayMinutes);
   const s = p.summary;
   s.delayMinutes = delay;
-  s.estimatedHours = Math.round(s.willSend * delay / 6) / 10;
-  s.dailyLimitNote = s.willSend > 90
-    ? 'A free Gmail account can send about 100 emails per day from apps. The rest will wait and continue automatically the next day.'
+  s.estimatedHours = Math.round(s.willSend * delay * 1.2 / 6) / 10;
+  const rules = sendingRules_();
+  s.rules = rules;
+  s.estimatedDays = Math.max(1, Math.ceil(s.willSend / rules.dailyCap));
+  s.dailyLimitNote = s.willSend > rules.dailyCap
+    ? 'To protect the Gmail account, at most ' + rules.dailyCap + ' emails go out per day. The rest continue automatically on the next days (about ' + s.estimatedDays + ' days in total).'
     : '';
   return s;
 }

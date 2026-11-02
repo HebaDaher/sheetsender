@@ -3,7 +3,13 @@
  *
  * A time-based trigger (installed by setup, owned by the OWNER) calls processQueue() every minute.
  * It does NOT sleep. Each run it sends at most ONE email per running campaign whose next_send_at is due,
- * then sets next_send_at = now + delay_minutes. When nothing is due it exits in milliseconds.
+ * then sets next_send_at = now + delay_minutes (+ a small random extra, so the timing does not look robotic).
+ * When nothing is due it exits in milliseconds.
+ *
+ * Safe-sending rules (Settings > Safe sending), to protect each Gmail account's reputation:
+ *  - at most N emails per Gmail account per day (default 40), counted across all shops and sends;
+ *  - only between set hours, UAE time (default 9:00–21:00);
+ *  - never faster than the chosen delay; each wait is 0–40% longer at random.
  */
 
 function processQueue() {
@@ -92,6 +98,23 @@ function stepCampaign_(ctx, campaign, nowMs) {
       continue;
     }
 
+    // Safe-sending rules, checked right before each email.
+    const rules = sendingRules_();
+    const senderAddr = norm_(shop.sender_email);
+    if (!withinSendingHours_(nowMs, rules)) {
+      campaign.next_send_at = new Date(nextWindowStart_(nowMs, rules)).toISOString();
+      campaign.status_reason = 'Waiting for sending hours (' + hourLabel_(rules.startHour) + '–' + hourLabel_(rules.endHour) +
+        ' UAE time). Continues automatically.';
+      return;
+    }
+    const sentToday = sentTodayBy_(log.rows, senderAddr, nowMs);
+    if (sentToday >= rules.dailyCap) {
+      campaign.next_send_at = new Date(nextDayStart_(nowMs, rules)).toISOString();
+      campaign.status_reason = 'Safety limit reached: ' + senderAddr + ' already sent ' + sentToday + ' emails today (limit ' +
+        rules.dailyCap + '). Continues automatically tomorrow at ' + hourLabel_(rules.startHour) + '.';
+      return;
+    }
+
     const fields = templateFields_(contact, shop);
     const subject = renderText_(template.subject, fields);
     const body = renderText_(template.body, fields);
@@ -104,7 +127,7 @@ function stepCampaign_(ctx, campaign, nowMs) {
       item.contact_name = contact.full_name || contact.first_name;
       item.email = email;
       finish_(log, item, 'sent', 'Sent from ' + norm_(shop.sender_email));
-      campaign.next_send_at = new Date(nowMs + delayMs).toISOString();
+      campaign.next_send_at = new Date(nowMs + Math.round(delayMs * (1 + Math.random() * 0.4))).toISOString();
       campaign.status_reason = '';
     } catch (e) {
       const kind = e.kind || 'FAIL';
@@ -174,4 +197,53 @@ function recomputeNextDue_(campaignRows) {
   const props = PropertiesService.getScriptProperties();
   if (min) props.setProperty(PROP.NEXT_DUE_AT, String(min));
   else props.deleteProperty(PROP.NEXT_DUE_AT);
+}
+
+/* ------------------------------------------------------------------ */
+/* Safe-sending rules                                                   */
+/* ------------------------------------------------------------------ */
+
+const UAE_OFFSET_MS = 4 * 3600 * 1000; // UAE time is UTC+4 all year (no daylight saving)
+
+function sendingRules_() {
+  let r = {};
+  try { r = JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP.SEND_RULES) || '{}'); } catch (e) { r = {}; }
+  const cap = Number(r.dailyCap), start = Number(r.startHour), end = Number(r.endHour);
+  return {
+    dailyCap: cap >= 5 && cap <= 400 ? Math.round(cap) : DEFAULT_DAILY_CAP,
+    startHour: start >= 0 && start <= 23 ? Math.round(start) : DEFAULT_START_HOUR,
+    endHour: end >= 1 && end <= 24 && end > (start >= 0 ? start : DEFAULT_START_HOUR) ? Math.round(end) : DEFAULT_END_HOUR
+  };
+}
+
+function uaeHour_(ms) { return new Date(ms + UAE_OFFSET_MS).getUTCHours(); }
+function uaeDay_(ms) { return new Date(ms + UAE_OFFSET_MS).toISOString().slice(0, 10); }
+function hourLabel_(h) { return (h === 24 ? '24' : String(h)) + ':00'; }
+
+function withinSendingHours_(ms, rules) {
+  const h = uaeHour_(ms);
+  return h >= rules.startHour && h < rules.endHour;
+}
+
+/** Start of the next sending window (today if before it, otherwise tomorrow). */
+function nextWindowStart_(ms, rules) {
+  const local = new Date(ms + UAE_OFFSET_MS);
+  const startToday = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), rules.startHour) - UAE_OFFSET_MS;
+  return ms < startToday ? startToday : startToday + 24 * 3600 * 1000;
+}
+
+function nextDayStart_(ms, rules) {
+  const local = new Date(ms + UAE_OFFSET_MS);
+  return Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 1, rules.startHour) - UAE_OFFSET_MS;
+}
+
+/** Emails this Gmail account sent today (UAE date), across all shops and sends. Test emails are not counted. */
+function sentTodayBy_(logRows, senderAddr, ms) {
+  const today = uaeDay_(ms);
+  let n = 0;
+  logRows.forEach(function (l) {
+    if (l.status === 'sent' && l.channel === 'email' && norm_(l.sender_email) === senderAddr && l.sent_at &&
+      uaeDay_(new Date(l.sent_at).getTime()) === today) n++;
+  });
+  return n;
 }

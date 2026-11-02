@@ -110,6 +110,11 @@ function getSettings() {
       return { shop_id: s.shop_id, shop_name: s.shop_name, sender_email: norm_(s.sender_email), active: isActive_(s.active), senderOk: c.ok, senderProblem: c.reason };
     }),
     engine: engineStatus_(),
+    sendingRules: sendingRules_(),
+    sentToday: (function () {
+      const logRows = readTable_(ctx.ss, TABS.LOG).rows;
+      return list.map(function (a) { return { email: a.email, n: sentTodayBy_(logRows, a.email, Date.now()) }; });
+    })(),
     sheetUrl: ctx.ss.getUrl()
   };
 }
@@ -259,7 +264,7 @@ function testGmailAccount(email) {
   try {
     sendGmail_({
       from: addr, fromName: APP_NAME, to: addr,
-      subject: APP_NAME + ': test email',
+      subject: APP_NAME + ': test email', noUnsubscribe: true,
       text: 'This is a test from ' + APP_NAME + '.\n\nThe Gmail account ' + addr + ' is connected and can send emails for the app.\n\nTested by ' + ctx.email + '.'
     });
   } catch (e) {
@@ -310,6 +315,19 @@ function assignShopSender(shopId, email) {
     updateRow_(table, shop);
     return publicShop_(shop);
   });
+}
+
+/** Owner: saves the safe-sending rules. */
+function saveSendingRules(rules) {
+  requireOwner_();
+  rules = rules || {};
+  const cap = Math.round(Number(rules.dailyCap)), start = Math.round(Number(rules.startHour)), end = Math.round(Number(rules.endHour));
+  if (!(cap >= 5 && cap <= 400)) throw new Error('Emails per day must be between 5 and 400. 20–50 is safest.');
+  if (!(start >= 0 && start <= 23) || !(end >= 1 && end <= 24) || end <= start) throw new Error('Choose sending hours where the end is after the start.');
+  if (end - start < 2) throw new Error('Allow at least 2 sending hours per day.');
+  const saved = { dailyCap: cap, startHour: start, endHour: end };
+  PropertiesService.getScriptProperties().setProperty(PROP.SEND_RULES, JSON.stringify(saved));
+  return sendingRules_();
 }
 
 function restartEngine() {
@@ -404,8 +422,17 @@ function buildMime_(msg) {
     'To: <' + to + '>'
   ];
   if (msg.replyTo && isValidEmail_(msg.replyTo)) lines.push('Reply-To: <' + headerSafe_(msg.replyTo) + '>');
+  const domain = from.split('@')[1] || 'gmail.com';
   lines.push(
-    'Subject: ' + encodeWord_(msg.subject),
+    'Date: ' + new Date().toUTCString(),
+    'Message-ID: <' + Utilities.getUuid() + '.' + Date.now() + '@' + domain + '>',
+    'Subject: ' + encodeWord_(msg.subject));
+  if (!msg.noUnsubscribe) {
+    // Lets mail apps show an "Unsubscribe" button, so people can say "stop" instead of pressing "Report spam".
+    const unsubTo = (msg.replyTo && isValidEmail_(msg.replyTo)) ? headerSafe_(msg.replyTo) : from;
+    lines.push('List-Unsubscribe: <mailto:' + unsubTo + '?subject=' + encodeURIComponent('Unsubscribe ' + to) + '>');
+  }
+  lines.push(
     'MIME-Version: 1.0',
     'Content-Type: multipart/alternative; boundary="' + boundary + '"',
     '',

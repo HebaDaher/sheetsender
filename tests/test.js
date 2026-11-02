@@ -438,4 +438,84 @@ t('the app never uses GmailApp', () => {
   assert(!/GmailApp\./.test(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')));
 });
 
+console.log('Safe sending (spam / account protection) — fresh simulation');
+{
+const E = makeEnv(SRC); const C = E.ctx; const G = E.google;
+E.as('owner@gmail.com'); C.setup(); C.saveOAuthClient(G.client.id, G.client.secret);
+E.connect('shop1@gmail.com'); C.assignShopSender('SHOP1', 'shop1@gmail.com');
+E.ss.getSheetByName('Shops').grid[1][4] = 'dad@gmail.com'; // reply_to for SHOP1
+C.testGmailAccount('shop1@gmail.com');
+E.as('dad@gmail.com');
+C.importContacts('SHOP1', [{ full_name: 'Heba Daher', email: 'heba@x.com', consent_status: 'yes' }], {});
+C.startCampaign({ shopId: 'SHOP1', subject: 'Hi {first_name}', body: 'Hello {first_name}, the shop is still available. Would you like to visit?', delayMinutes: 3 });
+E.runTrigger(2);
+
+t('emails carry Date, Message-ID and an Unsubscribe header (to the reply-to address)', () => {
+  const m = E.sent.find(x => x.to === 'heba@x.com');
+  assert(/^\w{3}, \d{2} \w{3} \d{4}/.test(m.dateHdr), m.dateHdr);
+  assert(/^<.+@gmail\.com>$/.test(m.msgId), m.msgId);
+  assert.strictEqual(m.listUnsub, '<mailto:dad@gmail.com?subject=Unsubscribe%20heba%40x.com>');
+  const test = E.sent.find(x => /test email/.test(x.subject));
+  assert.strictEqual(test.listUnsub, '', 'no unsubscribe on test emails');
+});
+t('only the owner can change the rules; values are checked', () => {
+  E.as('dad@gmail.com');
+  throwsMsg(() => C.saveSendingRules({ dailyCap: 30, startHour: 9, endHour: 21 }), /Only the app owner/);
+  E.as('owner@gmail.com');
+  throwsMsg(() => C.saveSendingRules({ dailyCap: 1000, startHour: 9, endHour: 21 }), /between 5 and 400/);
+  throwsMsg(() => C.saveSendingRules({ dailyCap: 30, startHour: 20, endHour: 10 }), /end is after the start/);
+  const r = C.saveSendingRules({ dailyCap: '3x', startHour: 9, endHour: 21 }.dailyCap ? { dailyCap: 6, startHour: 9, endHour: 21 } : {});
+  assert.strictEqual(r.dailyCap, 6);
+  assert.strictEqual(C.getSettings().sendingRules.dailyCap, 6);
+});
+t('daily safety limit per Gmail account: stops at the limit, continues next morning by itself', () => {
+  E.setClock('2026-11-03T06:00:00Z'); // 10:00 UAE, a new day
+  E.as('dad@gmail.com');
+  const many = []; for (let i = 0; i < 9; i++) many.push({ full_name: 'Cap ' + i, email: 'cap' + i + '@ex.com', consent_status: 'yes' });
+  C.importContacts('SHOP1', many, {});
+  const k = C.startCampaign({ shopId: 'SHOP1', subject: 'Hello {first_name}', body: 'Hello {first_name}, the shop is still available. Let me know if you want to visit.', delayMinutes: 3 });
+  const before = E.sent.length;
+  E.runTrigger(60);
+  assert.strictEqual(E.sent.length - before, 6, 'exactly the daily limit');
+  const c = E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id);
+  assert(/Safety limit reached/.test(c.status_reason), c.status_reason);
+  assert.strictEqual(c.status, 'running');
+  assert.strictEqual(c.next_send_at, '2026-11-04T05:00:00.000Z', '9:00 UAE next day');
+  const p = C.getCampaignPreview({ shopId: 'SHOP1', subject: 'x {first_name}', body: 'Hi {first_name}, another message for you about the shop.', skipPrevious: false });
+  assert(p.estimatedDays >= 2 && /at most 6 emails/.test(p.dailyLimitNote));
+  E.setClock('2026-11-04T04:58:00Z');
+  E.runTrigger(1); assert.strictEqual(E.sent.length - before, 6, 'not before 9:00');
+  E.runTrigger(15);
+  assert.strictEqual(E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id).status, 'completed');
+  assert.strictEqual(E.sent.length - before, 10); // 9 new people + Heba (new email for her too)
+  E.as('owner@gmail.com'); C.saveSendingRules({ dailyCap: 40, startHour: 9, endHour: 21 });
+});
+t('no emails outside sending hours (e.g. 23:00 UAE); continues at 9:00', () => {
+  E.setClock('2026-11-04T19:00:00Z'); // 23:00 UAE
+  E.as('dad@gmail.com');
+  C.importContacts('SHOP1', [{ full_name: 'Night', email: 'night@ex.com', consent_status: 'yes' }], {});
+  const k = C.startCampaign({ shopId: 'SHOP1', subject: 'Evening {first_name}', body: 'Hello {first_name}, the shop is still available if you are interested.' });
+  const before = E.sent.length;
+  E.runTrigger(120);
+  assert.strictEqual(E.sent.length, before);
+  const c = E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id);
+  assert(/Waiting for sending hours \(9:00–21:00/.test(c.status_reason), c.status_reason);
+  assert.strictEqual(c.next_send_at, '2026-11-05T05:00:00.000Z');
+  E.setClock('2026-11-05T05:00:30Z');
+  E.runTrigger(2);
+  assert.strictEqual(E.sent.length, before + 1);
+});
+t('random spacing is never shorter than the chosen wait (up to 40% longer)', () => {
+  globalThis.__rand = 0.999;
+  C.importContacts('SHOP1', [{ full_name: 'J1', email: 'j1@ex.com', consent_status: 'yes' }, { full_name: 'J2', email: 'j2@ex.com', consent_status: 'yes' }], {});
+  const k = C.startCampaign({ shopId: 'SHOP1', subject: 'Spacing {first_name}', body: 'Hello {first_name}, checking spacing between emails today.', delayMinutes: 5 });
+  E.runTrigger(1);
+  const c = E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id);
+  const gap = (Date.parse(c.next_send_at) - E.now()) / 60000;
+  assert(gap >= 5 && gap <= 7.01, 'gap ' + gap);
+  globalThis.__rand = undefined;
+  E.runTrigger(10);
+});
+}
+
 console.log('\n' + passed + ' checks passed' + (process.exitCode ? ', some FAILED' : ''));

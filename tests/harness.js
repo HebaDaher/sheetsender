@@ -82,6 +82,7 @@ function makeEnv(srcDir) {
         const parts = raw.split(/\r\n\r\n/);
         const textB64 = (parts[2] || '').split('\r\n--')[0];
         const msg = {
+          listUnsub: header('List-Unsubscribe'), dateHdr: header('Date'), msgId: header('Message-ID'),
           account: at.email, from: header('From'), to: header('To').replace(/[<>]/g, ''), replyTo: header('Reply-To').replace(/[<>]/g, ''),
           subject: decodeWord(header('Subject')), fromName: decodeWord(header('From').split(' <')[0]),
           text: Buffer.from(textB64.replace(/\r\n/g, ''), 'base64').toString('utf8'), raw,
@@ -156,7 +157,7 @@ function makeEnv(srcDir) {
     get: k => (k in b ? b[k] : null), put: (k, v) => { b[k] = String(v); }, remove: k => { delete b[k]; } }; };
 
   const ctx = {
-    Date: FakeDate, console, JSON, Math, Object, Array, String, Number, RegExp, Error, Promise,
+    Date: FakeDate, console, JSON, Math: Object.assign(Object.create(Math), { random: () => (globalThis.__rand !== undefined ? globalThis.__rand : 0) }), Object, Array, String, Number, RegExp, Error, Promise,
     SpreadsheetApp: {
       create: () => { ss = makeSpreadsheet(users.effective); return ss; },
       openById: (id) => {
@@ -208,6 +209,7 @@ function makeEnv(srcDir) {
     get ss() { return ss; },
     as(email) { users.active = email; users.effective = email; },
     advance(min) { clock += min * 60000; },
+    setClock(iso) { clock = Date.parse(iso); },
     now() { return clock; },
     runTrigger(minutes) {
       const a = users.active, e = users.effective;

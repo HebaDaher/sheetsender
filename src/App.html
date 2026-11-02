@@ -572,7 +572,8 @@
       '<div class="muted small">More fields:</div><div class="chips">' +
       ['full_name', 'shop_name', 'sender_name'].map(function (p) { return '<button class="chip" data-sph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
       '</div><div><div class="muted small" style="margin-bottom:4px">Preview — what <b id="sPrevName"></b> will receive</div><div id="sLive"></div>' +
-      '<div class="muted small" style="margin:12px 0 4px">How it starts for each person</div><div id="sGreets" class="small"></div></div></div></div>';
+      '<div class="muted small" style="margin:12px 0 4px">How it starts for each person</div><div id="sGreets" class="small"></div>' +
+      '<div id="sSpam" style="margin-top:12px"></div></div></div></div>';
 
     html += '<div class="card"><h2>2. Sending options</h2><div class="grid2"><div>' +
       '<label class="field"><span>Wait between emails</span><select id="sDelay">' +
@@ -594,6 +595,10 @@
       $('sLive').innerHTML = (unknown.length ? '<div class="notice bad">Unknown field: ' + esc(unknown.join(', ')) + '. Use the buttons to insert fields.</div>' : '') +
         '<div class="email-preview"><div class="meta"><div><b>From:</b> ' + esc(S.data.shop.sender_name || S.data.shop.shop_name) + ' &lt;' + esc(S.data.shop.sender_email || 'no Gmail chosen') + '&gt;</div>' +
         '<div><b>Subject:</b> ' + esc(renderText(st.subject, f)) + '</div></div><div class="body">' + esc(renderText(st.body, f)) + '</div></div>';
+      var tips = spamCheck(st.subject, st.body);
+      $('sSpam').innerHTML = tips.length
+        ? '<div class="notice warn"><b>To avoid the spam folder:</b><ul style="margin:6px 0 0;padding-left:18px">' + tips.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul></div>'
+        : (st.subject && st.body.trim() ? '<div class="notice ok">✓ Spam check: this email looks like a normal personal message.</div>' : '');
       var people = S.data.contacts.filter(function (x) { return x.emailCheck.ok; }).slice(0, 4);
       if (!people.length) people = [c];
       $('sGreets').innerHTML = people.map(function (x) {
@@ -625,6 +630,27 @@
     if (st.review) renderReview();
   }
 
+  // Simple checks for things that often send emails to spam.
+  var SPAM_WORDS = ['free', 'urgent', 'act now', 'limited time', 'guarantee', 'guaranteed', 'winner', 'congratulations', 'click here',
+    'buy now', 'discount', 'cheap', 'best price', 'risk-free', '100%', 'earn money', 'cash', 'offer expires', 'deal of the',
+    'مجانا', 'مجاناً', 'عرض خاص', 'خصم', 'اربح', 'فرصة لا تعوض', 'عاجل'];
+  function spamCheck(subject, body) {
+    var tips = [], all = (subject + ' ' + body), low = all.toLowerCase();
+    var hits = SPAM_WORDS.filter(function (w) { return low.indexOf(w) !== -1; });
+    if (hits.length) tips.push('Avoid sales words like: ' + hits.slice(0, 5).map(function (w) { return '“' + w + '”'; }).join(', ') + '. Write the way you would to a friend.');
+    var letters = subject.replace(/[^A-Za-z]/g, '');
+    if (letters.length > 6 && letters === letters.toUpperCase()) tips.push('Don\'t write the subject in CAPITAL LETTERS.');
+    if (/[!?]{2,}|!.*!/.test(subject)) tips.push('Use at most one “!” and no “!!” or “?!” in the subject.');
+    if (/[$€£]|\bAED\b|درهم/i.test(subject)) tips.push('Leave prices out of the subject line.');
+    var links = (all.match(/https?:\/\/|www\./gi) || []).length;
+    if (links > 1) tips.push('Use at most one link (you have ' + links + '). Emails full of links look like ads.');
+    if (/bit\.ly|tinyurl|goo\.gl|t\.co\//i.test(all)) tips.push('Don\'t use short links (bit.ly etc.); write the full website address.');
+    if (body.indexOf('{first_name}') === -1 && body.indexOf('{full_name}') === -1) tips.push('Add the person\'s name (button below the message). Personal emails reach the inbox more often.');
+    if (body.replace(/\{[a-z_]+\}/gi, 'x').trim().length < 60) tips.push('The message is very short. Write 2–4 normal sentences.');
+    if (subject.trim().length > 70) tips.push('Keep the subject short (under about 60 characters).');
+    return tips;
+  }
+
   function sendParams() {
     var st = S.send;
     return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: st.delay, skipPrevious: st.skipPrevious, name: st.name };
@@ -649,12 +675,13 @@
       '<div class="stat"><div class="n">' + r.willSend + '</div><div class="l">will get the email</div></div>' +
       '<div class="stat"><div class="n">' + r.willSkip + '</div><div class="l">will be skipped</div></div>' +
       '<div class="stat"><div class="n">' + r.delayMinutes + ' min</div><div class="l">between emails</div></div>' +
-      '<div class="stat"><div class="n">' + (r.estimatedHours < 1 ? Math.max(1, Math.round(r.estimatedHours * 60)) + ' min' : r.estimatedHours + ' h') + '</div><div class="l">about how long</div></div></div>';
+      '<div class="stat"><div class="n">' + (r.estimatedDays > 1 ? r.estimatedDays + ' days' : (r.estimatedHours < 1 ? Math.max(1, Math.round(r.estimatedHours * 60)) + ' min' : r.estimatedHours + ' h')) + '</div><div class="l">about how long</div></div></div>';
     if (r.skipReasons.length) {
       html += '<details><summary>Why people will be skipped</summary><ul>' + r.skipReasons.map(function (s) {
         return '<li>' + esc(s.reason) + ': <b>' + s.count + '</b></li>';
       }).join('') + '</ul></details>';
     }
+    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time), about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) + ' minutes apart.</p>';
     if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:10px">' + esc(r.dailyLimitNote) + '</div>';
     html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
       '<div class="email-preview"><div class="meta">' +
@@ -1047,12 +1074,32 @@
     }
     html += '</div>';
 
+    // 5. Safe sending (shown after section 4 below)
+    var R = st.sendingRules;
+    var hourOpts = function (sel, from, to) {
+      var o = ''; for (var h = from; h <= to; h++) o += '<option value="' + h + '"' + (h === sel ? ' selected' : '') + '>' + h + ':00</option>'; return o;
+    };
+    var safeHtml = '<div class="card"><h2>5. Safe sending (protects your Gmail accounts)</h2>' +
+      '<p class="muted">Gmail watches how many emails an account sends and how people react. Sending a few at a time, at normal hours, keeps accounts safe and out of spam.</p>' +
+      '<div class="grid2"><label class="field"><span>Most emails per Gmail account per day</span>' +
+      '<input type="text" inputmode="numeric" id="ruleCap" value="' + R.dailyCap + '"><span class="muted small" style="font-weight:400">Recommended: 20–40 for a new or quiet account, up to 80 for an older busy account.</span></label>' +
+      '<div><div class="field"><span style="font-weight:600;display:block;margin-bottom:4px">Send only between (UAE time)</span><div class="row">' +
+      '<select id="ruleStart" style="width:auto">' + hourOpts(R.startHour, 0, 23) + '</select> and ' +
+      '<select id="ruleEnd" style="width:auto">' + hourOpts(R.endHour, 1, 24) + '</select></div></div></div></div>' +
+      (st.sentToday && st.sentToday.length ? '<p class="small">Sent today: ' + st.sentToday.map(function (x) { return esc(x.email) + ' <b>' + x.n + '</b>/' + R.dailyCap; }).join(' · ') + '</p>' : '') +
+      '<button class="btn primary" id="saveRules">Save</button></div>';
+
     // 4. Sender engine
     html += '<div class="card"><h2>4. Automatic sender</h2><p>' +
       (S.boot.engine.lastRun ? 'Last ran ' + esc(fmt(S.boot.engine.lastRun)) + '.' : 'Has not run yet.') +
       ' It wakes up every minute and sends emails that are due.</p><button class="btn" id="restartEngine">Restart sender</button></div>';
+    html += safeHtml;
 
     $('app').innerHTML = html;
+    $('saveRules').addEventListener('click', function () {
+      withBusy('Saving…', call('saveSendingRules', { dailyCap: $('ruleCap').value, startHour: $('ruleStart').value, endHour: $('ruleEnd').value }))
+        .then(function (r) { S.boot.sendingRules = r; showBanner('success', 'Saved. At most ' + r.dailyCap + ' emails per Gmail per day, between ' + r.startHour + ':00 and ' + r.endHour + ':00.'); renderSettings(); });
+    });
 
     $('setBack').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(function (b) { S.boot = b; renderHome(); }); });
     $('copyRedir').addEventListener('click', function () { var i = $('redir'); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied.'); });
