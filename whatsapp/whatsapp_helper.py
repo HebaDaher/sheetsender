@@ -133,18 +133,17 @@ class Helper:
         if self.ctx is None or self.page is None:
             self.wa = "closed"
             return
-        try:
-            if self.page.is_closed():
-                raise RuntimeError("closed")
-            if self.page.query_selector(core.SEL_LOGGED_IN):
-                self.wa = "connected"
-            elif self.page.query_selector(core.SEL_QR):
-                self.wa = "qr"
-            else:
-                self.wa = "loading"
-        except Exception:
+        if self.page.is_closed():
             log("The WhatsApp window was closed.")
             self.close_browser()
+            return
+        # While WhatsApp reloads itself, reading the page fails for a moment: that is "loading", not "closed".
+        if core._safe(lambda: self.page.query_selector(core.SEL_LOGGED_IN)):
+            self.wa = "connected"
+        elif core._safe(lambda: self.page.query_selector(core.SEL_QR)):
+            self.wa = "qr"
+        elif self.wa != "connected":
+            self.wa = "loading"
 
     # ---------------- keep the Mac awake while a send is running
     def keep_awake(self, on):
@@ -293,11 +292,23 @@ class Helper:
         name = it.get("name") or it["phone"]
         j["message"] = f"Sending to {name}…"
         log(f"Sending to {name} (+{it['phone']})…")
-        status, reason = core.send_one(self.page, it["phone"], it["text"])
+        try:
+            status, reason = core.send_one(self.page, it["phone"], it["text"])
+        except Exception as e:  # never retry the same person in a fast loop
+            tries = j.setdefault("tries", {})
+            tries[it["contact_id"]] = tries.get(it["contact_id"], 0) + 1
+            if tries[it["contact_id"]] < 2:
+                j["next_at"] = time.time() + 60 * core.TIME_SCALE
+                j["message"] = "A problem with WhatsApp — trying this person again in 1 minute."
+                log(f"  problem: {e} — retry in 1 minute")
+                save_job(j)
+                return
+            status, reason = "failed", "WhatsApp problem: " + str(e).splitlines()[0][:120]
         stamp = datetime.now().isoformat(timespec="seconds")
         if status == "logged_out":
             self.wa = "qr"
             j["message"] = "WhatsApp logged out on the Mac. Scan the QR code in the WhatsApp window to continue."
+            j["next_at"] = time.time() + 30 * core.TIME_SCALE
             save_job(j)
             return
         j["results"]["items"].append({"contact_id": it["contact_id"], "phone": it["phone"], "status": status, "reason": reason, "at": stamp})
@@ -334,7 +345,7 @@ class Helper:
             except Exception as e:
                 self.last_error = str(e)
                 log(f"Problem: {e}")
-                if "closed" in str(e).lower() or "target" in str(e).lower():
+                if self.page is not None and core._safe(lambda: self.page.is_closed(), True):
                     self.close_browser()
             time.sleep(TICK_S)
 

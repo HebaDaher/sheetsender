@@ -317,6 +317,21 @@ t('a written email is checked before sending', () => {
   throwsMsg(() => C.getCampaignPreview({ shopId: 'SHOP2', subject: 's', body: 'Hi {name}' }), /not known: \{name\}/);
 });
 
+t('saved messages: delete hides it from the lists, keeps history; same text again brings it back', () => {
+  E.as('dad@gmail.com');
+  const t = C.saveTemplate({ shop_id: 'SHOP2', template_name: 'Temp msg', channel: 'email', subject: 'Temp {first_name}', body: 'Hello {first_name}, temporary message text here.' });
+  assert(C.getShopData('SHOP2').templates.some(x => x.template_id === t.template_id));
+  C.deleteTemplate(t.template_id, 'SHOP2');
+  assert(!C.getShopData('SHOP2').templates.some(x => x.template_id === t.template_id), 'hidden from the lists');
+  assert.strictEqual(E.tab('Templates').find(x => x.template_id === t.template_id).active, 'deleted', 'kept for history');
+  throwsMsg(() => C.deleteTemplate(t.template_id, 'SHOP1'), /another shop/);
+  const k = C.startCampaign({ shopId: 'SHOP2', subject: 'Temp {first_name}', body: 'Hello {first_name}, temporary message text here.', delayMinutes: 1 });
+  assert.strictEqual(k.template_id, t.template_id, 'same text re-uses the saved message');
+  assert(C.getShopData('SHOP2').templates.some(x => x.template_id === t.template_id), 'and it is back in the list');
+  C.stopCampaign(k.campaign_id);
+  const u = C.saveTemplate({ template_id: t.template_id, shop_id: 'SHOP2', template_name: 'Temp msg', channel: 'email', subject: 'Edited {first_name}', body: 'Edited text for {first_name} here.' });
+  assert.strictEqual(E.tab('Templates').find(x => x.template_id === u.template_id).subject, 'Edited {first_name}', 'edit saves in place');
+});
 console.log('Expiry, disconnect, reconnect, errors');
 let c2;
 t('permission revoked/expired at Google → send pauses with reconnect steps; nobody marked failed', () => {

@@ -48,6 +48,9 @@ LOGIN_TIMEOUT_S = int(os.environ.get("SF_LOGIN_TIMEOUT", "180"))
 SEL_LOGGED_IN = "#pane-side, [aria-label='Chat list'], [data-testid='chat-list']"
 SEL_QR = "canvas[aria-label*='Scan'], [data-ref] canvas, div[data-ref]"
 SEL_COMPOSE = "footer div[contenteditable='true'], div[contenteditable='true'][data-tab='10']"
+SEL_SEND_BUTTON = ("[data-icon='send'], [data-icon='wds-ic-send-filled'], button[aria-label='Send'], "
+                   "button[aria-label='إرسال'], [data-testid='send'], [data-testid='compose-btn-send']")
+SETTLE_S = 3  # seconds the chat must stay open with the text before sending
 INVALID_TEXTS = ["phone number shared via url is invalid", "رقم الهاتف الذي تمت مشاركته عبر الرابط غير صالح"]
 
 stop_requested = False
@@ -140,38 +143,100 @@ def wait_for_login(page):
     return False
 
 
+def _safe(fn, default=None):
+    """WhatsApp Web reloads itself while a chat opens; reading the page during that throws. Treat it as 'not yet'."""
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def _box_text(page):
+    box = _safe(lambda: page.query_selector(SEL_COMPOSE))
+    if box is None:
+        return None
+    t = _safe(lambda: box.inner_text())
+    return None if t is None else t.strip()
+
+
+def _wait_box_empty(page, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        if _box_text(page) == "":
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def _problem_screenshot(page, phone):
+    try:
+        folder = DATA_DIR / "problems"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phone[-4:]}.png"
+        page.screenshot(path=str(path))
+        return path
+    except Exception:
+        return None
+
+
 def send_one(page, phone, text):
-    """Returns ('sent', '') or ('failed', reason) or ('logged_out', reason)."""
+    """Returns ('sent', '') or ('failed', reason) or ('logged_out', reason). Never raises because of page reloads."""
     url = f"{WA_URL}/send?phone={phone}&text={urllib.parse.quote(text)}"
-    page.goto(url, wait_until="domcontentloaded")
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        body = (page.inner_text("body") or "").lower()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    except Exception as e:
+        return "failed", f"WhatsApp did not load ({str(e).splitlines()[0][:80]})"
+
+    # Wait until the chat is open with the message written in the box, and stays like that for a moment
+    # (WhatsApp Web often reloads once while opening a chat from a link).
+    deadline = time.time() + 90
+    ready_since = None
+    while True:
+        if time.time() > deadline:
+            _problem_screenshot(page, phone)
+            return "failed", "WhatsApp did not open the chat in time"
+        body = (_safe(lambda: page.inner_text("body"), "") or "").lower()
         if any(t in body for t in INVALID_TEXTS):
             return "failed", "This number is not on WhatsApp"
-        if page.query_selector(SEL_QR) and not page.query_selector(SEL_LOGGED_IN):
+        if _safe(lambda: page.query_selector(SEL_QR)) and not _safe(lambda: page.query_selector(SEL_LOGGED_IN)):
             return "logged_out", "WhatsApp Web logged out"
-        box = page.query_selector(SEL_COMPOSE)
-        if box and (box.inner_text() or "").strip():
-            break
-        time.sleep(1)
-    else:
-        return "failed", "WhatsApp did not open the chat in time"
-
-    time.sleep(random.uniform(2, 5) * TIME_SCALE)  # a short human-like pause before pressing Enter
-    box = page.query_selector(SEL_COMPOSE)
-    box.click()
-    page.keyboard.press("Enter")
-
-    # Sent = the message box is empty again.
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        box = page.query_selector(SEL_COMPOSE)
-        if box is not None and not (box.inner_text() or "").strip():
-            time.sleep(2 * TIME_SCALE)  # let WhatsApp hand the message to the phone
-            return "sent", ""
+        if _box_text(page):
+            ready_since = ready_since or time.time()
+            if time.time() - ready_since >= SETTLE_S * TIME_SCALE:
+                break
+        else:
+            ready_since = None
         time.sleep(0.5)
-    return "failed", "The message stayed in the box (not sent)"
+
+    time.sleep(random.uniform(1, 3) * TIME_SCALE)  # a short human-like pause
+    # Press Enter in the box; if WhatsApp did not take it, click the Send button. Sent = the box is empty again.
+    for _ in range(3):
+        box = _safe(lambda: page.query_selector(SEL_COMPOSE))
+        if box is not None:
+            _safe(lambda: box.click())
+            _safe(lambda: page.keyboard.press("Enter"))
+            if _wait_box_empty(page, 8):
+                time.sleep(2 * TIME_SCALE)  # let WhatsApp hand the message to the phone
+                return "sent", ""
+        btn = _safe(lambda: page.query_selector(SEL_SEND_BUTTON))
+        if btn is not None:
+            _safe(lambda: btn.click())
+            if _wait_box_empty(page, 8):
+                time.sleep(2 * TIME_SCALE)
+                return "sent", ""
+        if _box_text(page) is None:  # the chat disappeared (WhatsApp reloaded): wait for it to come back
+            _wait_box_has_text(page, 30)
+    shot = _problem_screenshot(page, phone)
+    return "failed", "The message stayed in the box (not sent)" + (f" — picture saved: {shot.name}" if shot else "")
+
+
+def _wait_box_has_text(page, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        if _box_text(page):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 # ---------------------------------------------------------------- main

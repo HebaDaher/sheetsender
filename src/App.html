@@ -633,6 +633,54 @@
   }
   function startAtIso(sc) { return sc.when === 'at' && sc.at ? new Date(sc.at).toISOString() : ''; }
 
+
+  /* ---------- Saved messages menu with Save / Save as new / Delete (email and WhatsApp) ---------- */
+  function savedMenuHtml(p, list, selectedId, newLabel) {
+    return '<div class="field"><span style="display:block;font-weight:600;margin-bottom:4px">Saved messages</span><div class="row">' +
+      '<select id="' + p + 'Tpl" style="flex:1;min-width:200px;width:auto"><option value="">' + esc(newLabel) + '</option>' +
+      list.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === selectedId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
+      '</select><button class="btn small" id="' + p + 'Save">💾 Save</button><button class="btn small" id="' + p + 'SaveNew">Save as new</button>' +
+      '<button class="btn small danger" id="' + p + 'Del"' + (selectedId ? '' : ' disabled') + '>🗑 Delete</button></div>' +
+      '<div class="small muted" id="' + p + 'TplNote" style="margin-top:4px"></div></div>';
+  }
+  function bindSavedMenu(p, cfg) {
+    function selected() { return cfg.list().filter(function (t) { return t.template_id === cfg.getSel(); })[0]; }
+    function note() {
+      var t = selected(), x = cfg.getText(), el = $(p + 'TplNote'); if (!el) return;
+      if (!t) el.textContent = 'New message — not saved yet. Click “Save” to keep it in the list (it is also saved by itself when you start sending).';
+      else if (t.body !== x.body || (cfg.channel === 'email' && t.subject !== x.subject)) el.innerHTML = '<span style="color:var(--warn)">Changed — click “Save” to update “' + esc(t.template_name) + '”, or “Save as new” to keep both.</span>';
+      else el.textContent = '✓ Saved as “' + t.template_name + '”.';
+    }
+    function save(asNew) {
+      var t = asNew ? null : selected(), x = cfg.getText();
+      var name = t ? t.template_name : window.prompt('Name for this message (shown in the list):',
+        String((cfg.channel === 'email' ? x.subject : '') || x.body.split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '').replace(/\{[a-z_]+\}/gi, '').trim().slice(0, 60) || 'My message');
+      if (name === null) return;
+      if (!String(name).trim()) { showBanner('error', 'Give the message a name.'); return; }
+      withBusy('Saving…', call('saveTemplate', { template_id: t ? t.template_id : '', shop_id: S.shopId, template_name: name, channel: cfg.channel,
+        subject: x.subject || '', body: x.body, active: 'yes' })).then(function (row) {
+        cfg.setSel(row.template_id);
+        return reloadShop().then(function () { showBanner('success', (t ? 'Updated “' : 'Saved “') + row.template_name + '”.'); cfg.rerender(); });
+      });
+    }
+    $(p + 'Tpl').addEventListener('change', function () {
+      var t = cfg.list().filter(function (x) { return x.template_id === $(p + 'Tpl').value; })[0];
+      cfg.setSel(t ? t.template_id : ''); cfg.load(t || null); cfg.rerender();
+    });
+    $(p + 'Save').addEventListener('click', function () { save(false); });
+    $(p + 'SaveNew').addEventListener('click', function () { save(true); });
+    $(p + 'Del').addEventListener('click', function () {
+      var t = selected(); if (!t) return;
+      if (!confirm('Delete the saved message “' + t.template_name + '”?\n\nIt disappears from the list. Sends that already use it are not affected.')) return;
+      withBusy('Deleting…', call('deleteTemplate', t.template_id, S.shopId)).then(function () {
+        cfg.setSel('');
+        return reloadShop().then(function () { showBanner('success', 'Deleted “' + t.template_name + '”. The text is still in the box if you need it.'); cfg.rerender(); });
+      });
+    });
+    cfg.onNote = note;
+    note();
+  }
+
   function sendSample() {
     var c = S.data.contacts.filter(function (x) { return x.emailCheck.ok; })[0] ||
       S.data.contacts.filter(function (x) { return x.full_name || x.first_name; })[0] ||
@@ -653,12 +701,7 @@
     if (st.subject === undefined) loadTemplateIntoSend(tpls.length ? tpls[0].template_id : '');
     var html = '<div class="card"><h2>1. Write the email</h2>' +
       '<p class="muted">Write it once. Click <b>Insert the person\'s name</b> where the name should go, and each person gets their own name from the Excel file (Hello Heba, Hello Adnan…).</p>';
-    if (tpls.length) {
-      html += '<label class="field"><span>Start from a saved email (optional)</span><select id="sTpl">' +
-        '<option value="">— Write a new email —</option>' +
-        tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === st.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
-        '</select></label>';
-    }
+    html += savedMenuHtml('se', tpls, st.templateId, '— New email —');
     html += '<div class="grid2"><div>' +
       '<label class="field"><span>Subject</span><input type="text" id="sSubject" maxlength="250" value="' + esc(st.subject) + '" placeholder="Example: Is the shop still interesting for you?"></label>' +
       '<label class="field"><span>Message</span><textarea id="sBody" style="min-height:240px">' + esc(st.body) + '</textarea></label>' +
@@ -704,14 +747,15 @@
       var ta = $('sBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd;
       ta.value = ta.value.slice(0, s0) + text + ta.value.slice(e0);
       ta.focus(); ta.setSelectionRange(s0 + text.length, s0 + text.length);
-      live();
+      live(); if (savedCfg.onNote) savedCfg.onNote();
     }
-    if ($('sTpl')) $('sTpl').addEventListener('change', function () {
-      if ((st.subject || st.body) && !confirm('Replace what you wrote with this saved email?')) { this.value = st.templateId; return; }
-      loadTemplateIntoSend(this.value); viewSend();
-    });
-    $('sSubject').addEventListener('input', live);
-    $('sBody').addEventListener('input', live);
+    var savedCfg = { channel: 'email', list: emailTemplates, getSel: function () { return st.templateId; }, setSel: function (id) { st.templateId = id; },
+      getText: function () { return { subject: st.subject || '', body: st.body || '' }; },
+      load: function (t) { st.subject = t ? t.subject : ''; st.body = t ? t.body : 'Hello {first_name},\n\n'; st.review = null; },
+      rerender: viewSend };
+    bindSavedMenu('se', savedCfg);
+    $('sSubject').addEventListener('input', function () { live(); savedCfg.onNote(); });
+    $('sBody').addEventListener('input', function () { live(); savedCfg.onNote(); });
     $('sInsertName').addEventListener('click', function () { insertAt('{first_name}'); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-sph]'), function (b) {
       b.addEventListener('click', function () { insertAt('{' + b.getAttribute('data-sph') + '}'); });
@@ -1063,14 +1107,10 @@
       a.body = tpls.length ? tpls[0].body : 'Hello {first_name}, this is {sender_name} about {shop_name}. ';
     }
     var html = '<div class="card"><h2>Automatic WhatsApp sending</h2>' +
-      '<p class="muted">Write the message once with the person\'s name. The WhatsApp Sender on your Mac then sends it to each person by itself, ' +
-      'waiting <b>5–7 minutes</b> between messages, at most <b>30 per day</b>, between <b>9:00 and 21:00</b>.</p>' +
+      '<p class="muted">Write the message once with the person\'s name, choose the schedule and press <b>Start sending</b>. The WhatsApp Sender on the Mac sends it to each person by itself, and you can follow it here.</p>' +
       '<div class="notice warn small">WhatsApp does not allow automatic sending from a normal number. Going slowly lowers the risk, but WhatsApp can still block the number, ' +
       'especially if people report it. Only people who agreed to be contacted are included.</div>';
-    if (tpls.length) {
-      html += '<label class="field"><span>Start from a saved message (optional)</span><select id="waTpl"><option value="">— Write a new message —</option>' +
-        tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === a.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') + '</select></label>';
-    }
+    html += savedMenuHtml('wa', tpls, a.templateId, '— New message —');
     html += '<div class="grid2"><div><label class="field"><span>WhatsApp message</span><textarea id="waBody" style="min-height:150px">' + esc(a.body) + '</textarea></label>' +
       '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
@@ -1097,16 +1137,18 @@
         return '<div style="padding:4px 0;border-bottom:1px solid var(--line)"><b>' + esc(x.full_name || x.first_name || x.phone) + ':</b> ' + esc(first) + '</div>';
       }).join('') : '<span class="muted">Nobody can be messaged yet.</span>';
     }
-    if ($('waTpl')) $('waTpl').addEventListener('change', function () {
-      var t = tpls.filter(function (x) { return x.template_id === $('waTpl').value; })[0];
-      a.templateId = $('waTpl').value; a.body = t ? t.body : 'Hello {first_name}, '; $('waBody').value = a.body; live();
-    });
-    $('waBody').addEventListener('input', live);
+    var waCfg = { channel: 'whatsapp', list: function () { return S.data.templates.filter(function (t) { return t.channel === 'whatsapp' && t.active !== 'no'; }); },
+      getSel: function () { return a.templateId; }, setSel: function (id) { a.templateId = id; },
+      getText: function () { return { subject: '', body: a.body || '' }; },
+      load: function (t) { a.body = t ? t.body : 'Hello {first_name}, '; },
+      rerender: viewWhatsApp };
+    bindSavedMenu('wa', waCfg);
+    $('waBody').addEventListener('input', function () { live(); waCfg.onNote(); });
     $('waSkip').addEventListener('change', function () { a.skipPrevious = this.checked; });
     bindSchedule('ws', a.sched, function () {}, function () { return [a.sched.h1, a.sched.h2]; });
     $('waName').addEventListener('click', function () {
       var ta = $('waBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd, ins = '{first_name}';
-      ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live();
+      ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live(); waCfg.onNote();
     });
     $('waJob').addEventListener('click', function () {
       var prob = scheduleProblem(a.sched, { limits: true });
@@ -1141,6 +1183,8 @@
         (sc.ignoreHours ? ', day and night.' : ', ' + sc.h1 + ':00–' + sc.h2 + ':00.'))) return;
       withBusy('Sending the start command…', call('startWhatsAppAuto', p)).then(function (r) {
         var skip = r.skipped && r.skipped.length ? ' Skipped: ' + r.skipped.map(function (x) { return x.count + ' × ' + x.reason; }).join('; ') + '.' : '';
+        a.templateId = r.template_id || a.templateId;
+        reloadShop().then(function () { if (S.view === 'whatsapp') viewWhatsApp(); });
         showBanner('success', 'Started for ' + plural(r.people, 'person') + '. The Mac picks it up within about 10 seconds' +
           (r.rules.startHour > 0 || r.rules.endHour < 24 ? '' : ' and sends day and night') + '.' + skip, true);
         pollHelper(true);
@@ -1185,11 +1229,18 @@
         list.map(function (x) {
           return '<tr><td>' + esc(x.template_name) + '</td><td>' + (x.channel === 'whatsapp' ? 'WhatsApp' : 'Email') + '</td>' +
             '<td>' + esc(x.channel === 'email' ? x.subject : String(x.body).slice(0, 70)) + '</td><td>' + (x.active === 'no' ? 'No' : 'Yes') + '</td>' +
-            '<td><button class="btn small" data-edit="' + esc(x.template_id) + '">Edit</button></td></tr>';
+            '<td class="row"><button class="btn small" data-edit="' + esc(x.template_id) + '">Edit</button><button class="btn small danger" data-tdel="' + esc(x.template_id) + '">Delete</button></td></tr>';
         }).join('') + '</table></div>';
     }
     html += '</div>';
     $('view').innerHTML = html;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tdel]'), function (b) {
+      b.addEventListener('click', function () {
+        var x = S.data.templates.filter(function (y) { return y.template_id === b.getAttribute('data-tdel'); })[0];
+        if (!x || !confirm('Delete “' + x.template_name + '”?\n\nIt disappears from the lists. Sends that already use it are not affected.')) return;
+        withBusy('Deleting…', call('deleteTemplate', x.template_id, S.shopId)).then(reloadShop).then(function () { showBanner('success', 'Deleted.'); viewTemplates(); });
+      });
+    });
     $('tNew').addEventListener('click', function () {
       S.tpl.editing = { template_id: '', shop_id: S.shopId, template_name: '', channel: 'email', subject: '', body: 'Hi {first_name},\n\n', active: 'yes' };
       viewTemplates();

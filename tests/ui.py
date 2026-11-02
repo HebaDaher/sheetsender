@@ -17,7 +17,13 @@ try:
         page = b.new_page(viewport={'width': 1200, 'height': 900})
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
-        page.on('dialog', lambda d: d.accept())
+        PROMPT = {'text': None}
+        def on_dialog(d):
+            if d.type == 'prompt' and PROMPT['text'] is not None:
+                d.accept(PROMPT['text']); PROMPT['text'] = None
+            else:
+                d.accept()
+        page.on('dialog', on_dialog)
         page.goto('http://127.0.0.1:8765/')
         page.wait_for_selector('.shop-card')
         check('Example Shop' in page.inner_text('main'), 'home lists the shop')
@@ -56,7 +62,8 @@ try:
         page.click('[data-view="send"]')
         page.wait_for_selector('#sBody')
         check(page.input_value('#sSubject') != '', 'saved email loaded into the editor')
-        page.select_option('#sTpl', '')
+        check(page.is_visible('#seSave') and page.is_visible('#seSaveNew'), 'Save / Save as new buttons on the email page')
+        page.select_option('#seTpl', '')
         page.fill('#sSubject', 'Still interested, ')
         page.click('#sSubject'); page.keyboard.press('End')
         page.fill('#sBody', 'Hello ')
@@ -68,6 +75,17 @@ try:
         check('CAPITAL' in spam and 'sales words' in spam and '!!' in spam, 'spam check warns: ' + spam.replace(chr(10), ' | ')[:120])
         page.fill('#sSubject', 'Still interested?')
         check('looks like a normal personal message' in page.inner_text('#sSpam'), 'spam check passes a normal email')
+        check('not saved yet' in page.inner_text('#seTplNote'), 'shows the new email is not saved yet')
+        PROMPT['text'] = 'My test email'
+        page.click('#seSaveNew'); page.wait_for_selector('text=Saved “My test email”')
+        page.wait_for_selector('#seTpl')
+        check(page.eval_on_selector('#seTpl', 'e => e.options[e.selectedIndex].text') == 'My test email', 'new email appears in the menu and is selected')
+        page.fill('#sBody', page.input_value('#sBody') + ' Thanks.')
+        check('Changed' in page.inner_text('#seTplNote'), 'shows unsaved changes')
+        page.click('#seSave'); page.wait_for_selector('text=Updated “My test email”')
+        page.wait_for_selector('#seTpl')
+        check('✓ Saved as' in page.inner_text('#seTplNote'), 'Save updates the saved email')
+        page.fill('#sBody', page.input_value('#sBody').replace(' Thanks.', ''))
         greets = page.inner_text('#sGreets')
         check('Hello Fatima,' in greets and 'Hello Omar,' in greets, 'each person gets their own name: ' + greets.replace(chr(10), ' | ')[:120])
         page.fill('#esMin', '2')
@@ -120,6 +138,12 @@ try:
         page.fill('#waBody', 'Hello ')
         page.click('#waBody'); page.keyboard.press('End'); page.click('#waName'); page.keyboard.type(', the shop is still available.')
         check('Fatima Hassan: Hello Fatima, the shop' in page.inner_text('#waGreets'), 'WhatsApp preview per person')
+        PROMPT['text'] = 'WA short'
+        page.click('#waSaveNew'); page.wait_for_selector('text=Saved “WA short”'); page.wait_for_selector('#waTpl')
+        check(page.eval_on_selector('#waTpl', 'e => e.options[e.selectedIndex].text') == 'WA short', 'WhatsApp message saved into the menu')
+        page.click('#waDel'); page.wait_for_selector('text=Deleted “WA short”'); page.wait_for_selector('#waTpl')
+        opts = page.eval_on_selector('#waTpl', 'e => Array.from(e.options).map(o => o.text)')
+        check('WA short' not in opts and page.input_value('#waBody').startswith('Hello {first_name}, the shop'), 'Delete removes it from the menu, text stays: ' + str(opts))
         page.check('input[name="wsWhen"][value="at"]')
         from datetime import datetime as _dt, timedelta as _td
         when = (_dt.now() + _td(days=2)).replace(hour=10, minute=30, second=0, microsecond=0)

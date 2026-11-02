@@ -22,13 +22,22 @@ class H(http.server.BaseHTTPRequestHandler):
             if phone.startswith('9719999'):  # chat never opens
                 return self.send_html('<div id="pane-side"></div>')
             esc = text.replace('&', '&amp;').replace('<', '&lt;')
+            # Like real WhatsApp Web: numbers starting 97155 reload the page once right after the chat appears;
+            # numbers starting 97156 ignore Enter (only the Send button works).
+            reload_js = ''
+            if phone.startswith('97155') and 'reloaded' not in q:
+                reload_js = "setTimeout(function(){ location.replace(location.href + '&reloaded=1'); }, 700);"
+            enter_ok = 'false' if phone.startswith('97156') else 'true'
             return self.send_html('''<div id="pane-side"></div><div id="main"></div>
-<footer><div contenteditable="true" data-tab="10" id="box" style="white-space:pre-wrap">%s</div></footer>
+<footer><div contenteditable="true" data-tab="10" id="box" style="white-space:pre-wrap">%s</div>
+<button aria-label="Send" id="send"><span data-icon="send"></span></button></footer>
 <script>
-var box=document.getElementById('box');
-box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault();
-  fetch('/record',{method:'POST',body:JSON.stringify({phone:%s,text:box.innerText})}).then(function(){ box.innerText=''; }); }});
-</script>''' % (esc, json.dumps(phone)))
+var box=document.getElementById('box'), ENTER_OK=%s;
+function send(){ var t=box.innerText; fetch('/record',{method:'POST',body:JSON.stringify({phone:%s,text:t})}).then(function(){ box.innerText=''; }); }
+box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); if(ENTER_OK) send(); }});
+document.getElementById('send').addEventListener('click', send);
+%s
+</script>''' % (esc, enter_ok, json.dumps(phone), reload_js))
         return self.send_html('<div id="pane-side">chats</div>')
     def do_POST(self):
         n = int(self.headers.get('content-length', 0)); d = json.loads(self.rfile.read(n))

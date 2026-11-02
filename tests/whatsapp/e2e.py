@@ -51,11 +51,16 @@ try:
             check('Stopped from the app' in txt, 'Stop works: ' + txt.replace(chr(10), ' ')[:90])
             check(not pg.is_disabled('#waStart'), 'can start again after stopping')
         b.close()
+    time.sleep(3)  # let the helper finish saving its last result
     sent = json.loads(urllib.request.urlopen('http://127.0.0.1:8796/sent').read())
+    print('SENT:', [(m['phone'], m['text'][:25]) for m in sent])
     check(len(sent) == (9 if os.environ.get('E2E_STOP') else 8) or len(sent) == (10 if os.environ.get('E2E_STOP') else 8), 'WhatsApp messages sent: %d' % len(sent))
     check(any(m['text'] == 'Hello Fatima, the shop is still available.' for m in sent), 'personal text arrived')
+    pairs = [(m['phone'], m['text']) for m in sent]
+    check(len(pairs) == len(set(pairs)), 'nobody got the same message twice')
     state = json.loads(urllib.request.urlopen('http://127.0.0.1:8765/state').read())
     wa_log = [l for l in state['log'] if l['channel'] == 'whatsapp' and l['status'] == 'sent']
+    print('LOG:', [(l['phone'], l['campaign_id'][-6:]) for l in wa_log])
     check(len(wa_log) == len(sent), 'every sent message saved in the Sheet automatically: %d of %d' % (len(wa_log), len(sent)))
 finally:
     for pr in procs: pr.kill()

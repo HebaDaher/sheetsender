@@ -512,7 +512,7 @@ function getShopData(shopId) {
   const ctx = requireUser_();
   const shop = findShop_(ctx.ss, shopId);
   const templates = readTable_(ctx.ss, TABS.TEMPLATES).rows
-    .filter(function (t) { return t.shop_id === shopId; })
+    .filter(function (t) { return t.shop_id === shopId && !isDeletedTemplate_(t); })
     .map(stripRow_);
   const logRows = readTable_(ctx.ss, TABS.LOG).rows.filter(function (l) { return l.shop_id === shopId; });
   const lastEmail = {}, lastWa = {};
@@ -690,6 +690,34 @@ function saveTemplate(t) {
   });
 }
 
+/**
+ * Removes a saved message from the menus. It is only hidden (marked "deleted"), so sends that already use it keep
+ * working and the history stays correct. Writing the exact same text again brings it back.
+ */
+function deleteTemplate(templateId, shopId) {
+  const ctx = requireUser_();
+  return withLock_(function () {
+    const table = readTable_(ctx.ss, TABS.TEMPLATES);
+    const row = table.rows.filter(function (r) { return r.template_id === templateId; })[0];
+    if (!row) throw new Error('This message was not found. Reload the page.');
+    if (shopId && row.shop_id !== shopId) throw new Error('This message belongs to another shop.');
+    row.active = 'deleted';
+    row.updated_at = nowIso_();
+    updateRow_(table, row);
+    return true;
+  });
+}
+
+function isDeletedTemplate_(t) { return norm_(t.active) === 'deleted'; }
+
+/** A saved message matched by its exact text comes back to the menus when it is used again. */
+function reviveTemplate_(ss, template) {
+  if (!template || !template._row || !isDeletedTemplate_(template)) return;
+  const table = readTable_(ss, TABS.TEMPLATES);
+  const row = table.rows.filter(function (r) { return r.template_id === template.template_id; })[0];
+  if (row) { row.active = 'yes'; row.updated_at = nowIso_(); updateRow_(table, row); template.active = 'yes'; }
+}
+
 /* ------------------------------------------------------------------ */
 /* Campaigns                                                            */
 /* ------------------------------------------------------------------ */
@@ -844,6 +872,7 @@ function startCampaign(params) {
     const now = nowIso_();
     const delay = cleanDelay_(params.delayMinutes);
     const startMs = cleanStartAt_(params.startAt);
+    reviveTemplate_(ctx.ss, p.template);
     if (p.template._new) {
       const t = {
         template_id: newId_('T'), shop_id: p.shop.shop_id,
@@ -1019,6 +1048,7 @@ function buildWhatsAppJob_(ss, params, rules, actor) {
       const unknown = unknownPlaceholders_(body);
       if (unknown.length) throw new Error('These fields are not known: ' + unknown.join(', ') + '. You can use: {' + PLACEHOLDERS.join('}, {') + '}.');
       template = templates.rows.filter(function (t) { return t.shop_id === shop.shop_id && norm_(t.channel) === 'whatsapp' && t.body === body; })[0];
+      reviveTemplate_(ctx.ss, template);
       if (!template) {
         template = { template_id: newId_('T'), shop_id: shop.shop_id, template_name: body.split(/\r?\n/)[0].slice(0, 60),
           channel: 'whatsapp', subject: '', body: body, active: 'yes', updated_at: nowIso_() };
@@ -1161,7 +1191,7 @@ function startWhatsAppAuto(params) {
     shopId: params.shopId, templateId: job.template_id, skipPrevious: params.skipPrevious !== false,
     delayMinutes: rules.delayMinutes, randomExtra: rules.randomExtra, dailyCap: rules.dailyCap,
     startHour: rules.startHour, endHour: rules.endHour, startAt: rules.startAt } });
-  return { people: job.items.length, skipped: job.skipped, rules: rules };
+  return { people: job.items.length, skipped: job.skipped, rules: rules, template_id: job.template_id };
 }
 
 function stopWhatsAppAuto() { const ctx = requireUser_(); queueWaCommand_({ type: 'stop', by: ctx.email }); return true; }
