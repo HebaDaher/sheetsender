@@ -909,7 +909,7 @@
     stopAutoRefresh();
     S.shopId = null;
     $('app').innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Loading settings…</p></div>';
-    call('getSettings').then(function (st) { S.settings = st; drawSettings(); }, function (e) {
+    call('getSettings').then(function (st) { S.settings = st; S.boot.engine = st.engine; drawSettings(); }, function (e) {
       $('app').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
     });
   }
