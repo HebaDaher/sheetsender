@@ -974,6 +974,55 @@
   }
 
 
+
+  /* ---------- Live status of the WhatsApp Sender helper on the Mac ---------- */
+  function pollHelper(now) {
+    if (S.waTimer) clearTimeout(S.waTimer);
+    var run = function () {
+      if (!$('waHelper') || S.view !== 'whatsapp') { S.waTimer = null; return; }
+      call('getWhatsAppHelper').then(drawHelper, function () {}).then(function () {
+        if ($('waHelper') && S.view === 'whatsapp') S.waTimer = setTimeout(run, document.hidden ? 15000 : 5000);
+      });
+    };
+    if (now) run(); else S.waTimer = setTimeout(run, 5000);
+  }
+
+  function drawHelper(h) {
+    var box = $('waHelper'); if (!box) return;
+    var start = $('waStart'), stop = $('waStop'), open = $('waOpen');
+    var job = h.job || null, running = job && job.state === 'running';
+    var kind = 'info', html = '';
+    if (!h.online) {
+      kind = 'warn';
+      html = '<b>The WhatsApp Sender is not running on the Mac.</b> ' + (h.age_s !== null && h.age_s !== undefined
+        ? 'Last seen ' + (h.age_s < 120 ? h.age_s + ' seconds' : Math.round(h.age_s / 60) + ' minutes') + ' ago. Turn on the Mac, log in, and keep it connected to the internet.'
+        : 'Install it once on the Mac that has WhatsApp (see the guide: “Install WhatsApp Sender”).');
+    } else if (h.wa === 'connected') {
+      kind = 'ok'; html = '<b>✓ WhatsApp connected on the Mac.</b>';
+    } else if (h.wa === 'qr') {
+      kind = 'warn'; html = '<b>WhatsApp needs to be linked.</b> On the Mac, scan the QR code with the phone: WhatsApp → Settings → Linked devices → Link a device.';
+    } else if (h.wa === 'loading') {
+      html = '<b>WhatsApp is opening on the Mac…</b>';
+    } else {
+      html = '<b>The WhatsApp Sender is running.</b> WhatsApp is not open yet — it opens by itself when you start sending, or click “Open WhatsApp on the Mac” to check the connection.';
+    }
+    if (job) {
+      var done = job.sent + job.failed;
+      html += '<div style="margin-top:8px"><b>' + esc(job.shop_name || '') + ':</b> ' + job.sent + ' sent' + (job.failed ? ', ' + job.failed + ' not sent' : '') +
+        ', ' + job.left + ' left of ' + job.total + (running ? '' : ' — ' + esc({ done: 'finished', stopped: 'stopped' }[job.state] || job.state)) + '.' +
+        (job.message ? '<br>' + esc(job.message) : '') +
+        (job.last ? '<br><span class="small">Last: ' + esc(job.last.status === 'sent' ? '✓ sent ' : '✗ not sent ') + '(+' + esc(job.last.phone) + ')' + (job.last.reason ? ' — ' + esc(job.last.reason) : '') + '</span>' : '') +
+        '<div style="height:8px;background:var(--line);border-radius:4px;margin-top:6px;overflow:hidden"><div style="height:100%;width:' + (job.total ? Math.round(done * 100 / job.total) : 0) + '%;background:var(--accent)"></div></div></div>';
+    }
+    if (h.online) html += '<div class="small muted" style="margin-top:6px">Sent today from this Mac: ' + (h.sent_today || 0) + (h.pending && h.pending.length ? ' · waiting for the Mac to pick up: ' + h.pending.map(function (p) { return p.type; }).join(', ') : '') + '</div>';
+    box.className = 'notice ' + kind;
+    box.innerHTML = html;
+    start.disabled = !h.online || running || (h.pending || []).some(function (p) { return p.type === 'start'; });
+    start.textContent = running ? 'Sending…' : '▶ Start sending';
+    stop.classList.toggle('hidden', !running);
+    open.classList.toggle('hidden', !h.online || h.wa === 'connected');
+  }
+
   /* ---------- Automatic WhatsApp (runs on the Mac) ---------- */
   function autoWhatsAppHtml(tpls) {
     var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', skipPrevious: true, sched: defaultSchedule({ cap: 30, h1: 9, h2: 21 }) });
@@ -994,16 +1043,15 @@
       '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
-      '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are your Mac\'s time. The Mac must be on, awake and running the WhatsApp Sender at that time (start it any time before — it waits).' }) + '</div>' +
-      '<div class="row" style="margin-top:12px"><button class="btn primary" id="waJob">1. Download the send list</button>' +
-      '<label class="btn">2. Upload results<input type="file" id="waResults" accept=".json" class="hidden"></label></div>' +
-      '<details style="margin-top:12px"><summary>How to start the sender on the Mac</summary><ol class="small steps">' +
-      '<li>Click <b>Download the send list</b>. A file named <code>whatsapp-job-….json</code> goes to your Downloads folder.</li>' +
-      '<li>On the Mac, open the <b>shop-followups</b> folder and run <b>WhatsApp Sender</b> (see the guide). It picks the newest send list by itself.</li>' +
-      '<li>The first time only, scan the QR code with the phone: WhatsApp → Settings → Linked devices → Link a device.</li>' +
-      '<li>Leave the Mac on and awake. You can stop any time with Ctrl+C; running it again continues where it stopped.</li>' +
-      '<li>When it finishes (or each evening), click <b>Upload results</b> and choose the <code>…-results.json</code> file from Downloads, so nobody gets the same message twice.</li>' +
-      '</ol></details></div>';
+      '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are the Mac\'s time. The Mac must be on and connected to the internet; it stays awake by itself while sending.' }) + '</div>' +
+      '<div id="waHelper" class="notice info" style="margin-top:14px">Checking the WhatsApp Sender on the Mac…</div>' +
+      '<div class="row" style="margin-top:10px"><button class="btn primary big" id="waStart" disabled>▶ Start sending</button>' +
+      '<button class="btn danger hidden" id="waStop">■ Stop</button>' +
+      '<button class="btn hidden" id="waOpen">Open WhatsApp on the Mac</button></div>' +
+      '<details style="margin-top:14px"><summary class="small">Without the helper: send list files</summary>' +
+      '<p class="small muted">Only if the WhatsApp Sender helper is not installed: download a send list and run the sender by hand, then upload its results.</p>' +
+      '<div class="row"><button class="btn small" id="waJob">Download the send list</button>' +
+      '<label class="btn small">Upload results<input type="file" id="waResults" accept=".json" class="hidden"></label></div></details></div>';
     return html;
   }
 
@@ -1046,6 +1094,28 @@
         reloadShop();
       });
     });
+    $('waStart').addEventListener('click', function () {
+      var prob = scheduleProblem(a.sched, { limits: true });
+      if (prob) { showBanner('error', prob); return; }
+      var sc = a.sched;
+      var p = { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random,
+        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc) };
+      if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' + (sc.when === 'at' ? 'Starts: ' + sc.at.replace('T', ' ') + '\n' : 'Starts now.\n') +
+        (sc.random ? sc.minutes + '–' + Math.round(sc.minutes * 1.4) : 'Exactly ' + sc.minutes) + ' minutes between messages, at most ' + sc.cap + ' per day, ' + sc.h1 + ':00–' + sc.h2 + ':00.')) return;
+      withBusy('Sending the start command…', call('startWhatsAppAuto', p)).then(function (r) {
+        var skip = r.skipped && r.skipped.length ? ' Skipped: ' + r.skipped.map(function (x) { return x.count + ' × ' + x.reason; }).join('; ') + '.' : '';
+        showBanner('success', 'Started for ' + plural(r.people, 'person') + '. The Mac picks it up within about 10 seconds.' + skip, true);
+        pollHelper(true);
+      });
+    });
+    $('waStop').addEventListener('click', function () {
+      if (!confirm('Stop sending WhatsApp messages? People not reached yet will not get the message (you can start again later).')) return;
+      withBusy('Stopping…', call('stopWhatsAppAuto')).then(function () { showBanner('success', 'Stop sent. The Mac stops within about 10 seconds.'); pollHelper(true); });
+    });
+    $('waOpen').addEventListener('click', function () {
+      withBusy('Asking the Mac…', call('openWhatsAppOnMac')).then(function () { showBanner('success', 'WhatsApp opens on the Mac within about 10 seconds. Scan the QR code there if it asks.'); pollHelper(true); });
+    });
+    pollHelper(true);
     $('waResults').addEventListener('change', function () {
       var f = this.files[0]; if (!f) return;
       var r = new FileReader();

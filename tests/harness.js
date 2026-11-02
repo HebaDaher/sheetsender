@@ -162,7 +162,7 @@ function makeEnv(srcDir) {
       create: () => { ss = makeSpreadsheet(users.effective); return ss; },
       openById: (id) => {
         if (!ss || id !== 'SHEET123') throw new Error('Not found');
-        if (ss.editors.indexOf(users.active) === -1 && ss.viewers.indexOf(users.active) === -1) throw new Error('No access');
+        if (ss.editors.indexOf(users.effective) === -1 && ss.viewers.indexOf(users.effective) === -1) throw new Error('No access');
         return ss;
       },
       getActiveSpreadsheet: () => null
@@ -184,9 +184,12 @@ function makeEnv(srcDir) {
       base64Encode: (s) => Buffer.from(String(s), 'utf8').toString('base64'),
       base64EncodeWebSafe: (s) => Buffer.from(String(s), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
       base64DecodeWebSafe: (s) => Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
-      newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') })
+      newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
+      DigestAlgorithm: { SHA_256: 'sha256' },
+      computeDigest: (alg, text) => Array.from(require('crypto').createHash('sha256').update(String(text), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b))
     },
     UrlFetchApp,
+    ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (t) => ({ text: t, setMimeType() { return this; }, getContent() { return t; } }) },
     ScriptApp: {
       getService: () => ({ getUrl: () => google.execUrl }),
       getProjectTriggers: () => triggers.slice(),
@@ -201,7 +204,8 @@ function makeEnv(srcDir) {
     Logger: { log: () => {} }
   };
   vm.createContext(ctx);
-  const code = ['Code.gs', 'Senders.gs', 'Sending.gs'].map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n');
+  const code = ['Code.gs', 'Senders.gs', 'Sending.gs'].map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n') +
+    (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n");
   vm.runInContext(code, ctx, { filename: 'project.js' });
 
   const env = {
@@ -209,6 +213,14 @@ function makeEnv(srcDir) {
     get ss() { return ss; },
     as(email) { users.active = email; users.effective = email; },
     advance(min) { clock += min * 60000; },
+    /** Helper on the Mac calling the bridge deployment (runs as the owner, nobody signed in). */
+    bridge(body) {
+      const a = users.active, e = users.effective;
+      users.effective = 'owner@gmail.com'; users.active = '';
+      try { return JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent()); }
+      finally { users.active = a; users.effective = e; }
+    },
+    realClock() { clock = RealDate.now(); setInterval(() => { clock = RealDate.now(); }, 200).unref(); },
     setClock(iso) { clock = Date.parse(iso); },
     now() { return clock; },
     runTrigger(minutes) {

@@ -109,7 +109,7 @@ def results_path(job_path):
 
 def validate_job(job):
     if not isinstance(job, dict) or job.get("kind") != "shop-followups-whatsapp-job" or not isinstance(job.get("items"), list):
-        sys.exit("This file is not a Shop Follow-ups send list.")
+        raise ValueError("This file is not a Shop Follow-ups send list.")
     good = []
     for it in job["items"]:
         phone = re.sub(r"\D", "", str(it.get("phone", "")))
@@ -180,7 +180,10 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     job_path = find_job(sys.argv[1] if len(sys.argv) > 1 else "")
     job = load_json(job_path, None)
-    items = validate_job(job)
+    try:
+        items = validate_job(job)
+    except ValueError as e:
+        sys.exit(str(e))
     rules = job.get("rules") or {}
     delay = max(MIN_DELAY_MINUTES, float(rules.get("delayMinutes", 5)))
     cap = max(1, min(MAX_DAILY_CAP, int(rules.get("dailyCap", DAILY_CAP))))

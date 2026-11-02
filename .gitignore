@@ -4,3 +4,5 @@
 App link.txt
 node_modules/
 tests/screenshots/
+src/Bridge.config.gs
+.bridge-deployment-id

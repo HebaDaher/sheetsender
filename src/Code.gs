@@ -60,6 +60,8 @@ const PROP = {
   ACCOUNTS: 'GMAIL_ACCOUNTS',          // {email: {status, connected_at, last_ok_at, last_error, ...}} — no tokens
   OAUTH_CLIENT_ID: 'OAUTH_CLIENT_ID',  // public identifier, not a secret
   SEND_RULES: 'SEND_RULES',           // {dailyCap, startHour, endHour}
+  WA_COMMANDS: 'WA_COMMANDS',         // commands waiting for the Mac helper (start / stop / open)
+  WA_HELPER: 'WA_HELPER',             // last status reported by the Mac helper
   NEXT_DUE_AT: 'NEXT_DUE_AT',
   LAST_ENGINE_RUN: 'LAST_ENGINE_RUN'
 };
@@ -993,7 +995,12 @@ function getWhatsAppJob(params) {
   const ctx = requireUser_();
   params = params || {};
   const rules = whatsAppRules_(params); // check the schedule first
-  return withLock_(function () {
+  return withLock_(function () { return buildWhatsAppJob_(ctx.ss, params, rules, ctx.email); });
+}
+
+function buildWhatsAppJob_(ss, params, rules, actor) {
+  const ctx = { ss: ss, email: actor };
+  {
     const shop = findShop_(ctx.ss, params.shopId);
     const templates = readTable_(ctx.ss, TABS.TEMPLATES);
     let template = null;
@@ -1041,17 +1048,22 @@ function getWhatsAppJob(params) {
       items: items,
       skipped: Object.keys(skipped).map(function (r) { return { reason: r, count: skipped[r] }; })
     };
-  });
+  }
 }
 
 /** Records the results file that the Mac sender wrote. Safe to upload twice (nothing is counted twice). */
 function importWhatsAppResults(results) {
   const ctx = requireUser_();
+  return withLock_(function () { return recordWhatsAppResults_(ctx.ss, results, ctx.email); });
+}
+
+function recordWhatsAppResults_(ss, results, actor) {
+  const ctx = { ss: ss, email: actor };
   if (!results || results.kind !== 'shop-followups-whatsapp-results' || !results.job_id || !Array.isArray(results.items)) {
     throw new Error('This is not a WhatsApp results file. Choose the file that ends with "-results.json".');
   }
   if (results.items.length > 2000) throw new Error('Too many rows.');
-  return withLock_(function () {
+  {
     const shop = findShop_(ctx.ss, results.shop_id);
     const contacts = indexBy_(readTable_(ctx.ss, TABS.CONTACTS).rows, 'contact_id');
     const log = readTable_(ctx.ss, TABS.LOG);
@@ -1076,5 +1088,125 @@ function importWhatsAppResults(results) {
     });
     appendRows_(log, rows);
     return n;
+  }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* WhatsApp helper on the Mac: commands, status and the secure bridge    */
+/* ------------------------------------------------------------------ */
+/*
+ * The helper on the Mac cannot be reached by the web page (browsers block that), so it calls the app instead:
+ * every few seconds it POSTs to a separate "bridge" deployment of this same script, which runs as the OWNER and
+ * accepts only requests carrying the helper's secret token (its SHA-256 is in Bridge.config.gs, made by the
+ * WhatsApp installer; the token itself stays on the Mac). The page leaves commands (start / stop / open WhatsApp),
+ * the helper picks them up, reports its status and sends each result back.
+ */
+
+const WA_HELPER_ONLINE_S = 45;
+
+function waCommands_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP.WA_COMMANDS) || '[]'); } catch (e) { return []; }
+}
+function saveWaCommands_(list) {
+  PropertiesService.getScriptProperties().setProperty(PROP.WA_COMMANDS, JSON.stringify(list.slice(-10)));
+}
+function helperStatus_() {
+  let st = {};
+  try { st = JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP.WA_HELPER) || '{}'); } catch (e) { st = {}; }
+  const age = st.seen_at ? Math.round((Date.now() - new Date(st.seen_at).getTime()) / 1000) : null;
+  st.online = age !== null && age <= WA_HELPER_ONLINE_S;
+  st.age_s = age;
+  return st;
+}
+
+/** For the WhatsApp tab: is the helper running, is WhatsApp connected, how is the current send going. */
+function getWhatsAppHelper() {
+  requireUser_();
+  const st = helperStatus_();
+  st.pending = waCommands_().map(function (c) { return { type: c.type, at: c.at }; });
+  st.installed = bridgeConfigured_();
+  return st;
+}
+
+function queueWaCommand_(cmd) {
+  return withLock_(function () {
+    const list = waCommands_().filter(function (c) { return !(cmd.type === 'start' && c.type === 'start'); });
+    cmd.id = newId_('M'); cmd.at = nowIso_();
+    list.push(cmd);
+    saveWaCommands_(list);
+    return cmd;
   });
+}
+
+/** Start sending now (or at the chosen time). Checks everything first so mistakes show on the page. */
+function startWhatsAppAuto(params) {
+  const ctx = requireUser_();
+  params = params || {};
+  const rules = whatsAppRules_(params);
+  const st = helperStatus_();
+  if (!st.online) throw new Error('The WhatsApp Sender on the Mac is not running. Turn on the Mac (and log in), wait a minute, then try again.');
+  if (st.job && st.job.state === 'running') throw new Error('A WhatsApp send is already running (' + (st.job.shop_name || '') + '). Stop it first.');
+  // Build once now: saves a new message and makes sure somebody can receive it.
+  const job = withLock_(function () { return buildWhatsAppJob_(ctx.ss, params, rules, ctx.email); });
+  queueWaCommand_({ type: 'start', by: ctx.email, params: {
+    shopId: params.shopId, templateId: job.template_id, skipPrevious: params.skipPrevious !== false,
+    delayMinutes: rules.delayMinutes, randomExtra: rules.randomExtra, dailyCap: rules.dailyCap,
+    startHour: rules.startHour, endHour: rules.endHour, startAt: rules.startAt } });
+  return { people: job.items.length, skipped: job.skipped, rules: rules };
+}
+
+function stopWhatsAppAuto() { const ctx = requireUser_(); queueWaCommand_({ type: 'stop', by: ctx.email }); return true; }
+function openWhatsAppOnMac() { const ctx = requireUser_(); queueWaCommand_({ type: 'open', by: ctx.email }); return true; }
+
+function bridgeConfigured_() {
+  return typeof BRIDGE_TOKEN_SHA256 !== 'undefined' && /^[0-9a-f]{64}$/.test(String(BRIDGE_TOKEN_SHA256));
+}
+
+function sha256Hex_(text) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(text), Utilities.Charset.UTF_8)
+    .map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/** The bridge. Only the helper (with the secret token), only while running as the owner. */
+function doPost(e) {
+  let req = {};
+  try { req = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return jsonOut_({ ok: false, error: 'bad request' }); }
+  if (!bridgeConfigured_() || !req.token || sha256Hex_(req.token) !== String(BRIDGE_TOKEN_SHA256)) {
+    return jsonOut_({ ok: false, error: 'not allowed' });
+  }
+  const props = PropertiesService.getScriptProperties();
+  const owner = norm_(props.getProperty(PROP.OWNER_EMAIL));
+  if (!owner || norm_(Session.getEffectiveUser().getEmail()) !== owner) return jsonOut_({ ok: false, error: 'bridge must run as the owner' });
+  const ss = SpreadsheetApp.openById(props.getProperty(PROP.SHEET_ID));
+  try {
+    if (req.action === 'poll') {
+      const status = req.status || {};
+      status.seen_at = nowIso_();
+      props.setProperty(PROP.WA_HELPER, JSON.stringify(status).slice(0, 8000));
+      return jsonOut_({ ok: true, commands: waCommands_() });
+    }
+    if (req.action === 'ack') {
+      const ids = req.ids || [];
+      withLock_(function () { saveWaCommands_(waCommands_().filter(function (c) { return ids.indexOf(c.id) === -1; })); });
+      return jsonOut_({ ok: true });
+    }
+    if (req.action === 'job') {
+      const cmd = waCommands_().filter(function (c) { return c.id === req.command_id && c.type === 'start'; })[0];
+      if (!cmd) return jsonOut_({ ok: false, error: 'no such command' });
+      const job = withLock_(function () { return buildWhatsAppJob_(ss, cmd.params, whatsAppRules_(cmd.params), cmd.by); });
+      return jsonOut_({ ok: true, job: job });
+    }
+    if (req.action === 'results') {
+      const n = withLock_(function () { return recordWhatsAppResults_(ss, req.results, 'WhatsApp Sender (Mac)'); });
+      return jsonOut_({ ok: true, saved: n });
+    }
+    return jsonOut_({ ok: false, error: 'unknown action' });
+  } catch (err) {
+    return jsonOut_({ ok: false, error: String(err && err.message ? err.message : err) });
+  }
 }

@@ -14,6 +14,7 @@ if (!process.env.FRESH) {
   E.ctx.assignShopSender('SHOP1', 'shop1@gmail.com');
 }
 E.as(process.env.WEBUSER || 'dad@gmail.com');
+if (process.env.REAL_CLOCK) E.realClock();
 
 const shim = `<script>
 window.google = { script: { get run() { return makeRunner(); } } };
@@ -53,6 +54,11 @@ http.createServer((req, res) => {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify(out));
     });
+    return;
+  }
+  if (req.url === '/bridge' && req.method === 'POST') {
+    let body = ''; req.on('data', d => body += d);
+    req.on('end', () => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(E.bridge(JSON.parse(body)))); });
     return;
   }
   if (req.url.startsWith('/as/')) { E.as(decodeURIComponent(req.url.slice(4))); res.end('"ok"'); return; }

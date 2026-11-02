@@ -450,6 +450,53 @@ t('automatic WhatsApp: results upload is recorded once; next list skips them', (
   throwsMsg(() => C.importWhatsAppResults({ hello: 1 }), /not a WhatsApp results file/);
   throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {price}' }), /not known/);
 });
+t('WhatsApp helper bridge: wrong token refused, must run as owner', () => {
+  assert.strictEqual(E.bridge({ token: 'nope', action: 'poll' }).error, 'not allowed');
+  assert.strictEqual(E.bridge({ action: 'poll' }).error, 'not allowed');
+  // same token, but running as someone else (e.g. the normal web app deployment called by another user)
+  E.as('dad@gmail.com');
+  const out = JSON.parse(C.doPost({ postData: { contents: JSON.stringify({ token: 'test-token', action: 'poll' }) } }).getContent());
+  assert.strictEqual(out.error, 'bridge must run as the owner');
+});
+t('WhatsApp helper: offline helper → Start is refused with a clear message', () => {
+  E.as('dad@gmail.com');
+  const h = C.getWhatsAppHelper();
+  assert.strictEqual(h.online, false); assert.strictEqual(h.installed, true);
+  throwsMsg(() => C.startWhatsAppAuto({ shopId: 'SHOP1', body: 'Hi {first_name}' }), /not running/);
+});
+t('WhatsApp helper: poll → online + status; Start → command; job fetched; results recorded; ack clears', () => {
+  let r = E.bridge({ token: 'test-token', action: 'poll', status: { wa: 'connected', version: 2, sent_today: 0 } });
+  assert(r.ok && r.commands.length === 0);
+  E.as('dad@gmail.com');
+  const h = C.getWhatsAppHelper();
+  assert.strictEqual(h.online, true); assert.strictEqual(h.wa, 'connected');
+  const st = C.startWhatsAppAuto({ shopId: 'SHOP1', body: 'Bridge hello {first_name}', delayMinutes: 6, randomExtra: false, dailyCap: 25, startHour: 9, endHour: 21 });
+  assert(st.people > 0);
+  r = E.bridge({ token: 'test-token', action: 'poll', status: { wa: 'connected' } });
+  assert.strictEqual(r.commands.length, 1); assert.strictEqual(r.commands[0].type, 'start');
+  const job = E.bridge({ token: 'test-token', action: 'job', command_id: r.commands[0].id }).job;
+  assert.strictEqual(job.items.length, st.people);
+  assert(job.items[0].text.startsWith('Bridge hello '));
+  assert.strictEqual(job.rules.delayMinutes, 6); assert.strictEqual(job.rules.randomExtra, false);
+  assert.strictEqual(E.bridge({ token: 'test-token', action: 'ack', ids: [r.commands[0].id] }).ok, true);
+  assert.strictEqual(E.bridge({ token: 'test-token', action: 'poll', status: {} }).commands.length, 0);
+  const res = { kind: 'shop-followups-whatsapp-results', job_id: job.job_id, shop_id: job.shop_id, template_id: job.template_id, created_at: job.created_at,
+    items: [{ contact_id: job.items[0].contact_id, phone: job.items[0].phone, status: 'sent', at: '2026-11-02T12:00:00' }] };
+  const saved = E.bridge({ token: 'test-token', action: 'results', results: res }).saved;
+  assert.strictEqual(saved.sent, 1);
+  assert.strictEqual(E.bridge({ token: 'test-token', action: 'results', results: res }).saved.already, 1);
+  assert(E.tab('Send Log').some(l => l.channel === 'whatsapp' && l.contact_id === job.items[0].contact_id && l.done_by === 'WhatsApp Sender (Mac)'));
+  // stop + open commands, a second start replaces a waiting one
+  C.stopWhatsAppAuto(); C.openWhatsAppOnMac();
+  assert.deepStrictEqual(Array.from(C.getWhatsAppHelper().pending.map(p => p.type)), ['stop', 'open']);
+  E.bridge({ token: 'test-token', action: 'ack', ids: E.bridge({ token: 'test-token', action: 'poll', status: {} }).commands.map(c => c.id) });
+  // running job reported → Start refused
+  E.bridge({ token: 'test-token', action: 'poll', status: { wa: 'connected', job: { state: 'running', shop_name: 'Example Shop' } } });
+  throwsMsg(() => C.startWhatsAppAuto({ shopId: 'SHOP1', body: 'Hi {first_name}' }), /already running/);
+  // helper goes quiet → offline after 45 s
+  E.advance(1);
+  assert.strictEqual(C.getWhatsAppHelper().online, false);
+});
 t('doGet serves the app; include only serves app files', () => {
   assert.strictEqual(C.doGet({ parameter: {} }).page, 'Index');
   assert(C.include('SheetJS').includes('make_xlsx_lib'));

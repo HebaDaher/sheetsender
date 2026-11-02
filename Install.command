@@ -48,6 +48,13 @@ else
   echo "$ID" > .deployment-id
 fi
 
+if [ -f .bridge-deployment-id ]; then
+  say "Updating the WhatsApp Sender link"
+  bash whatsapp/deploy-bridge.sh || echo "The WhatsApp link could not be updated (the app itself is updated)."
+  mkdir -p "$HOME/.shop-followups/app" && cp whatsapp/whatsapp_sender.py whatsapp/whatsapp_helper.py "$HOME/.shop-followups/app/" 2>/dev/null
+  launchctl kickstart -k "gui/$(id -u)/com.shopfollowups.whatsapp" 2>/dev/null
+fi
+
 URL="https://script.google.com/macros/s/$ID/exec"
 echo "$URL" > "App link.txt"
 say "Uploaded and published."

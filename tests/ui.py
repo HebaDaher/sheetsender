@@ -126,6 +126,8 @@ try:
         page.fill('#wsAt', when.strftime('%Y-%m-%dT%H:%M')); page.fill('#wsMin', '7'); page.fill('#wsCap', '20')
         page.select_option('#wsH1', '10'); page.select_option('#wsH2', '19')
         page.click('#wsRand + .track')
+        page.click('text=Without the helper: send list files')
+        check(page.is_visible('#waHelper'), 'helper status panel shown')
         with page.expect_download() as dl:
             page.click('#waJob')
         job_path = dl.value.path(); job = json.load(open(job_path))
