@@ -48,7 +48,7 @@ const HEADERS = {
   Templates: ['template_id', 'shop_id', 'template_name', 'channel', 'subject', 'body', 'active', 'updated_at'],
   Campaigns: ['campaign_id', 'shop_id', 'campaign_name', 'template_id', 'sender_email', 'delay_minutes',
     'skip_previous_recipients', 'status', 'status_reason', 'created_by', 'created_at', 'started_at',
-    'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending', 'random_extra'],
+    'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending', 'random_extra', 'ignore_hours'],
   'Send Log': ['log_id', 'campaign_id', 'shop_id', 'contact_id', 'contact_name', 'email', 'phone', 'template_id',
     'channel', 'sender_email', 'status', 'reason', 'queued_at', 'sent_at', 'attempts', 'done_by']
 };
@@ -814,6 +814,12 @@ function getCampaignPreview(params) {
   s.randomExtra = params.randomExtra !== false;
   const startMsP = cleanStartAt_(params.startAt);
   s.startAtLabel = startMsP ? fmtUae_(startMsP) : '';
+  s.ignoreHours = params.ignoreHours === true;
+  // When will the first email really go out? (the sending hours can push "now" to the next morning)
+  const firstMs = startMsP || Date.now();
+  if (!s.ignoreHours && !withinSendingHours_(firstMs, sendingRules_())) {
+    s.waitsForHoursLabel = fmtUae_(nextWindowStart_(firstMs, sendingRules_()));
+  }
   s.estimatedHours = Math.round(s.willSend * delay * 1.2 / 6) / 10;
   const rules = sendingRules_();
   s.rules = rules;
@@ -857,7 +863,8 @@ function startCampaign(params) {
       created_by: ctx.email, created_at: now, started_at: startMs ? new Date(startMs).toISOString() : now,
       next_send_at: startMs ? new Date(startMs).toISOString() : now, finished_at: '',
       total: String(p.plan.length), sent: '0', skipped: String(p.summary.willSkip), failed: '0',
-      pending: String(p.summary.willSend), random_extra: params.randomExtra === false ? 'no' : 'yes'
+      pending: String(p.summary.willSend), random_extra: params.randomExtra === false ? 'no' : 'yes',
+      ignore_hours: params.ignoreHours === true ? 'yes' : 'no'
     };
     const logRows = p.plan.map(function (item) {
       const c = item.contact;
@@ -978,8 +985,9 @@ function whatsAppRules_(p) {
   if (!(delay >= 3 && delay <= 120)) throw new Error('Minutes between WhatsApp messages must be from 3 to 120. 5 or more is safest.');
   const cap = Math.round(Number(p.dailyCap || WA_DEFAULTS.dailyCap));
   if (!(cap >= 1 && cap <= 60)) throw new Error('WhatsApp messages per day must be from 1 to 60. 30 or fewer is safest.');
-  const sh = p.startHour === undefined ? WA_DEFAULTS.startHour : Math.round(Number(p.startHour));
-  const eh = p.endHour === undefined ? WA_DEFAULTS.endHour : Math.round(Number(p.endHour));
+  let sh = p.startHour === undefined ? WA_DEFAULTS.startHour : Math.round(Number(p.startHour));
+  let eh = p.endHour === undefined ? WA_DEFAULTS.endHour : Math.round(Number(p.endHour));
+  if (p.ignoreHours === true) { sh = 0; eh = 24; } // "Send now anyway": no sending-hours limit for this send
   if (!(sh >= 0 && sh <= 23 && eh >= 1 && eh <= 24 && eh > sh)) throw new Error('Choose sending hours where the end is after the start.');
   const startMs = cleanStartAt_(p.startAt);
   return { delayMinutes: delay, dailyCap: cap, startHour: sh, endHour: eh, randomExtra: p.randomExtra !== false,

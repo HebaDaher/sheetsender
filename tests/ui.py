@@ -125,6 +125,20 @@ try:
         when = (_dt.now() + _td(days=2)).replace(hour=10, minute=30, second=0, microsecond=0)
         page.fill('#wsAt', when.strftime('%Y-%m-%dT%H:%M')); page.fill('#wsMin', '7'); page.fill('#wsCap', '20')
         page.select_option('#wsH1', '10'); page.select_option('#wsH2', '19')
+        # "Now" outside the sending hours → warning + "Send now anyway"
+        page.check('input[name="wsWhen"][value="now"]')
+        import time as _t
+        hnow = _t.localtime().tm_hour
+        page.select_option('#wsH1', str((hnow + 2) % 22 + 1)); page.select_option('#wsH2', str(min(24, (hnow + 2) % 22 + 2)))
+        warn = page.inner_text('#wsHours')
+        check('outside the sending hours' in warn and 'Send now anyway' in warn, 'warns that "now" is outside the hours: ' + warn.replace(chr(10), ' ')[:90])
+        page.click('#wsHoursIgnore')
+        check('switched off for this send' in page.inner_text('#wsHours') and page.is_disabled('#wsH1'), '"Send now anyway" switches the hours off')
+        page.click('#wsHoursUndo')
+        check(not page.is_disabled('#wsH1') and 'Send now anyway' in page.inner_text('#wsHours'), 'Undo brings the hours back')
+        page.click('#wsHoursIgnore')
+        page.check('input[name="wsWhen"][value="at"]')
+        page.select_option('#wsH1', '10') if not page.is_disabled('#wsH1') else None
         page.click('#wsRand + .track')
         page.click('text=Without the helper: send list files')
         check(page.is_visible('#waHelper'), 'helper status panel shown')
@@ -133,7 +147,7 @@ try:
         job_path = dl.value.path(); job = json.load(open(job_path))
         check(dl.value.suggested_filename.startswith('whatsapp-job-example-shop-') and len(job['items']) == 7, 'send list downloaded: %s, %d people' % (dl.value.suggested_filename, len(job['items'])))
         R = job['rules']
-        check(R['delayMinutes'] == 7 and R['dailyCap'] == 20 and R['startHour'] == 10 and R['endHour'] == 19 and R['randomExtra'] is False and R['startAt'] != '', 'schedule saved in the send list: ' + json.dumps(R))
+        check(R['delayMinutes'] == 7 and R['dailyCap'] == 20 and R['startHour'] == 0 and R['endHour'] == 24 and R['randomExtra'] is False and R['startAt'] != '', 'schedule saved in the send list (hours off): ' + json.dumps(R))
         res = {'kind': 'shop-followups-whatsapp-results', 'job_id': job['job_id'], 'shop_id': job['shop_id'], 'template_id': job['template_id'], 'created_at': job['created_at'],
                'items': [{'contact_id': it['contact_id'], 'status': 'sent', 'at': '2026-11-02T12:00:00'} for it in job['items'][:3]]}
         rp = SHOTS + '/x-results.json'; json.dump(res, open(rp, 'w'))

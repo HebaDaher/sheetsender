@@ -626,6 +626,28 @@ t('old Campaigns tab without the new column still works (column is added by itse
   C.getShopData('SHOP1');
   assert(E.ss.getSheetByName('Campaigns').grid[0].includes('random_extra'));
 });
+t('at night: preview says when it will really start; "Send now anyway" sends right away', () => {
+  E.setClock('2026-11-07T20:43:00Z'); // 00:43 UAE
+  E.as('dad@gmail.com');
+  C.importContacts('SHOP1', [{ full_name: 'Night Owl', email: 'owl@ex.com', consent_status: 'yes' }], {});
+  const base = { shopId: 'SHOP1', subject: 'Late {first_name}', body: 'Hello {first_name}, a late note about the shop for you.', delayMinutes: 5 };
+  const pv = C.getCampaignPreview(base);
+  assert.strictEqual(pv.waitsForHoursLabel, '8 Nov 09:00');
+  const pv2 = C.getCampaignPreview(Object.assign({ ignoreHours: true }, base));
+  assert.strictEqual(pv2.waitsForHoursLabel, undefined);
+  const k = C.startCampaign(Object.assign({ ignoreHours: true }, base));
+  const n = E.sent.length;
+  E.runTrigger(2);
+  assert(E.sent.length > n, 'sent at 00:45 because hours were switched off for this send');
+  assert.strictEqual(E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id).ignore_hours, 'yes');
+  C.stopCampaign(k.campaign_id);
+  E.setClock('2026-11-08T06:00:00Z'); // back to daytime (10:00 UAE) for the next tests
+});
+t('WhatsApp "Send now anyway" = no hours limit in the send list', () => {
+  const r = C.whatsAppRules_({ startHour: 9, endHour: 21, ignoreHours: true });
+  assert.strictEqual(r.startHour, 0); assert.strictEqual(r.endHour, 24);
+  assert.strictEqual(C.whatsAppRules_({ startHour: 9, endHour: 21 }).startHour, 9);
+});
 t('random spacing is never shorter than the chosen wait (up to 40% longer)', () => {
   globalThis.__rand = 0.999;
   C.importContacts('SHOP1', [{ full_name: 'J1', email: 'j1@ex.com', consent_status: 'yes' }, { full_name: 'J2', email: 'j2@ex.com', consent_status: 'yes' }], {});

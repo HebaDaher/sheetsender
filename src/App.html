@@ -565,27 +565,56 @@
         '<div class="opt"><span style="min-width:120px">Only between</span><select id="' + p + 'H1" style="width:auto">' + hourOpts(sc.h1, 0, 23) + '</select> and ' +
         '<select id="' + p + 'H2" style="width:auto">' + hourOpts(sc.h2, 1, 24) + '</select></div>';
     }
+    html += '<div id="' + p + 'Hours"></div>';
     if (opts.note) html += '<p class="muted small" style="margin:6px 0 0">' + opts.note + '</p>';
     return html + '</div>';
   }
-  function bindSchedule(p, sc, onChange) {
+  /** Warns when "now" (or the chosen start time) is outside the sending hours, and offers "Send now anyway". */
+  function hoursWarning(p, sc, hours, onChange) {
+    var box = $(p + 'Hours'); if (!box) return;
+    var h1 = Number(hours()[0]), h2 = Number(hours()[1]);
+    var start = sc.when === 'at' && sc.at ? new Date(sc.at) : new Date();
+    var hr = start.getHours(), label = pad2(start.getHours()) + ':' + pad2(start.getMinutes());
+    if (sc.ignoreHours) {
+      box.innerHTML = '<div class="notice ok small" style="margin:8px 0 0">✓ Sending hours are switched off for this send: it starts ' +
+        (sc.when === 'at' ? 'at the chosen time' : 'right away') + ' and keeps going day and night. ' +
+        '<button class="link" id="' + p + 'HoursUndo">Undo</button><br><span class="muted">Tip: messages late at night get more “report spam”, which can get the number blocked.</span></div>';
+      $(p + 'HoursUndo').onclick = function () { sc.ignoreHours = false; if ($(p + 'H1')) { $(p + 'H1').disabled = false; $(p + 'H2').disabled = false; } hoursWarning(p, sc, hours, onChange); onChange(); };
+      return;
+    }
+    if (hr >= h1 && hr < h2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="notice warn small" style="margin:8px 0 0"><b>' + (sc.when === 'at' ? 'The start time ' + label : 'It is now ' + label) +
+      ', outside the sending hours (' + h1 + ':00–' + h2 + ':00).</b> So the first message would wait until <b>' + h1 + ':00</b>. ' +
+      '<div class="row" style="margin-top:6px"><button class="btn small primary" id="' + p + 'HoursIgnore">Send ' + (sc.when === 'at' ? 'at that time' : 'now') + ' anyway</button>' +
+      '<span class="muted">(switches off the sending hours for this send only)</span></div></div>';
+    $(p + 'HoursIgnore').onclick = function () {
+      sc.ignoreHours = true;
+      if ($(p + 'H1')) { $(p + 'H1').disabled = true; $(p + 'H2').disabled = true; }
+      hoursWarning(p, sc, hours, onChange); onChange();
+    };
+  }
+  function bindSchedule(p, sc, onChange, hours) {
+    var hw = function () { if (hours) hoursWarning(p, sc, hours, onChange); };
     function notes() {
+      hw();
       var m = Number(sc.minutes) || 0;
       $(p + 'MinNote').textContent = m < 3 ? 'At least 3.' : (m < 5 ? 'Fast — 5 or more is safer.' : '');
       $(p + 'RandNote').textContent = sc.random ? '(on: each wait is ' + m + '–' + Math.round(m * 1.4) + ' minutes, which looks more natural)' : '(off: exactly ' + m + ' minutes each time)';
     }
     Array.prototype.forEach.call(document.querySelectorAll('input[name="' + p + 'When"]'), function (r) {
-      r.addEventListener('change', function () { sc.when = r.value; $(p + 'At').disabled = sc.when !== 'at'; onChange(); });
+      r.addEventListener('change', function () { sc.when = r.value; $(p + 'At').disabled = sc.when !== 'at'; hw(); onChange(); });
     });
-    $(p + 'At').addEventListener('change', function () { sc.at = this.value; onChange(); });
+    $(p + 'At').addEventListener('change', function () { sc.at = this.value; hw(); onChange(); });
     $(p + 'Min').addEventListener('input', function () { sc.minutes = this.value; notes(); onChange(); });
     $(p + 'Rand').addEventListener('change', function () { sc.random = this.checked; notes(); onChange(); });
     if ($(p + 'Cap')) {
       $(p + 'Cap').addEventListener('input', function () { sc.cap = this.value; onChange(); });
-      $(p + 'H1').addEventListener('change', function () { sc.h1 = Number(this.value); onChange(); });
-      $(p + 'H2').addEventListener('change', function () { sc.h2 = Number(this.value); onChange(); });
+      $(p + 'H1').addEventListener('change', function () { sc.h1 = Number(this.value); hw(); onChange(); });
+      $(p + 'H2').addEventListener('change', function () { sc.h2 = Number(this.value); hw(); onChange(); });
+      if (sc.ignoreHours) { $(p + 'H1').disabled = true; $(p + 'H2').disabled = true; }
     }
     notes();
+    if (sc.when === 'now' && hours) { clearInterval(sc._clock); sc._clock = setInterval(function () { if ($(p + 'Hours')) hw(); else clearInterval(sc._clock); }, 60000); }
   }
   function scheduleProblem(sc, opts) {
     var m = Number(sc.minutes);
@@ -598,7 +627,7 @@
     if (opts && opts.limits) {
       var c = Number(sc.cap);
       if (!(c >= 1 && c <= 60 && Math.round(c) === c)) return 'Messages per day must be a whole number from 1 to 60.';
-      if (!(Number(sc.h2) > Number(sc.h1))) return 'The sending hours must end after they start.';
+      if (!sc.ignoreHours && !(Number(sc.h2) > Number(sc.h1))) return 'The sending hours must end after they start.';
     }
     return '';
   }
@@ -687,7 +716,8 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-sph]'), function (b) {
       b.addEventListener('click', function () { insertAt('{' + b.getAttribute('data-sph') + '}'); });
     });
-    bindSchedule('es', st.sched, function () { st.review = null; if ($('reviewBox')) $('reviewBox').innerHTML = ''; });
+    bindSchedule('es', st.sched, function () { st.review = null; if ($('reviewBox')) $('reviewBox').innerHTML = ''; },
+      function () { var R = S.boot.sendingRules || { startHour: 9, endHour: 21 }; return [R.startHour, R.endHour]; });
     $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; });
     $('sName').addEventListener('input', function () { st.name = this.value; });
     $('sReview').addEventListener('click', loadReview);
@@ -719,7 +749,7 @@
   function sendParams() {
     var st = S.send;
     return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: Number(st.sched.minutes), randomExtra: !!st.sched.random,
-      startAt: startAtIso(st.sched), skipPrevious: st.skipPrevious, name: st.name };
+      startAt: startAtIso(st.sched), ignoreHours: !!st.sched.ignoreHours, skipPrevious: st.skipPrevious, name: st.name };
   }
 
   function loadReview() {
@@ -749,8 +779,10 @@
         return '<li>' + esc(s.reason) + ': <b>' + s.count + '</b></li>';
       }).join('') + '</ul></details>';
     }
-    if (r.startAtLabel) html += '<div class="notice info" style="margin-top:10px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
-    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time), ' +
+    if (r.waitsForHoursLabel) html += '<div class="notice warn" style="margin-top:10px">Because of the sending hours, the first email goes out at <b>' + esc(r.waitsForHoursLabel) + '</b> (UAE time). To send right away, click “Send now anyway” in the Sending schedule.</div>';
+    else if (r.startAtLabel) html += '<div class="notice info" style="margin-top:10px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
+    else html += '<div class="notice ok" style="margin-top:10px">The first email goes out right away (within about a minute).</div>';
+    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, ' + (r.ignoreHours ? '<b>day and night</b> (sending hours off for this send)' : 'only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time)') + ', ' +
       (r.randomExtra ? 'about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) : 'exactly ' + r.delayMinutes) + ' minutes apart.</p>';
     if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:10px">' + esc(r.dailyLimitNote) + '</div>';
     html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
@@ -1071,7 +1103,7 @@
     });
     $('waBody').addEventListener('input', live);
     $('waSkip').addEventListener('change', function () { a.skipPrevious = this.checked; });
-    bindSchedule('ws', a.sched, function () {});
+    bindSchedule('ws', a.sched, function () {}, function () { return [a.sched.h1, a.sched.h2]; });
     $('waName').addEventListener('click', function () {
       var ta = $('waBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd, ins = '{first_name}';
       ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live();
@@ -1081,7 +1113,8 @@
       if (prob) { showBanner('error', prob); return; }
       var sc = a.sched;
       withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious,
-        delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc) })).then(function (job) {
+        delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc),
+        ignoreHours: !!sc.ignoreHours })).then(function (job) {
         var name = 'whatsapp-job-' + String(job.shop_name || job.shop_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() + '-' + job.created_at.slice(0, 16).replace(/[:T]/g, '-') + '.json';
         var blob = new Blob([JSON.stringify(job, null, 1)], { type: 'application/json' });
         var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name;
@@ -1099,12 +1132,17 @@
       if (prob) { showBanner('error', prob); return; }
       var sc = a.sched;
       var p = { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random,
-        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc) };
-      if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' + (sc.when === 'at' ? 'Starts: ' + sc.at.replace('T', ' ') + '\n' : 'Starts now.\n') +
-        (sc.random ? sc.minutes + '–' + Math.round(sc.minutes * 1.4) : 'Exactly ' + sc.minutes) + ' minutes between messages, at most ' + sc.cap + ' per day, ' + sc.h1 + ':00–' + sc.h2 + ':00.')) return;
+        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours };
+      var st0 = sc.when === 'at' && sc.at ? new Date(sc.at) : new Date();
+      var waits = !sc.ignoreHours && !(st0.getHours() >= sc.h1 && st0.getHours() < sc.h2);
+      if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' +
+        (waits ? 'First message: ' + sc.h1 + ':00 (outside the sending hours now).\n' : (sc.when === 'at' ? 'Starts: ' + sc.at.replace('T', ' ') + '\n' : 'Starts now.\n')) +
+        (sc.random ? sc.minutes + '–' + Math.round(sc.minutes * 1.4) : 'Exactly ' + sc.minutes) + ' minutes between messages, at most ' + sc.cap + ' per day' +
+        (sc.ignoreHours ? ', day and night.' : ', ' + sc.h1 + ':00–' + sc.h2 + ':00.'))) return;
       withBusy('Sending the start command…', call('startWhatsAppAuto', p)).then(function (r) {
         var skip = r.skipped && r.skipped.length ? ' Skipped: ' + r.skipped.map(function (x) { return x.count + ' × ' + x.reason; }).join('; ') + '.' : '';
-        showBanner('success', 'Started for ' + plural(r.people, 'person') + '. The Mac picks it up within about 10 seconds.' + skip, true);
+        showBanner('success', 'Started for ' + plural(r.people, 'person') + '. The Mac picks it up within about 10 seconds' +
+          (r.rules.startHour > 0 || r.rules.endHour < 24 ? '' : ' and sends day and night') + '.' + skip, true);
         pollHelper(true);
       });
     });

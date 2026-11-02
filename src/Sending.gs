@@ -101,7 +101,7 @@ function stepCampaign_(ctx, campaign, nowMs) {
     // Safe-sending rules, checked right before each email.
     const rules = sendingRules_();
     const senderAddr = norm_(shop.sender_email);
-    if (!withinSendingHours_(nowMs, rules)) {
+    if (campaign.ignore_hours !== 'yes' && !withinSendingHours_(nowMs, rules)) {
       campaign.next_send_at = new Date(nextWindowStart_(nowMs, rules)).toISOString();
       campaign.status_reason = 'Waiting for sending hours (' + hourLabel_(rules.startHour) + '–' + hourLabel_(rules.endHour) +
         ' UAE time). Continues automatically.';
