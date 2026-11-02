@@ -1,0 +1,1047 @@
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------- State ---------------- */
+  var S = {
+    boot: null,          // from getBootstrap()
+    shopId: null,
+    data: null,          // from getShopData()
+    view: 'contacts',
+    upload: null,        // {fileName, sheets, sheetName, rows, headerIndex, headers, mapping, consentAll, consentSource}
+    importResult: null,
+    contactSearch: '', contactFilter: 'all',
+    send: { templateId: '', delay: 5, skipPrevious: true, name: '', review: null },
+    progress: { campaignId: null, detail: null, filter: 'all' },
+    wa: { templateId: '', search: '' },
+    tpl: { editing: null },
+    refreshTimer: null
+  };
+
+  var FIELDS = [
+    { key: 'full_name', label: 'Name', hint: 'Full name', required: false,
+      guess: ['full name', 'name', 'customer', 'client', 'contact', 'الاسم', 'اسم'] },
+    { key: 'first_name', label: 'First name', hint: 'Optional — taken from Name if empty', required: false,
+      guess: ['first name', 'first', 'firstname', 'given name', 'الاسم الأول'] },
+    { key: 'email', label: 'Email', hint: 'Needed for emails', required: false,
+      guess: ['email', 'e-mail', 'email address', 'mail', 'البريد', 'الايميل', 'الإيميل'] },
+    { key: 'phone', label: 'Phone number', hint: 'Needed for WhatsApp', required: false,
+      guess: ['phone', 'mobile', 'whatsapp', 'phone number', 'mobile number', 'tel', 'telephone', 'number', 'الهاتف', 'الجوال', 'رقم', 'موبايل'] },
+    { key: 'consent_status', label: 'Consent (agreed to messages?)', hint: 'yes / no', required: false,
+      guess: ['consent', 'consent status', 'agreed', 'permission', 'opt in', 'opt-in', 'subscribed', 'الموافقة', 'موافقة'] },
+    { key: 'consent_source', label: 'Consent source', hint: 'Where they agreed (optional)', required: false,
+      guess: ['consent source', 'source', 'how', 'where', 'المصدر'] },
+    { key: 'consent_date', label: 'Consent date', hint: 'Optional', required: false,
+      guess: ['consent date', 'date', 'signup date', 'التاريخ'] },
+    { key: 'opted_out', label: 'Opted out', hint: 'Optional — yes means never message', required: false,
+      guess: ['opted out', 'opt out', 'opt-out', 'unsubscribed', 'unsubscribe', 'stop'] }
+  ];
+  var PLACEHOLDERS = ['first_name', 'full_name', 'shop_name', 'sender_name', 'email', 'phone'];
+
+  /* ---------------- Helpers ---------------- */
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmt(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text || status) + '</span>'; }
+  function plural(n, word) { return n + ' ' + (n === 1 ? word : (word === 'person' ? 'people' : word + 's')); }
+
+  function call(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (err) { reject(err); })[fn].apply(null, args);
+    });
+  }
+  function errText(err) {
+    var m = err && err.message ? err.message : String(err);
+    if (/Authorization is required|PERMISSION_DENIED|not have permission/i.test(m)) {
+      m = 'Google needs your permission again. Reload the page and click "Allow".\n(' + m + ')';
+    }
+    if (/NetworkError|Failed to fetch|timed out/i.test(m)) m = 'Connection problem. Check your internet and try again.';
+    return m;
+  }
+  var bannerTimer;
+  function showBanner(kind, msg, keep) {
+    var b = $('banner');
+    b.className = 'banner ' + kind;
+    b.textContent = msg;
+    clearTimeout(bannerTimer);
+    if (!keep) bannerTimer = setTimeout(function () { b.className = 'banner hidden'; }, kind === 'error' ? 15000 : 6000);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  function hideBanner() { $('banner').className = 'banner hidden'; }
+  function busy(text) { $('busyText').textContent = text || 'Working…'; $('busy').classList.remove('hidden'); }
+  function done() { $('busy').classList.add('hidden'); }
+
+  function withBusy(text, promise) {
+    busy(text);
+    // On error: show the message and stop the chain quietly (the following steps never run).
+    return promise.then(function (r) { done(); return r; }, function (e) {
+      done(); showBanner('error', errText(e)); return new Promise(function () {});
+    });
+  }
+
+  function renderText(text, fields) {
+    return String(text || '').replace(/\{\s*([a-zA-Z_]+)\s*\}/g, function (m, key) {
+      var k = key.toLowerCase();
+      return Object.prototype.hasOwnProperty.call(fields, k) ? fields[k] : m;
+    });
+  }
+  function fieldsFor(contact, shop) {
+    var first = contact.first_name || String(contact.full_name || '').trim().split(/\s+/)[0] || '';
+    return {
+      first_name: first || 'there',
+      full_name: contact.full_name || first || 'there',
+      shop_name: shop.shop_name || '',
+      sender_name: shop.sender_name || shop.shop_name || '',
+      email: contact.email || '',
+      phone: contact.phone || ''
+    };
+  }
+
+  /* ---------------- Boot ---------------- */
+  function start() {
+    call('getBootstrap').then(function (boot) {
+      S.boot = boot;
+      $('who').innerHTML = 'Signed in as <b>' + esc(boot.user) + '</b>' +
+        (boot.isOwner ? ' <button class="btn small" id="openSettings" style="margin-left:8px">⚙ Settings</button>' : '');
+      if (boot.isOwner) $('openSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
+      renderHome();
+    }, function (err) {
+      $('app').innerHTML = '<div class="card"><h2>Cannot open the app</h2><p>' + esc(errText(err)) + '</p>' +
+        '<p class="muted small">If this keeps happening, send this message to the person who set up the app.</p></div>';
+    });
+  }
+
+  function engineNotice() {
+    var e = S.boot.engine;
+    if (e.healthy) return '';
+    var when = e.lastRun ? 'The automatic sender last ran ' + plural(e.minutesAgo, 'minute') + ' ago.' : 'The automatic sender has never run.';
+    return '<div class="notice warn"><b>Emails may not be going out.</b> ' + esc(when) +
+      (S.boot.isOwner
+        ? ' Open ⚙ Settings and click "Restart sender".'
+        : ' Ask ' + esc(S.boot.owner) + ' to open the app, go to Settings and click "Restart sender".') + '</div>';
+  }
+
+  /* ---------------- Home ---------------- */
+  function renderHome() {
+    stopAutoRefresh();
+    S.shopId = null; S.data = null;
+    var b = S.boot;
+    var html = '<h1>Choose a shop</h1><p class="muted">Pick the shop you want to follow up for.</p>';
+    html += engineNotice();
+    if (b.isOwner && b.settingsNeeded) {
+      html += '<div class="notice info"><b>Finish setup:</b> ' + esc(b.settingsNeeded) + ' <button class="link" id="goSettings">Open Settings</button></div>';
+    }
+    b.setupProblems.forEach(function (p) { html += '<div class="notice warn">' + esc(p) + '</div>'; });
+    if (!b.shops.length) {
+      html += '<div class="card"><h2>No shops yet</h2><p>Add one row per shop in the <b>Shops</b> tab of the Google Sheet ' +
+        '(shop_id, shop_name, sender_email, active = yes), then reload this page.</p>' +
+        '<p><a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Open the Google Sheet</a></p></div>';
+    } else {
+      html += '<div class="shops">';
+      b.shops.forEach(function (s) {
+        html += '<button class="shop-card" data-shop="' + esc(s.shop_id) + '">' +
+          '<div class="name">' + esc(s.shop_name || s.shop_id) + '</div>' +
+          '<div class="muted small">Sends from ' + esc(s.sender_email || 'no Gmail chosen yet') + '</div>' +
+          '<div style="margin-top:10px">' + (s.senderOk ? badge('ok', '✓ Ready to send') : badge('bad', '⚠ Sending Gmail not connected')) + '</div>' +
+          '</button>';
+      });
+      html += '</div>';
+    }
+    if (b.isOwner) {
+      html += '<p class="muted small" style="margin-top:20px">You are the owner. Add or rename shops in the ' +
+        '<a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a> (Shops tab); connect Gmail accounts in ⚙ Settings.</p>';
+    }
+    $('app').innerHTML = html;
+    if ($('goSettings')) $('goSettings').addEventListener('click', renderSettings);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-shop]'), function (el) {
+      el.addEventListener('click', function () { openShop(el.getAttribute('data-shop')); });
+    });
+  }
+
+  function openShop(shopId, view) {
+    hideBanner();
+    S.shopId = shopId;
+    S.view = view || 'contacts';
+    S.upload = null; S.importResult = null;
+    S.send = { templateId: '', delay: S.boot.defaultDelay, skipPrevious: true, name: '', review: null };
+    S.progress = { campaignId: null, detail: null, filter: 'all' };
+    S.wa = { templateId: '', search: '' };
+    S.tpl = { editing: null };
+    return withBusy('Loading shop…', call('getShopData', shopId)).then(function (data) {
+      S.data = data;
+      S.boot.engine = data.engine;
+      renderShop();
+    });
+  }
+
+  function reloadShop() {
+    return call('getShopData', S.shopId).then(function (data) {
+      S.data = data; S.boot.engine = data.engine; updateEngineBox();
+    });
+  }
+  function updateEngineBox() { var el = $('engineBox'); if (el) el.innerHTML = engineNotice(); }
+
+  /* ---------------- Shop shell ---------------- */
+  function renderShop() {
+    stopAutoRefresh();
+    var d = S.data, shop = d.shop;
+    var tabs = [
+      ['contacts', '1', 'Contacts'], ['send', '2', 'Send emails'], ['progress', '3', 'Progress'],
+      ['whatsapp', '', 'WhatsApp'], ['templates', '', 'Message templates']
+    ];
+    var html = '<button class="link" id="backHome">← All shops</button>';
+    html += '<h1>' + esc(shop.shop_name || shop.shop_id) + '</h1>';
+    html += '<p class="muted">' + (shop.sender_email
+      ? 'Emails are sent from the Gmail account <b>' + esc(shop.sender_email) + '</b>' + (shop.sender_name ? ' as “' + esc(shop.sender_name) + '”' : '')
+      : 'No sending Gmail account is chosen for this shop yet.') + '</p>';
+    if (!shop.senderOk) html += '<div class="notice bad"><b>This shop cannot send emails yet.</b>\n' + esc(shop.senderProblem) + '</div>';
+    html += '<div id="engineBox">' + engineNotice() + '</div>';
+    html += '<nav class="tabs">';
+    tabs.forEach(function (t) {
+      html += '<button class="tab' + (S.view === t[0] ? ' active' : '') + '" data-view="' + t[0] + '">' +
+        (t[1] ? '<span class="num">' + t[1] + '</span>' : '') + esc(t[2]) + '</button>';
+    });
+    html += '</nav><section id="view"></section>';
+    $('app').innerHTML = html;
+    $('backHome').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(function (b) { S.boot = b; renderHome(); }); renderHome(); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-view]'), function (el) {
+      el.addEventListener('click', function () { S.view = el.getAttribute('data-view'); hideBanner(); renderShop(); });
+    });
+    ({ contacts: viewContacts, send: viewSend, progress: viewProgress, whatsapp: viewWhatsApp, templates: viewTemplates })[S.view]();
+  }
+
+  /* =================================================================== */
+  /* 1. CONTACTS — upload Excel, map columns, import, list, opt-out        */
+  /* =================================================================== */
+  function viewContacts() {
+    var html = '';
+    if (!S.upload) {
+      html += '<div class="card"><h2>Upload this shop’s Excel file</h2>' +
+        '<p class="muted">The file should have one row per person and a header row (for example: Name, Email, Phone, Consent). ' +
+        'Uploading again is safe: people already in the list are updated, not duplicated.</p>' +
+        '<div class="drop" id="drop"><p><b>Drag the Excel file here</b> or</p>' +
+        '<label class="btn primary">Choose file<input type="file" id="file" accept=".xlsx,.xls,.csv" class="hidden"></label>' +
+        '<p class="muted small" style="margin-top:10px">.xlsx, .xls or .csv</p></div></div>';
+    } else {
+      html += mappingHtml();
+    }
+    if (S.importResult) html += importResultHtml(S.importResult);
+    html += contactsListHtml();
+    $('view').innerHTML = html;
+    if (!S.upload) bindUpload(); else bindMapping();
+    bindContactsList();
+  }
+
+  function bindUpload() {
+    var drop = $('drop'), input = $('file');
+    input.addEventListener('change', function () { if (input.files[0]) readFile(input.files[0]); });
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+    });
+    drop.addEventListener('drop', function (e) { if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+  }
+
+  function readFile(file) {
+    hideBanner();
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) { showBanner('error', 'Please choose an Excel file (.xlsx, .xls or .csv).'); return; }
+    if (file.size > 15 * 1024 * 1024) { showBanner('error', 'This file is too big (over 15 MB).'); return; }
+    busy('Reading the file…');
+    var reader = new FileReader();
+    reader.onerror = function () { done(); showBanner('error', 'The file could not be read. Try saving it again in Excel.'); };
+    reader.onload = function (e) {
+      try {
+        var wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        var sheets = wb.SheetNames.filter(function (n) { return sheetRows(wb.Sheets[n]).length > 0; });
+        if (!sheets.length) throw new Error('The file is empty.');
+        S.upload = { fileName: file.name, wb: wb, sheets: sheets };
+        chooseSheet(sheets[0]);
+        done();
+        S.importResult = null;
+        viewContacts();
+      } catch (err) {
+        done();
+        showBanner('error', 'This file could not be opened: ' + (err.message || err) + '\nTry opening it in Excel and saving as .xlsx.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function cellText(v) {
+    if (v === null || v === undefined) return '';
+    if (v instanceof Date) {
+      if (isNaN(v.getTime())) return '';
+      // Excel dates can come back a few seconds before midnight; round to the nearest minute first.
+      v = new Date(Math.round(v.getTime() / 60000) * 60000);
+      return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
+    }
+    if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    return String(v).trim();
+  }
+  function sheetRows(ws) {
+    var rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
+    return rows.map(function (r) { return r.map(cellText); })
+      .filter(function (r) { return r.some(function (c) { return c !== ''; }); });
+  }
+
+  function chooseSheet(name) {
+    var u = S.upload;
+    var rows = sheetRows(u.wb.Sheets[name]);
+    var headerIndex = 0;
+    for (var i = 0; i < Math.min(rows.length, 10); i++) {
+      if (rows[i].filter(function (c) { return c !== ''; }).length >= 2) { headerIndex = i; break; }
+    }
+    var headers = rows[headerIndex].map(function (h, i) { return h || ('Column ' + (i + 1)); });
+    u.sheetName = name;
+    u.rows = rows.slice(headerIndex + 1);
+    u.headerIndex = headerIndex;
+    u.headers = headers;
+    u.mapping = guessMapping(headers);
+    u.consentAll = false;
+    u.consentSource = '';
+  }
+
+  function guessMapping(headers) {
+    var lower = headers.map(function (h) { return String(h).trim().toLowerCase(); });
+    var used = {};
+    var map = {};
+    // exact matches first, then "contains"
+    [true, false].forEach(function (exact) {
+      FIELDS.forEach(function (f) {
+        if (map[f.key] !== undefined) return;
+        for (var g = 0; g < f.guess.length; g++) {
+          for (var i = 0; i < lower.length; i++) {
+            if (used[i]) continue;
+            var hit = exact ? lower[i] === f.guess[g] : lower[i].indexOf(f.guess[g]) !== -1;
+            if (hit) { map[f.key] = i; used[i] = true; return; }
+          }
+        }
+      });
+    });
+    FIELDS.forEach(function (f) { if (map[f.key] === undefined) map[f.key] = -1; });
+    return map;
+  }
+
+  function mappedRows() {
+    var u = S.upload;
+    return u.rows.map(function (r) {
+      var o = {};
+      FIELDS.forEach(function (f) { var i = u.mapping[f.key]; o[f.key] = i >= 0 ? (r[i] || '') : ''; });
+      if (u.mapping.consent_status < 0 && u.consentAll) {
+        o.consent_status = 'yes';
+        o.consent_source = o.consent_source || u.consentSource;
+        if (!o.consent_date) o.consent_date = new Date().toISOString().slice(0, 10);
+      }
+      return o;
+    });
+  }
+
+  function mappingProblems() {
+    var u = S.upload, m = u.mapping, out = [];
+    if (m.full_name < 0 && m.first_name < 0) out.push('Choose which column has the person’s name.');
+    if (m.email < 0 && m.phone < 0) out.push('Choose the email column and/or the phone column.');
+    var picked = {};
+    FIELDS.forEach(function (f) {
+      if (m[f.key] >= 0) {
+        if (picked[m[f.key]]) out.push('Column “' + u.headers[m[f.key]] + '” is chosen twice.');
+        picked[m[f.key]] = true;
+      }
+    });
+    if (m.consent_status < 0 && u.consentAll && !u.consentSource.trim()) out.push('Write where these people agreed to be contacted.');
+    return out;
+  }
+
+  function mappingHtml() {
+    var u = S.upload;
+    var html = '<div class="card"><div class="row"><h2>Check the columns</h2><span class="spacer"></span>' +
+      '<button class="btn small" id="cancelUpload">Cancel</button></div>' +
+      '<p class="muted">File: <b>' + esc(u.fileName) + '</b> — ' + plural(u.rows.length, 'row') + ' found. ' +
+      'For each item below, choose the matching column from your file. We guessed them for you — just check.</p>';
+    if (u.sheets.length > 1) {
+      html += '<label class="field"><span>Sheet in the file</span><select id="sheetSel">' +
+        u.sheets.map(function (n) { return '<option' + (n === u.sheetName ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') +
+        '</select></label>';
+    }
+    html += '<div class="map-grid">';
+    FIELDS.forEach(function (f) {
+      html += '<div><b>' + esc(f.label) + '</b><div class="muted small">' + esc(f.hint) + '</div></div>' +
+        '<select data-map="' + f.key + '"><option value="-1">— not in my file —</option>' +
+        u.headers.map(function (h, i) {
+          return '<option value="' + i + '"' + (u.mapping[f.key] === i ? ' selected' : '') + '>' + esc(h) + '</option>';
+        }).join('') + '</select>';
+    });
+    html += '</div>';
+
+    if (u.mapping.consent_status < 0) {
+      html += '<div class="notice warn" style="margin-top:14px"><b>No consent column chosen.</b> People without a clear “yes” are always skipped.' +
+        '<label class="check"><input type="checkbox" id="consentAll"' + (u.consentAll ? ' checked' : '') + '>' +
+        '<span>Everyone in this file agreed to be contacted by this shop (only tick this if it is true).</span></label>' +
+        '<label class="field' + (u.consentAll ? '' : ' hidden') + '" id="consentSrcWrap"><span>Where did they agree?</span>' +
+        '<input type="text" id="consentSrc" placeholder="Example: signed the interest form at the shop" value="' + esc(u.consentSource) + '"></label></div>';
+    }
+
+    var probs = mappingProblems();
+    if (probs.length) html += '<div class="notice bad" style="margin-top:14px">' + esc(probs.join('\n')) + '</div>';
+
+    var sample = mappedRows().slice(0, 5);
+    html += '<h3 style="margin-top:16px">Preview (first ' + sample.length + ' rows)</h3><div class="table-wrap"><table><tr>' +
+      FIELDS.filter(function (f) { return u.mapping[f.key] >= 0 || (f.key.indexOf('consent') === 0 && u.consentAll); })
+        .map(function (f) { return '<th>' + esc(f.label) + '</th>'; }).join('') + '</tr>' +
+      sample.map(function (r) {
+        return '<tr>' + FIELDS.filter(function (f) { return u.mapping[f.key] >= 0 || (f.key.indexOf('consent') === 0 && u.consentAll); })
+          .map(function (f) { return '<td>' + esc(r[f.key]) + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</table></div>';
+
+    html += '<div class="row" style="margin-top:16px"><button class="btn primary big" id="doImport"' + (probs.length ? ' disabled' : '') + '>' +
+      'Import ' + plural(u.rows.length, 'contact') + '</button></div></div>';
+    return html;
+  }
+
+  function bindMapping() {
+    var u = S.upload;
+    $('cancelUpload').addEventListener('click', function () { S.upload = null; viewContacts(); });
+    if ($('sheetSel')) $('sheetSel').addEventListener('change', function () { chooseSheet(this.value); viewContacts(); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-map]'), function (sel) {
+      sel.addEventListener('change', function () { u.mapping[sel.getAttribute('data-map')] = Number(sel.value); viewContacts(); });
+    });
+    if ($('consentAll')) {
+      $('consentAll').addEventListener('change', function () { u.consentAll = this.checked; viewContacts(); });
+      $('consentSrc').addEventListener('input', function () {
+        u.consentSource = this.value;
+        var ok = !mappingProblems().length;
+        $('doImport').disabled = !ok;
+      });
+    }
+    $('doImport').addEventListener('click', doImport);
+  }
+
+  function doImport() {
+    if (mappingProblems().length) return;
+    var rows = mappedRows();
+    var u = S.upload;
+    var chunk = 400, total = { added: 0, updated: 0, unchanged: 0, rejected: 0, problems: [] };
+    var i = 0;
+    busy('Importing…');
+    function next() {
+      if (i >= rows.length) return Promise.resolve();
+      var part = rows.slice(i, i + chunk);
+      var firstRowNumber = u.headerIndex + 2 + i;
+      $('busyText').textContent = 'Importing… ' + Math.min(i + chunk, rows.length) + ' of ' + rows.length;
+      return call('importContacts', S.shopId, part, { fileName: u.fileName, firstRowNumber: firstRowNumber }).then(function (r) {
+        total.added += r.added; total.updated += r.updated; total.unchanged += r.unchanged; total.rejected += r.rejected;
+        total.problems = total.problems.concat(r.problems).slice(0, 100);
+        i += chunk;
+        return next();
+      });
+    }
+    next().then(function () {
+      return reloadShop();
+    }).then(function () {
+      done();
+      S.upload = null;
+      S.importResult = total;
+      showBanner('success', 'Import finished: ' + total.added + ' new, ' + total.updated + ' updated.');
+      viewContacts();
+    }, function (err) {
+      done();
+      showBanner('error', 'Import stopped: ' + errText(err) + (i ? '\n' + i + ' rows were saved before the problem.' : ''));
+    });
+  }
+
+  function importResultHtml(r) {
+    var html = '<div class="card"><h3>Last import</h3><p>' + badge('ok', r.added + ' new') + ' ' + badge('pending', r.updated + ' updated') +
+      ' ' + badge('skipped', r.unchanged + ' unchanged') + (r.rejected ? ' ' + badge('failed', r.rejected + ' not imported') : '') + '</p>';
+    if (r.problems.length) html += '<details><summary>' + plural(r.problems.length, 'row') + ' to check</summary><ul class="small">' +
+      r.problems.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul></details>';
+    html += '<p class="small muted" style="margin-top:8px">Next step: open <b>2 Send emails</b>.</p></div>';
+    return html;
+  }
+
+  function contactsListHtml() {
+    var list = S.data.contacts;
+    var counts = { all: list.length, can: 0, cannot: 0, optedout: 0 };
+    list.forEach(function (c) {
+      if (c.emailCheck.ok) counts.can++; else counts.cannot++;
+      if (c.emailCheck.reason === 'Opted out') counts.optedout++;
+    });
+    var q = S.contactSearch.toLowerCase();
+    var shown = list.filter(function (c) {
+      if (S.contactFilter === 'can' && !c.emailCheck.ok) return false;
+      if (S.contactFilter === 'cannot' && c.emailCheck.ok) return false;
+      if (S.contactFilter === 'optedout' && c.emailCheck.reason !== 'Opted out') return false;
+      if (!q) return true;
+      return [c.full_name, c.first_name, c.email, c.phone].join(' ').toLowerCase().indexOf(q) !== -1;
+    });
+    var html = '<div class="card"><h2>Contacts for this shop (' + list.length + ')</h2>';
+    if (!list.length) return html + '<p class="muted">No contacts yet. Upload the Excel file above.</p></div>';
+    html += '<div class="row"><input type="search" id="cSearch" placeholder="Search name, email or phone" value="' + esc(S.contactSearch) + '" style="max-width:340px"></div>';
+    html += '<div class="chips">' + [['all', 'All'], ['can', 'Can receive emails'], ['cannot', 'Will be skipped'], ['optedout', 'Opted out']].map(function (f) {
+      return '<button class="chip" data-cf="' + f[0] + '"' + (S.contactFilter === f[0] ? ' style="border-color:var(--accent);font-weight:600"' : '') + '>' +
+        f[1] + ' (' + counts[f[0]] + ')</button>';
+    }).join('') + '</div>';
+    html += '<div class="table-wrap scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Consent</th><th>Email status</th><th></th></tr>';
+    shown.slice(0, 500).forEach(function (c) {
+      var optedOut = c.emailCheck.reason === 'Opted out';
+      html += '<tr><td>' + esc(c.full_name || c.first_name) + '</td><td>' + esc(c.email) + '</td><td>' + esc(c.phone) + '</td>' +
+        '<td>' + esc(c.consent_status) + (c.consent_source ? '<div class="muted small">' + esc(c.consent_source) + '</div>' : '') + '</td>' +
+        '<td>' + (c.emailCheck.ok ? badge('ok', 'Can receive') : badge(optedOut ? 'failed' : 'skipped', c.emailCheck.reason)) +
+        (c.lastEmailAt ? '<div class="muted small">Last email ' + esc(fmt(c.lastEmailAt)) + '</div>' : '') + '</td>' +
+        '<td>' + (optedOut ? '' : '<button class="btn small danger" data-optout="' + esc(c.contact_id) + '">Mark opted out</button>') + '</td></tr>';
+    });
+    html += '</table></div>';
+    if (shown.length > 500) html += '<p class="muted small">Showing the first 500. Use search to find someone.</p>';
+    html += '<p class="muted small" style="margin-top:8px">“Mark opted out” means this person will never get emails or WhatsApp messages from this shop again.</p></div>';
+    return html;
+  }
+
+  function bindContactsList() {
+    var s = $('cSearch');
+    if (s) s.addEventListener('input', function () {
+      S.contactSearch = s.value;
+      var pos = s.selectionStart;
+      viewContacts();
+      var n = $('cSearch'); n.focus(); n.setSelectionRange(pos, pos);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-cf]'), function (b) {
+      b.addEventListener('click', function () { S.contactFilter = b.getAttribute('data-cf'); viewContacts(); });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-optout]'), function (b) {
+      b.addEventListener('click', function () { optOut(b.getAttribute('data-optout'), viewContacts); });
+    });
+  }
+
+  function optOut(contactId, after) {
+    var c = S.data.contacts.filter(function (x) { return x.contact_id === contactId; })[0];
+    if (!c) return;
+    if (!confirm('Mark ' + (c.full_name || c.email || c.phone) + ' as opted out?\n\nThey will not receive any more emails or WhatsApp messages from this shop.')) return;
+    withBusy('Saving…', call('markOptedOut', contactId, 'Asked not to be contacted (marked by ' + S.boot.user + ')'))
+      .then(reloadShop).then(function () { showBanner('success', 'Saved. This person will be skipped from now on.'); after(); });
+  }
+
+  /* =================================================================== */
+  /* 2. SEND — choose template, review, start                             */
+  /* =================================================================== */
+  function emailTemplates() {
+    return S.data.templates.filter(function (t) { return t.channel === 'email' && t.active !== 'no'; });
+  }
+
+  function viewSend() {
+    var tpls = emailTemplates(), st = S.send;
+    if (!st.templateId && tpls.length) st.templateId = tpls[0].template_id;
+    var html = '<div class="card"><h2>Send a follow-up email</h2>' +
+      '<p class="muted">The app sends one email, waits, then sends the next. You can close this page — sending continues on its own.</p>';
+    if (!tpls.length) {
+      html += '<div class="notice warn">This shop has no email template yet. Open <b>Message templates</b> and create one.</div></div>';
+      $('view').innerHTML = html;
+      return;
+    }
+    html += '<div class="grid2"><div>' +
+      '<label class="field"><span>Which message?</span><select id="sTpl">' +
+      tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === st.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
+      '</select></label>' +
+      '<label class="field"><span>Wait between emails</span><select id="sDelay">' +
+      S.boot.allowedDelays.map(function (m) { return '<option value="' + m + '"' + (m === Number(st.delay) ? ' selected' : '') + '>' + plural(m, 'minute') + (m === S.boot.defaultDelay ? ' (recommended)' : '') + '</option>'; }).join('') +
+      '</select></label></div><div>' +
+      '<label class="field"><span>Name for this send (optional)</span><input type="text" id="sName" placeholder="Example: November follow-up" value="' + esc(st.name) + '"></label>' +
+      '<label class="check"><input type="checkbox" id="sSkip"' + (st.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this same message from this shop</span></label>' +
+      '</div></div><button class="btn" id="sReview">Show me who will get it</button></div>';
+    html += '<div id="reviewBox"></div>';
+    $('view').innerHTML = html;
+    $('sTpl').addEventListener('change', function () { st.templateId = this.value; st.review = null; loadReview(); });
+    $('sDelay').addEventListener('change', function () { st.delay = Number(this.value); st.review = null; loadReview(); });
+    $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; loadReview(); });
+    $('sName').addEventListener('input', function () { st.name = this.value; });
+    $('sReview').addEventListener('click', loadReview);
+    if (st.review) renderReview(); else loadReview();
+  }
+
+  function loadReview() {
+    var st = S.send;
+    var box = $('reviewBox');
+    if (box) box.innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Checking contacts…</p></div>';
+    call('getCampaignPreview', { shopId: S.shopId, templateId: st.templateId, delayMinutes: st.delay, skipPrevious: st.skipPrevious })
+      .then(function (r) { st.review = r; renderReview(); }, function (e) {
+        if ($('reviewBox')) $('reviewBox').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
+      });
+  }
+
+  function renderReview() {
+    var r = S.send.review, box = $('reviewBox');
+    if (!box || !r) return;
+    var p = r.preview;
+    var html = '<div class="card"><h2>Review before sending</h2>';
+    html += '<div class="stats">' +
+      '<div class="stat"><div class="n">' + r.willSend + '</div><div class="l">will get the email</div></div>' +
+      '<div class="stat"><div class="n">' + r.willSkip + '</div><div class="l">will be skipped</div></div>' +
+      '<div class="stat"><div class="n">' + r.delayMinutes + ' min</div><div class="l">between emails</div></div>' +
+      '<div class="stat"><div class="n">' + (r.estimatedHours < 1 ? Math.max(1, Math.round(r.estimatedHours * 60)) + ' min' : r.estimatedHours + ' h') + '</div><div class="l">about how long</div></div></div>';
+    if (r.skipReasons.length) {
+      html += '<details><summary>Why people will be skipped</summary><ul>' + r.skipReasons.map(function (s) {
+        return '<li>' + esc(s.reason) + ': <b>' + s.count + '</b></li>';
+      }).join('') + '</ul></details>';
+    }
+    if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:10px">' + esc(r.dailyLimitNote) + '</div>';
+    html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
+      '<div class="email-preview"><div class="meta">' +
+      '<div><b>From:</b> ' + esc(p.fromName) + ' &lt;' + esc(p.from) + '&gt;</div>' +
+      '<div><b>To:</b> ' + esc(p.to) + '</div>' +
+      (p.replyTo ? '<div><b>Replies go to:</b> ' + esc(p.replyTo) + '</div>' : '') +
+      '<div><b>Subject:</b> ' + esc(p.subject) + '</div></div><div class="body">' + esc(p.body) + '</div></div>';
+    if (!r.sender.ok) {
+      html += '<div class="notice bad" style="margin-top:14px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
+    }
+    html += '<div class="row" style="margin-top:16px"><button class="btn primary big" id="sStart"' + (!r.sender.ok || !r.willSend ? ' disabled' : '') + '>' +
+      '▶ Start sending to ' + plural(r.willSend, 'person') + '</button></div>';
+    if (!r.willSend && r.sender.ok) html += '<p class="muted small">Nobody can receive this email right now — see the reasons above.</p>';
+    html += '</div>';
+    box.innerHTML = html;
+    var btn = $('sStart');
+    if (btn) btn.addEventListener('click', startSending);
+  }
+
+  function startSending() {
+    var st = S.send, r = st.review;
+    if (!confirm('Start sending this email to ' + plural(r.willSend, 'person') + '?\n\nOne email every ' + plural(r.delayMinutes, 'minute') + '. You can pause at any time in "Progress".')) return;
+    withBusy('Starting…', call('startCampaign', {
+      shopId: S.shopId, templateId: st.templateId, delayMinutes: st.delay, skipPrevious: st.skipPrevious, name: st.name
+    })).then(function (camp) {
+      return reloadShop().then(function () {
+        S.send.review = null; S.send.name = '';
+        S.view = 'progress';
+        S.progress = { campaignId: camp.campaign_id, detail: null, filter: 'all' };
+        renderShop();
+        showBanner('success', 'Sending has started. The first email goes out within about a minute.');
+      });
+    });
+  }
+
+  /* =================================================================== */
+  /* 3. PROGRESS                                                          */
+  /* =================================================================== */
+  function viewProgress() {
+    if (S.progress.campaignId) return loadCampaign();
+    var list = S.data.campaigns;
+    var html = '<div class="card"><h2>Sends for this shop</h2>';
+    if (!list.length) {
+      html += '<p class="muted">Nothing sent yet. Go to <b>2 Send emails</b> to start.</p></div>';
+      $('view').innerHTML = html; return;
+    }
+    html += '<div class="table-wrap"><table><tr><th>Name</th><th>Status</th><th>Sent</th><th>Waiting</th><th>Skipped</th><th>Failed</th><th>Started</th><th></th></tr>';
+    list.forEach(function (c) {
+      html += '<tr><td>' + esc(c.campaign_name) + '</td><td>' + badge(c.status, statusLabel(c.status)) + '</td>' +
+        '<td>' + esc(c.sent) + '</td><td>' + esc(c.pending) + '</td><td>' + esc(c.skipped) + '</td><td>' + esc(c.failed) + '</td>' +
+        '<td>' + esc(fmt(c.started_at)) + '</td><td><button class="btn small" data-camp="' + esc(c.campaign_id) + '">Open</button></td></tr>';
+    });
+    html += '</table></div></div>';
+    $('view').innerHTML = html;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-camp]'), function (b) {
+      b.addEventListener('click', function () { S.progress = { campaignId: b.getAttribute('data-camp'), detail: null, filter: 'all' }; loadCampaign(); });
+    });
+    autoRefresh(function () { return reloadShop().then(function () { if (S.view === 'progress' && !S.progress.campaignId) viewProgress(); }); });
+  }
+
+  function statusLabel(s) {
+    return { running: 'Sending', paused: 'Paused', completed: 'Finished', stopped: 'Stopped', pending: 'Waiting',
+      sent: 'Sent', skipped: 'Skipped', failed: 'Failed', cancelled: 'Cancelled', opened_in_whatsapp: 'WhatsApp opened' }[s] || s;
+  }
+
+  function loadCampaign(silent) {
+    var p = call('getCampaignDetail', S.progress.campaignId);
+    if (!silent) {
+      $('view').innerHTML = '<div class="card"><div class="spinner"></div></div>';
+      p = p.catch(function (e) { showBanner('error', errText(e)); throw e; });
+    }
+    return p.then(function (d) {
+      S.progress.detail = d;
+      S.boot.engine = d.engine;
+      updateEngineBox();
+      if (S.view === 'progress') renderCampaign();
+    });
+  }
+
+  function renderCampaign() {
+    var d = S.progress.detail, c = d.campaign, f = S.progress.filter;
+    var html = '<button class="link" id="campBack">← All sends</button>';
+    html += '<div class="card"><div class="row"><h2 style="margin:0">' + esc(c.campaign_name) + '</h2>' + badge(c.status, statusLabel(c.status)) + '</div>';
+    var tpl = S.data.templates.filter(function (t) { return t.template_id === c.template_id; })[0];
+    html += '<p class="muted small">Message: ' + esc(tpl ? tpl.template_name : c.template_id) + ' · From ' + esc(c.sender_email) +
+      ' · One email every ' + plural(Number(c.delay_minutes), 'minute') + ' · Started ' + esc(fmt(c.started_at)) + ' by ' + esc(c.created_by) + '</p>';
+    if (c.status_reason) html += '<div class="notice ' + (c.status === 'paused' ? 'warn' : 'info') + '">' + esc(c.status_reason) + '</div>';
+    if (c.status === 'running') {
+      html += '<p>Next email: <b>' + (c.next_send_at ? esc(fmt(c.next_send_at)) : 'within a minute') + '</b></p>';
+    }
+    var n = { all: d.rows.length, sent: 0, pending: 0, skipped: 0, failed: 0 };
+    d.rows.forEach(function (r) {
+      if (r.status === 'sent') n.sent++; else if (r.status === 'pending') n.pending++;
+      else if (r.status === 'failed') n.failed++; else n.skipped++;
+    });
+    html += '<div class="stats">' + [['sent', 'Sent'], ['pending', 'Waiting'], ['skipped', 'Skipped'], ['failed', 'Failed']].map(function (s) {
+      return '<button class="stat' + (f === s[0] ? ' active' : '') + '" data-f="' + s[0] + '"><div class="n">' + n[s[0]] + '</div><div class="l">' + s[1] + '</div></button>';
+    }).join('') + '</div>';
+    html += '<div class="row">';
+    if (c.status === 'running') html += '<button class="btn" id="cPause">⏸ Pause</button>';
+    if (c.status === 'paused') html += '<button class="btn primary" id="cResume">▶ Resume</button>';
+    if (c.status === 'running' || c.status === 'paused') html += '<button class="btn danger" id="cStop">Stop for good</button>';
+    html += '<span class="spacer"></span><button class="btn small" id="cRefresh">↻ Refresh</button></div></div>';
+
+    var rows = d.rows.filter(function (r) {
+      if (f === 'all') return true;
+      if (f === 'skipped') return r.status === 'skipped' || r.status === 'cancelled';
+      return r.status === f;
+    });
+    html += '<div class="card"><div class="row"><h3 style="margin:0">' + (f === 'all' ? 'Everyone' : statusLabel(f)) + ' (' + rows.length + ')</h3>' +
+      (f !== 'all' ? '<button class="link" data-f="all">Show everyone</button>' : '') + '</div>' +
+      '<div class="table-wrap scroll" style="margin-top:10px"><table><tr><th>Name</th><th>Email</th><th>Status</th><th>Reason / details</th><th>Time</th></tr>' +
+      rows.map(function (r) {
+        return '<tr><td>' + esc(r.contact_name) + '</td><td>' + esc(r.email) + '</td><td>' + badge(r.status, statusLabel(r.status)) + '</td>' +
+          '<td>' + esc(r.status === 'sent' ? '' : r.reason) + '</td><td>' + esc(fmt(r.sent_at)) + '</td></tr>';
+      }).join('') + '</table></div></div>';
+    $('view').innerHTML = html;
+
+    $('campBack').addEventListener('click', function () { S.progress = { campaignId: null, detail: null, filter: 'all' }; reloadShop().then(viewProgress); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-f]'), function (b) {
+      b.addEventListener('click', function () { S.progress.filter = S.progress.filter === b.getAttribute('data-f') ? 'all' : b.getAttribute('data-f'); renderCampaign(); });
+    });
+    $('cRefresh').addEventListener('click', function () { loadCampaign(); });
+    if ($('cPause')) $('cPause').addEventListener('click', function () { campAction('pauseCampaign', 'Paused. No more emails will go out until you press Resume.'); });
+    if ($('cResume')) $('cResume').addEventListener('click', function () { campAction('resumeCampaign', 'Resumed. The next email goes out within about a minute.'); });
+    if ($('cStop')) $('cStop').addEventListener('click', function () {
+      if (confirm('Stop this send for good?\n\nPeople still waiting will NOT get the email. This cannot be undone (you can start a new send later).')) {
+        campAction('stopCampaign', 'Stopped.');
+      }
+    });
+    if (c.status === 'running') autoRefresh(function () { return loadCampaign(true); }); else stopAutoRefresh();
+  }
+
+  function campAction(fn, msg) {
+    withBusy('Saving…', call(fn, S.progress.campaignId)).then(function () {
+      return Promise.all([loadCampaign(true), reloadShop()]);
+    }).then(function () { showBanner('success', msg); renderCampaign(); });
+  }
+
+  function autoRefresh(fn) {
+    stopAutoRefresh();
+    S.refreshTimer = setInterval(function () {
+      if (document.hidden) return;
+      fn().catch(function () { /* ignore background refresh errors */ });
+    }, 30000);
+  }
+  function stopAutoRefresh() { if (S.refreshTimer) clearInterval(S.refreshTimer); S.refreshTimer = null; }
+
+  /* =================================================================== */
+  /* WHATSAPP — manual (free)                                             */
+  /* =================================================================== */
+  function viewWhatsApp() {
+    var tpls = S.data.templates.filter(function (t) { return t.channel === 'whatsapp' && t.active !== 'no'; });
+    var w = S.wa;
+    if (!w.templateId && tpls.length) w.templateId = tpls[0].template_id;
+    var html = '<div class="notice info"><b>How WhatsApp works in this free version:</b> press the green button next to a person. ' +
+      'WhatsApp opens with the message already written. Check it and press Send yourself. ' +
+      'The app never sends WhatsApp messages on its own — fully automatic WhatsApp needs the official WhatsApp Business Platform, which may cost money.</div>';
+    if (!tpls.length) {
+      html += '<div class="card"><p>This shop has no WhatsApp template yet. Open <b>Message templates</b> and create one with type “WhatsApp”.</p></div>';
+      $('view').innerHTML = html; return;
+    }
+    var tpl = tpls.filter(function (t) { return t.template_id === w.templateId; })[0] || tpls[0];
+    w.templateId = tpl.template_id;
+    var contacts = S.data.contacts;
+    var ok = contacts.filter(function (c) { return c.waCheck.ok; });
+    var notOk = contacts.filter(function (c) { return !c.waCheck.ok; });
+    var q = w.search.toLowerCase();
+    var shown = ok.filter(function (c) { return !q || [c.full_name, c.first_name, c.phone].join(' ').toLowerCase().indexOf(q) !== -1; });
+    shown.sort(function (a, b) { return (a.lastWhatsAppAt ? 1 : 0) - (b.lastWhatsAppAt ? 1 : 0); });
+
+    html += '<div class="card"><div class="grid2"><div><label class="field"><span>Which message?</span><select id="wTpl">' +
+      tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === w.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
+      '</select></label><input type="search" id="wSearch" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
+      '<div><div class="muted small" style="margin-bottom:4px">Example message</div><div class="wa-bubble">' +
+      esc(renderText(tpl.body, fieldsFor(ok[0] || { first_name: 'Ahmed' }, S.data.shop))) + '</div></div></div></div>';
+
+    html += '<div class="card"><h2>' + plural(ok.length, 'person') + ' can be messaged</h2>';
+    if (!shown.length) html += '<p class="muted">Nobody to show.</p>';
+    else {
+      html += '<div class="table-wrap scroll"><table><tr><th>Name</th><th>Phone</th><th>Last opened</th><th></th></tr>';
+      shown.slice(0, 500).forEach(function (c) {
+        var text = renderText(tpl.body, fieldsFor(c, S.data.shop));
+        var url = 'https://wa.me/' + encodeURIComponent(c.phone) + '?text=' + encodeURIComponent(text);
+        html += '<tr><td>' + esc(c.full_name || c.first_name) + '</td><td>+' + esc(c.phone) + '</td>' +
+          '<td>' + (c.lastWhatsAppAt ? esc(fmt(c.lastWhatsAppAt)) : '<span class="muted">never</span>') + '</td>' +
+          '<td class="row"><a class="btn wa small" href="' + esc(url) + '" target="_blank" rel="noopener" data-wa="' + esc(c.contact_id) + '">Open WhatsApp</a>' +
+          '<button class="btn small danger" data-optout="' + esc(c.contact_id) + '">Mark opted out</button></td></tr>';
+      });
+      html += '</table></div>';
+    }
+    html += '</div>';
+    if (notOk.length) {
+      var reasons = {};
+      notOk.forEach(function (c) { reasons[c.waCheck.reason] = (reasons[c.waCheck.reason] || 0) + 1; });
+      html += '<div class="card"><details><summary>' + plural(notOk.length, 'person') + ' cannot be messaged</summary><ul>' +
+        Object.keys(reasons).map(function (r) { return '<li>' + esc(r) + ': <b>' + reasons[r] + '</b></li>'; }).join('') + '</ul></details></div>';
+    }
+    $('view').innerHTML = html;
+
+    $('wTpl').addEventListener('change', function () { w.templateId = this.value; viewWhatsApp(); });
+    $('wSearch').addEventListener('input', function () {
+      w.search = this.value; var pos = this.selectionStart; viewWhatsApp();
+      var n = $('wSearch'); n.focus(); n.setSelectionRange(pos, pos);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-wa]'), function (a) {
+      a.addEventListener('click', function () {
+        var id = a.getAttribute('data-wa');
+        call('logWhatsAppOpened', id, w.templateId).then(function (r) {
+          S.data.contacts.forEach(function (c) { if (c.contact_id === id) c.lastWhatsAppAt = r.at; });
+          if (S.view === 'whatsapp') viewWhatsApp();
+        }, function (e) { showBanner('error', errText(e)); });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-optout]'), function (b) {
+      b.addEventListener('click', function () { optOut(b.getAttribute('data-optout'), viewWhatsApp); });
+    });
+  }
+
+  /* =================================================================== */
+  /* TEMPLATES                                                            */
+  /* =================================================================== */
+  function viewTemplates() {
+    var t = S.tpl.editing;
+    if (t) return renderTemplateForm();
+    var list = S.data.templates;
+    var html = '<div class="card"><div class="row"><h2 style="margin:0">Message templates</h2><span class="spacer"></span>' +
+      '<button class="btn primary" id="tNew">+ New template</button></div>' +
+      '<p class="muted" style="margin-top:8px">Use fields like {first_name} and {shop_name}; the app fills them in for each person.</p>';
+    if (!list.length) html += '<p class="muted">No templates yet.</p>';
+    else {
+      html += '<div class="table-wrap"><table><tr><th>Name</th><th>Type</th><th>Subject / start of message</th><th>On?</th><th></th></tr>' +
+        list.map(function (x) {
+          return '<tr><td>' + esc(x.template_name) + '</td><td>' + (x.channel === 'whatsapp' ? 'WhatsApp' : 'Email') + '</td>' +
+            '<td>' + esc(x.channel === 'email' ? x.subject : String(x.body).slice(0, 70)) + '</td><td>' + (x.active === 'no' ? 'No' : 'Yes') + '</td>' +
+            '<td><button class="btn small" data-edit="' + esc(x.template_id) + '">Edit</button></td></tr>';
+        }).join('') + '</table></div>';
+    }
+    html += '</div>';
+    $('view').innerHTML = html;
+    $('tNew').addEventListener('click', function () {
+      S.tpl.editing = { template_id: '', shop_id: S.shopId, template_name: '', channel: 'email', subject: '', body: 'Hi {first_name},\n\n', active: 'yes' };
+      viewTemplates();
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-edit]'), function (b) {
+      b.addEventListener('click', function () {
+        var x = S.data.templates.filter(function (y) { return y.template_id === b.getAttribute('data-edit'); })[0];
+        S.tpl.editing = JSON.parse(JSON.stringify(x));
+        viewTemplates();
+      });
+    });
+  }
+
+  function renderTemplateForm() {
+    var t = S.tpl.editing;
+    var html = '<div class="card"><h2>' + (t.template_id ? 'Edit template' : 'New template') + '</h2><div class="grid2"><div>' +
+      '<label class="field"><span>Template name</span><input type="text" id="tName" value="' + esc(t.template_name) + '" placeholder="Example: First follow-up"></label>' +
+      '<label class="field"><span>Type</span><select id="tChannel"><option value="email"' + (t.channel === 'email' ? ' selected' : '') + '>Email</option>' +
+      '<option value="whatsapp"' + (t.channel === 'whatsapp' ? ' selected' : '') + '>WhatsApp</option></select></label>' +
+      '<label class="field' + (t.channel === 'email' ? '' : ' hidden') + '" id="tSubjWrap"><span>Email subject</span><input type="text" id="tSubject" value="' + esc(t.subject) + '"></label>' +
+      '<label class="field"><span>Message</span><textarea id="tBody">' + esc(t.body) + '</textarea></label>' +
+      '<div class="muted small">Insert a field:</div><div class="chips">' +
+      PLACEHOLDERS.map(function (p) { return '<button class="chip" data-ph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
+      '<label class="check"><input type="checkbox" id="tActive"' + (t.active !== 'no' ? ' checked' : '') + '><span>Template is on (can be chosen)</span></label>' +
+      '</div><div><div class="muted small" style="margin-bottom:4px">Preview</div><div id="tPreview"></div>' +
+      '<p class="muted small" style="margin-top:10px">Tip: end emails with a line such as “Reply STOP if you prefer no more emails.” and mark those people as opted out.</p></div></div>' +
+      '<div class="row" style="margin-top:12px"><button class="btn primary" id="tSave">Save template</button><button class="btn" id="tCancel">Cancel</button></div></div>';
+    $('view').innerHTML = html;
+    function sync() {
+      t.template_name = $('tName').value; t.channel = $('tChannel').value; t.subject = $('tSubject').value;
+      t.body = $('tBody').value; t.active = $('tActive').checked ? 'yes' : 'no';
+      $('tSubjWrap').classList.toggle('hidden', t.channel !== 'email');
+      var sample = S.data.contacts.filter(function (c) { return c.emailCheck.ok || c.waCheck.ok; })[0] ||
+        { first_name: 'Ahmed', full_name: 'Ahmed Ali', email: 'ahmed@example.com', phone: '971501234567' };
+      var f = fieldsFor(sample, S.data.shop);
+      var unknown = (String(t.subject) + ' ' + String(t.body)).match(/\{\s*[a-zA-Z_]+\s*\}/g) || [];
+      unknown = unknown.filter(function (m) { return PLACEHOLDERS.indexOf(m.replace(/[{}\s]/g, '').toLowerCase()) === -1; });
+      $('tPreview').innerHTML = (unknown.length ? '<div class="notice bad">Unknown field: ' + esc(unknown.join(', ')) + '</div>' : '') +
+        (t.channel === 'email'
+          ? '<div class="email-preview"><div class="meta"><div><b>Subject:</b> ' + esc(renderText(t.subject, f)) + '</div></div><div class="body">' + esc(renderText(t.body, f)) + '</div></div>'
+          : '<div class="wa-bubble">' + esc(renderText(t.body, f)) + '</div>');
+    }
+    ['tName', 'tSubject', 'tBody'].forEach(function (id) { $(id).addEventListener('input', sync); });
+    ['tChannel', 'tActive'].forEach(function (id) { $(id).addEventListener('change', sync); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ph]'), function (b) {
+      b.addEventListener('click', function () {
+        var ta = $('tBody'), ph = '{' + b.getAttribute('data-ph') + '}';
+        var s = ta.selectionStart, e = ta.selectionEnd;
+        ta.value = ta.value.slice(0, s) + ph + ta.value.slice(e);
+        ta.focus(); ta.setSelectionRange(s + ph.length, s + ph.length);
+        sync();
+      });
+    });
+    $('tCancel').addEventListener('click', function () { S.tpl.editing = null; viewTemplates(); });
+    $('tSave').addEventListener('click', function () {
+      sync();
+      withBusy('Saving…', call('saveTemplate', t)).then(function () {
+        return reloadShop();
+      }).then(function () {
+        S.tpl.editing = null; S.send.review = null;
+        showBanner('success', 'Template saved.');
+        viewTemplates();
+      });
+    });
+    sync();
+  }
+
+
+  /* =================================================================== */
+  /* SETTINGS (owner only) — Google sign-in, Gmail accounts, shop senders */
+  /* =================================================================== */
+  function renderSettings() {
+    stopAutoRefresh();
+    S.shopId = null;
+    $('app').innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Loading settings…</p></div>';
+    call('getSettings').then(function (st) { S.settings = st; drawSettings(); }, function (e) {
+      $('app').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
+    });
+  }
+
+  function accountBadge(a) {
+    if (a.status === 'connected') return badge('ok', '✓ Connected');
+    if (a.status === 'needs_reconnect') return badge('bad', 'Needs reconnect');
+    return badge('skipped', 'Disconnected');
+  }
+
+  function drawSettings() {
+    var st = S.settings;
+    var connected = st.accounts.filter(function (a) { return a.status === 'connected'; });
+    var html = '<button class="link" id="setBack">← All shops</button><h1>Settings</h1>' +
+      '<p class="muted">Only you (the owner) can see this page.</p>';
+    html += '<div id="engineBox">' + engineNotice() + '</div>';
+
+    // 1. Google sign-in client
+    html += '<div class="card"><h2>1. Google sign-in (one time)</h2>' +
+      '<p class="muted">Lets each Gmail account give this app permission to send email. Create it in Google Cloud (see the guide), then paste it here.</p>' +
+      '<label class="field"><span>Authorized redirect URI — copy this into Google Cloud</span>' +
+      '<div class="row"><input type="text" id="redir" readonly value="' + esc(st.redirectUri) + '"><button class="btn small" id="copyRedir">Copy</button></div></label>' +
+      (st.redirectLooksWrong ? '<div class="notice warn">This address should end with /exec. Open the app from its deployed link (Deploy → Manage deployments), not the test link.</div>' : '') +
+      '<div class="grid2"><label class="field"><span>Client ID</span><input type="text" id="cid" value="' + esc(st.clientId) + '" placeholder="1234…apps.googleusercontent.com"></label>' +
+      '<label class="field"><span>Client secret</span><input type="text" id="csec" autocomplete="off" placeholder="' + (st.clientSecretSaved ? 'Saved — paste a new one only to replace it' : 'Paste the client secret') + '"></label></div>' +
+      '<div class="row"><button class="btn primary" id="saveClient">Save</button>' +
+      (st.clientId && st.clientSecretSaved ? badge('ok', '✓ Saved') : badge('warn', 'Not set yet')) + '</div>' +
+      '<p class="muted small" style="margin-top:8px">The secret is stored privately on the server for your account only. It is never shown again or written to the Sheet.</p></div>';
+
+    // 2. Gmail accounts
+    html += '<div class="card"><div class="row"><h2 style="margin:0">2. Gmail accounts</h2><span class="spacer"></span>' +
+      '<button class="btn small" id="refreshSet">↻ Refresh</button>' +
+      '<button class="btn primary" id="connectNew"' + (st.clientId && st.clientSecretSaved ? '' : ' disabled') + '>+ Connect a Gmail account</button></div>' +
+      '<p class="muted" style="margin-top:8px">A Google page opens in a new tab. Sign in as the shop\'s Gmail, tick “Send email on your behalf” and click Allow. ' +
+      'The app can only send email; it cannot read anyone\'s inbox.</p>';
+    if (!st.accounts.length) html += '<p class="muted">No Gmail accounts connected yet.</p>';
+    else {
+      html += '<div class="table-wrap"><table><tr><th>Gmail account</th><th>Status</th><th>Used by</th><th>Last test</th><th></th></tr>';
+      st.accounts.forEach(function (a) {
+        html += '<tr><td><b>' + esc(a.email) + '</b>' + (a.last_error && a.status !== 'connected' ? '<div class="muted small">' + esc(a.last_error) + '</div>' : '') + '</td>' +
+          '<td>' + accountBadge(a) + '</td><td>' + esc(a.shops.join(', ') || '—') + '</td><td>' + esc(fmt(a.last_test_at) || '—') + '</td>' +
+          '<td class="row">' +
+          (a.status === 'connected'
+            ? '<button class="btn small" data-test="' + esc(a.email) + '">Send test</button><button class="btn small danger" data-disc="' + esc(a.email) + '">Disconnect</button>'
+            : '<button class="btn small primary" data-recon="' + esc(a.email) + '">Reconnect</button>') +
+          '</td></tr>';
+      });
+      html += '</table></div>';
+    }
+    html += '</div>';
+
+    // 3. Shops
+    html += '<div class="card"><h2>3. Which Gmail sends for each shop</h2>';
+    if (!st.shops.length) html += '<p class="muted">No shops yet. Add rows in the Shops tab of the <a href="' + esc(st.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a>.</p>';
+    else {
+      html += '<div class="table-wrap"><table><tr><th>Shop</th><th>Sends from</th><th>Status</th></tr>';
+      st.shops.forEach(function (s) {
+        var options = '<option value="">— choose a connected Gmail —</option>' + connected.map(function (a) {
+          return '<option value="' + esc(a.email) + '"' + (a.email === s.sender_email ? ' selected' : '') + '>' + esc(a.email) + '</option>';
+        }).join('');
+        if (s.sender_email && !connected.some(function (a) { return a.email === s.sender_email; })) {
+          options += '<option value="' + esc(s.sender_email) + '" selected disabled>' + esc(s.sender_email) + ' (not connected)</option>';
+        }
+        html += '<tr><td>' + esc(s.shop_name || s.shop_id) + (s.active ? '' : ' <span class="muted small">(inactive)</span>') + '</td>' +
+          '<td><select data-shopsender="' + esc(s.shop_id) + '">' + options + '</select></td>' +
+          '<td>' + (s.senderOk ? badge('ok', '✓ Ready') : '<span class="small" style="color:var(--bad)">' + esc(s.senderProblem) + '</span>') + '</td></tr>';
+      });
+      html += '</table></div><p class="muted small" style="margin-top:8px">Saved as soon as you choose. Only the email address is saved in the Sheet.</p>';
+    }
+    html += '</div>';
+
+    // 4. Sender engine
+    html += '<div class="card"><h2>4. Automatic sender</h2><p>' +
+      (S.boot.engine.lastRun ? 'Last ran ' + esc(fmt(S.boot.engine.lastRun)) + '.' : 'Has not run yet.') +
+      ' It wakes up every minute and sends emails that are due.</p><button class="btn" id="restartEngine">Restart sender</button></div>';
+
+    $('app').innerHTML = html;
+
+    $('setBack').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(function (b) { S.boot = b; renderHome(); }); });
+    $('copyRedir').addEventListener('click', function () { var i = $('redir'); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied.'); });
+    $('saveClient').addEventListener('click', function () {
+      withBusy('Saving…', call('saveOAuthClient', $('cid').value, $('csec').value)).then(function () {
+        showBanner('success', 'Google sign-in saved. Now click “Connect a Gmail account”.'); renderSettings();
+      });
+    });
+    $('refreshSet').addEventListener('click', renderSettings);
+    $('connectNew').addEventListener('click', function () { connectAccount(''); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-recon]'), function (b) {
+      b.addEventListener('click', function () { connectAccount(b.getAttribute('data-recon')); });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-test]'), function (b) {
+      b.addEventListener('click', function () {
+        withBusy('Sending a test email…', call('testGmailAccount', b.getAttribute('data-test'))).then(function (r) {
+          showBanner('success', r.message); renderSettings();
+        });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-disc]'), function (b) {
+      b.addEventListener('click', function () {
+        var em = b.getAttribute('data-disc');
+        if (!confirm('Disconnect ' + em + '?\n\nThe app will stop sending from it and any running send using it will pause. You can reconnect later.')) return;
+        withBusy('Disconnecting…', call('disconnectGmailAccount', em)).then(function (r) {
+          showBanner('success', 'Disconnected ' + em + (r.paused ? '. ' + plural(r.paused, 'running send') + ' paused.' : '.')); renderSettings();
+        });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-shopsender]'), function (sel) {
+      sel.addEventListener('change', function () {
+        withBusy('Saving…', call('assignShopSender', sel.getAttribute('data-shopsender'), sel.value)).then(function () {
+          showBanner('success', 'Saved.'); renderSettings();
+        });
+      });
+    });
+    $('restartEngine').addEventListener('click', function () {
+      withBusy('Restarting…', call('restartEngine')).then(function (e) { S.boot.engine = e; showBanner('success', 'The automatic sender is running.'); renderSettings(); });
+    });
+  }
+
+  function connectAccount(hint) {
+    // Open the tab right away (inside the click) so the browser does not block it, then send it to Google.
+    var win = window.open('', '_blank');
+    call('startGmailConnect', hint).then(function (url) {
+      if (win) { win.location.href = url; }
+      else { showBanner('error', 'Your browser blocked the new tab. Allow pop-ups for this page and click Connect again.'); return; }
+      showBanner('success', 'Finish in the new tab: sign in' + (hint ? ' as ' + hint : ' as the shop\'s Gmail') +
+        ', tick “Send email on your behalf”, click Allow. Then come back here and click Refresh.', true);
+    }, function (e) {
+      if (win) win.close();
+      showBanner('error', errText(e));
+    });
+  }
+
+  start();
+})();
+</script>

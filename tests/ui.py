@@ -1,0 +1,158 @@
+import subprocess, time, json, urllib.request, sys, os
+from playwright.sync_api import sync_playwright
+
+SHOTS = os.path.join(os.path.dirname(__file__), 'screenshots')
+os.makedirs(SHOTS, exist_ok=True)
+srv = subprocess.Popen(['node', os.path.join(os.path.dirname(__file__), 'server.js')], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+time.sleep(1.2)
+errors = []
+def get(u): return json.loads(urllib.request.urlopen('http://127.0.0.1:8765' + u).read())
+def check(cond, msg):
+    print(('  ok   ' if cond else '  FAIL ') + msg)
+    if not cond: errors.append(msg)
+
+try:
+    with sync_playwright() as p:
+        b = p.chromium.launch(args=['--no-sandbox'])
+        page = b.new_page(viewport={'width': 1200, 'height': 900})
+        page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
+        page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
+        page.on('dialog', lambda d: d.accept())
+        page.goto('http://127.0.0.1:8765/')
+        page.wait_for_selector('.shop-card')
+        check('Example Shop' in page.inner_text('main'), 'home lists the shop')
+        check('dad@gmail.com' in page.inner_text('#who'), 'shows signed-in user')
+        page.screenshot(path=SHOTS + '/1-home.png')
+
+        page.click('.shop-card')
+        page.wait_for_selector('#drop')
+        page.set_input_files('#file', os.path.join(os.path.dirname(__file__), '..', 'sample-contacts.xlsx'))
+        page.wait_for_selector('#doImport')
+        sel = lambda k: page.eval_on_selector('[data-map="%s"]' % k, 'e => e.options[e.selectedIndex].text')
+        check(sel('full_name') == 'Customer Name', 'guessed name column: ' + sel('full_name'))
+        check(sel('email') == 'E-mail', 'guessed email column: ' + sel('email'))
+        check(sel('phone') == 'Mobile', 'guessed phone column: ' + sel('phone'))
+        check(sel('consent_status') == 'Agreed to contact', 'guessed consent column: ' + sel('consent_status'))
+        check(sel('consent_source') == 'How they agreed', 'guessed consent source: ' + sel('consent_source'))
+        check(sel('consent_date') == 'Date agreed', 'guessed consent date: ' + sel('consent_date'))
+        check(sel('opted_out') == 'Unsubscribed', 'guessed opt-out: ' + sel('opted_out'))
+        check('12 rows found' in page.inner_text('main'), '12 rows found')
+        check('2026-09-14' in page.inner_text('table'), 'dates shown as yyyy-mm-dd')
+        page.screenshot(path=SHOTS + '/2-mapping.png', full_page=True)
+        page.click('#doImport')
+        page.wait_for_selector('text=Last import')
+        txt = page.inner_text('main')
+        check('12 new' in txt, 'import: 12 new')
+        st = get('/state')
+        fat = [c for c in st['contacts'] if c['email'] == 'fatima.test@example.com'][0]
+        check(fat['phone'] == '971501112233', 'numeric Excel phone normalized: ' + fat['phone'])
+        check(fat['consent_date'] == '2026-09-20', 'consent date stored: ' + fat['consent_date'])
+        page.screenshot(path=SHOTS + '/3-contacts.png', full_page=True)
+
+        # opt someone out from the list
+        page.click('[data-optout]')  # first row: Ahmed
+        page.wait_for_selector('text=This person will be skipped')
+
+        page.click('[data-view="send"]')
+        page.wait_for_selector('#sStart')
+        txt = page.inner_text('#reviewBox')
+        check('will get the email' in txt, 'review shows counts')
+        n = page.inner_text('#reviewBox .stat .n')
+        check(n == '5', 'will send to 5 (Fatima, Omar, Layla, Rashid, Sara): got ' + n)
+        check('Hi Fatima' in txt, 'preview personalised for first eligible person')
+        page.click('text=Why people will be skipped')
+        page.screenshot(path=SHOTS + '/4-review.png', full_page=True)
+        page.click('#sStart')
+        page.wait_for_selector('#cPause')
+        check('Sending' in page.inner_text('main'), 'progress shows Sending')
+        get('/tick')  # 6 simulated minutes
+        page.click('#cRefresh'); page.wait_for_timeout(500)
+        page.click('#cPause'); page.wait_for_selector('#cResume')
+        check('Paused' in page.inner_text('main'), 'paused')
+        page.screenshot(path=SHOTS + '/5-progress-paused.png', full_page=True)
+        page.click('#cResume'); page.wait_for_selector('#cPause')
+        os.environ['TICK'] = '60'
+        for _ in range(5): get('/tick')
+        page.click('#cRefresh'); page.wait_for_selector('text=Finished')
+        st = get('/state')
+        check(len(st['sent']) == 5, 'exactly 5 emails sent: %d' % len(st['sent']))
+        page.click('[data-f="skipped"]'); page.wait_for_timeout(200)
+        txt = page.inner_text('main')
+        for reason in ['Opted out', 'No consent recorded', 'Did not give consent', 'Email address looks invalid', 'No email address', 'Consent is unclear']:
+            check(reason in txt, 'skip reason shown: ' + reason)
+        page.screenshot(path=SHOTS + '/6-progress-done.png', full_page=True)
+
+        page.click('[data-view="whatsapp"]')
+        page.wait_for_selector('[data-wa]')
+        href = page.get_attribute('[data-wa]', 'href')
+        check(href.startswith('https://wa.me/9715') and 'text=Hello%20' in href, 'WhatsApp link: ' + href[:70])
+        rows = page.locator('[data-wa]').count()
+        check(rows == 7, 'WhatsApp-eligible people: %d (5 + Noura phone-only + Hamad bad email)' % rows)
+        page.screenshot(path=SHOTS + '/7-whatsapp.png', full_page=True)
+        with page.expect_popup() as pop:
+            page.click('[data-wa]')
+        pop.value.close()
+        page.wait_for_timeout(600)
+        check(page.locator('td >> text=never').count() == 6, 'opened chat recorded (6 left never): %d' % page.locator('td >> text=never').count())
+
+        page.click('[data-view="templates"]')
+        page.click('#tNew')
+        page.fill('#tName', 'Second email')
+        page.fill('#tSubject', 'Offer for {first_name}')
+        page.fill('#tBody', 'Hi {first_name}, price is {price}')
+        check('Unknown field' in page.inner_text('#tPreview'), 'unknown field warned live')
+        page.click('#tSave'); page.wait_for_timeout(600)
+        check('not known' in page.inner_text('#banner'), 'server rejects unknown field: ' + page.inner_text('#banner')[:60])
+        page.fill('#tBody', 'Hi {first_name}, we have news about {shop_name}.')
+        page.click('#tSave'); page.wait_for_selector('text=Template saved')
+        page.screenshot(path=SHOTS + '/8-templates.png', full_page=True)
+
+        # ---- Owner: Settings page ----
+        get('/as/owner%40gmail.com')
+        o = b.new_page(viewport={'width': 1200, 'height': 900})
+        o.on('pageerror', lambda e: errors.append('owner pageerror: ' + str(e)))
+        o.on('dialog', lambda d: d.accept())
+        o.goto('http://127.0.0.1:8765/'); o.wait_for_selector('#openSettings')
+        o.click('#openSettings'); o.wait_for_selector('#connectNew')
+        check('shop1@gmail.com' in o.inner_text('main') and 'Connected' in o.inner_text('main'), 'settings lists connected account')
+        check(o.input_value('#redir').endswith('/exec'), 'redirect URI shown: ' + o.input_value('#redir'))
+        check('GOCSPX' not in o.content(), 'client secret not in the page')
+        seen = []
+        o.context.route('https://accounts.google.com/**', lambda route: (seen.append(route.request.url), route.fulfill(body='google')))
+        with o.expect_popup() as pop:
+            o.click('#connectNew')
+        popup = pop.value
+        popup.wait_for_timeout(800)
+        url = seen[0] if seen else popup.url
+        check(url.startswith('https://accounts.google.com/o/oauth2/v2/auth'), 'connect opens Google consent: ' + url[:60])
+        import urllib.parse as up
+        state = up.parse_qs(up.urlparse(url).query)['state'][0]
+        popup.close()
+        html = urllib.request.urlopen('http://127.0.0.1:8765/google?state=' + state + '&email=marina%40gmail.com').read().decode()
+        check('Connected: marina@gmail.com' in html, 'callback page confirms connection')
+        o.click('#refreshSet'); o.wait_for_selector('text=marina@gmail.com')
+        o.select_option('[data-shopsender="SHOP1"]', 'marina@gmail.com'); o.wait_for_selector('text=Saved.')
+        o.wait_for_selector('#connectNew')
+        check(o.eval_on_selector('[data-shopsender="SHOP1"]', 'e => e.value') == 'marina@gmail.com', 'shop sender saved')
+        o.click('[data-test="marina@gmail.com"]'); o.wait_for_selector('text=Test email sent')
+        st = get('/state')
+        check(st['sent'][-1]['account'] == 'marina@gmail.com', 'test email sent from marina@gmail.com')
+        o.click('[data-disc="marina@gmail.com"]'); o.wait_for_selector('[data-recon="marina@gmail.com"]')
+        check('Disconnected' in o.inner_text('main'), 'disconnect shows Reconnect')
+        check('was disconnected' in o.inner_text('main'), 'shop shows sender disconnected')
+        o.screenshot(path=SHOTS + '/10-settings.png', full_page=True)
+        o.close()
+        get('/as/dad%40gmail.com')
+
+        # mobile layout
+        m = b.new_page(viewport={'width': 390, 'height': 844})
+        m.on('pageerror', lambda e: errors.append('mobile pageerror: ' + str(e)))
+        m.goto('http://127.0.0.1:8765/'); m.wait_for_selector('.shop-card'); m.click('.shop-card'); m.wait_for_selector('#drop')
+        sw = m.evaluate('document.documentElement.scrollWidth')
+        check(sw <= 390, 'no horizontal scroll on phone: %d' % sw)
+        m.screenshot(path=SHOTS + '/9-mobile.png', full_page=True)
+        b.close()
+finally:
+    srv.kill()
+print('\nERRORS:' if errors else '\nALL UI CHECKS PASSED')
+for e in errors: print(' -', e)

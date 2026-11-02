@@ -1,0 +1,6 @@
+.clasp.json
+.deployment-id
+.setup-shown
+App link.txt
+node_modules/
+tests/screenshots/

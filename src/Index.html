@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">✉</span> Shop Follow-ups</div>
+    <div class="who" id="who"></div>
+  </header>
+
+  <div id="banner" class="banner hidden" role="alert"></div>
+  <main id="app"><div class="loading-page"><div class="spinner"></div><p>Loading…</p></div></main>
+
+  <div id="busy" class="busy hidden"><div class="busy-box"><div class="spinner"></div><p id="busyText">Working…</p></div></div>
+
+  <?!= include('SheetJS'); ?>
+  <?!= include('App'); ?>
+</body>
+</html>
