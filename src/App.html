@@ -174,7 +174,7 @@
     S.shopId = shopId;
     S.view = view || 'contacts';
     S.upload = null; S.importResult = null;
-    S.send = { templateId: '', delay: S.boot.defaultDelay, skipPrevious: true, name: '', review: null };
+    S.send = { templateId: '', subject: undefined, body: undefined, delay: S.boot.defaultDelay, skipPrevious: true, name: '', review: null };
     S.progress = { campaignId: null, detail: null, filter: 'all' };
     S.wa = { templateId: '', search: '' };
     S.tpl = { editing: null };
@@ -539,42 +539,103 @@
     return S.data.templates.filter(function (t) { return t.channel === 'email' && t.active !== 'no'; });
   }
 
+  function sendSample() {
+    var c = S.data.contacts.filter(function (x) { return x.emailCheck.ok; })[0] ||
+      S.data.contacts.filter(function (x) { return x.full_name || x.first_name; })[0] ||
+      { first_name: 'Ahmed', full_name: 'Ahmed Ali', email: 'ahmed@example.com' };
+    return c;
+  }
+
+  function loadTemplateIntoSend(id) {
+    var st = S.send;
+    var t = emailTemplates().filter(function (x) { return x.template_id === id; })[0];
+    st.templateId = id || '';
+    st.subject = t ? t.subject : '';
+    st.body = t ? t.body : 'Hello {first_name},\n\n';
+  }
+
   function viewSend() {
     var tpls = emailTemplates(), st = S.send;
-    if (!st.templateId && tpls.length) st.templateId = tpls[0].template_id;
-    var html = '<div class="card"><h2>Send a follow-up email</h2>' +
-      '<p class="muted">The app sends one email, waits, then sends the next. You can close this page — sending continues on its own.</p>';
-    if (!tpls.length) {
-      html += '<div class="notice warn">This shop has no email template yet. Open <b>Message templates</b> and create one.</div></div>';
-      $('view').innerHTML = html;
-      return;
+    if (st.subject === undefined) loadTemplateIntoSend(tpls.length ? tpls[0].template_id : '');
+    var html = '<div class="card"><h2>1. Write the email</h2>' +
+      '<p class="muted">Write it once. Click <b>Insert the person\'s name</b> where the name should go, and each person gets their own name from the Excel file (Hello Heba, Hello Adnan…).</p>';
+    if (tpls.length) {
+      html += '<label class="field"><span>Start from a saved email (optional)</span><select id="sTpl">' +
+        '<option value="">— Write a new email —</option>' +
+        tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === st.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
+        '</select></label>';
     }
     html += '<div class="grid2"><div>' +
-      '<label class="field"><span>Which message?</span><select id="sTpl">' +
-      tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === st.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
-      '</select></label>' +
+      '<label class="field"><span>Subject</span><input type="text" id="sSubject" maxlength="250" value="' + esc(st.subject) + '" placeholder="Example: Is the shop still interesting for you?"></label>' +
+      '<label class="field"><span>Message</span><textarea id="sBody" style="min-height:240px">' + esc(st.body) + '</textarea></label>' +
+      '<div class="row" style="margin-bottom:6px"><button class="btn primary small" id="sInsertName">+ Insert the person\'s name</button></div>' +
+      '<div class="muted small">More fields:</div><div class="chips">' +
+      ['full_name', 'shop_name', 'sender_name'].map(function (p) { return '<button class="chip" data-sph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
+      '</div><div><div class="muted small" style="margin-bottom:4px">Preview — what <b id="sPrevName"></b> will receive</div><div id="sLive"></div>' +
+      '<div class="muted small" style="margin:12px 0 4px">How it starts for each person</div><div id="sGreets" class="small"></div></div></div></div>';
+
+    html += '<div class="card"><h2>2. Sending options</h2><div class="grid2"><div>' +
       '<label class="field"><span>Wait between emails</span><select id="sDelay">' +
       S.boot.allowedDelays.map(function (m) { return '<option value="' + m + '"' + (m === Number(st.delay) ? ' selected' : '') + '>' + plural(m, 'minute') + (m === S.boot.defaultDelay ? ' (recommended)' : '') + '</option>'; }).join('') +
       '</select></label></div><div>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="sName" placeholder="Example: November follow-up" value="' + esc(st.name) + '"></label>' +
-      '<label class="check"><input type="checkbox" id="sSkip"' + (st.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this same message from this shop</span></label>' +
-      '</div></div><button class="btn" id="sReview">Show me who will get it</button></div>';
+      '<label class="check"><input type="checkbox" id="sSkip"' + (st.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact email from this shop</span></label>' +
+      '</div></div><button class="btn primary" id="sReview">3. Check who will get it →</button></div>';
     html += '<div id="reviewBox"></div>';
     $('view').innerHTML = html;
-    $('sTpl').addEventListener('change', function () { st.templateId = this.value; st.review = null; loadReview(); });
-    $('sDelay').addEventListener('change', function () { st.delay = Number(this.value); st.review = null; loadReview(); });
-    $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; loadReview(); });
+
+    function live() {
+      st.subject = $('sSubject').value; st.body = $('sBody').value; st.review = null;
+      if ($('reviewBox')) $('reviewBox').innerHTML = '';
+      var c = sendSample(), f = fieldsFor(c, S.data.shop);
+      $('sPrevName').textContent = c.full_name || c.first_name || c.email || 'a contact';
+      var unknown = (st.subject + ' ' + st.body).match(/\{\s*[a-zA-Z_]+\s*\}/g) || [];
+      unknown = unknown.filter(function (m) { return PLACEHOLDERS.indexOf(m.replace(/[{}\s]/g, '').toLowerCase()) === -1; });
+      $('sLive').innerHTML = (unknown.length ? '<div class="notice bad">Unknown field: ' + esc(unknown.join(', ')) + '. Use the buttons to insert fields.</div>' : '') +
+        '<div class="email-preview"><div class="meta"><div><b>From:</b> ' + esc(S.data.shop.sender_name || S.data.shop.shop_name) + ' &lt;' + esc(S.data.shop.sender_email || 'no Gmail chosen') + '&gt;</div>' +
+        '<div><b>Subject:</b> ' + esc(renderText(st.subject, f)) + '</div></div><div class="body">' + esc(renderText(st.body, f)) + '</div></div>';
+      var people = S.data.contacts.filter(function (x) { return x.emailCheck.ok; }).slice(0, 4);
+      if (!people.length) people = [c];
+      $('sGreets').innerHTML = people.map(function (x) {
+        var first = renderText(st.body, fieldsFor(x, S.data.shop)).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '';
+        return '<div style="padding:4px 0;border-bottom:1px solid var(--line)"><b>' + esc(x.full_name || x.first_name || x.email) + ':</b> ' + esc(first) + '</div>';
+      }).join('');
+    }
+    function insertAt(text) {
+      var ta = $('sBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd;
+      ta.value = ta.value.slice(0, s0) + text + ta.value.slice(e0);
+      ta.focus(); ta.setSelectionRange(s0 + text.length, s0 + text.length);
+      live();
+    }
+    if ($('sTpl')) $('sTpl').addEventListener('change', function () {
+      if ((st.subject || st.body) && !confirm('Replace what you wrote with this saved email?')) { this.value = st.templateId; return; }
+      loadTemplateIntoSend(this.value); viewSend();
+    });
+    $('sSubject').addEventListener('input', live);
+    $('sBody').addEventListener('input', live);
+    $('sInsertName').addEventListener('click', function () { insertAt('{first_name}'); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-sph]'), function (b) {
+      b.addEventListener('click', function () { insertAt('{' + b.getAttribute('data-sph') + '}'); });
+    });
+    $('sDelay').addEventListener('change', function () { st.delay = Number(this.value); st.review = null; $('reviewBox').innerHTML = ''; });
+    $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; });
     $('sName').addEventListener('input', function () { st.name = this.value; });
     $('sReview').addEventListener('click', loadReview);
-    if (st.review) renderReview(); else loadReview();
+    live();
+    if (st.review) renderReview();
+  }
+
+  function sendParams() {
+    var st = S.send;
+    return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: st.delay, skipPrevious: st.skipPrevious, name: st.name };
   }
 
   function loadReview() {
     var st = S.send;
     var box = $('reviewBox');
     if (box) box.innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Checking contacts…</p></div>';
-    call('getCampaignPreview', { shopId: S.shopId, templateId: st.templateId, delayMinutes: st.delay, skipPrevious: st.skipPrevious })
-      .then(function (r) { st.review = r; renderReview(); }, function (e) {
+    call('getCampaignPreview', sendParams())
+      .then(function (r) { st.review = r; renderReview(); if ($('reviewBox')) $('reviewBox').scrollIntoView({ behavior: 'smooth' }); }, function (e) {
         if ($('reviewBox')) $('reviewBox').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
       });
   }
@@ -583,7 +644,7 @@
     var r = S.send.review, box = $('reviewBox');
     if (!box || !r) return;
     var p = r.preview;
-    var html = '<div class="card"><h2>Review before sending</h2>';
+    var html = '<div class="card"><h2>3. Review before sending</h2>';
     html += '<div class="stats">' +
       '<div class="stat"><div class="n">' + r.willSend + '</div><div class="l">will get the email</div></div>' +
       '<div class="stat"><div class="n">' + r.willSkip + '</div><div class="l">will be skipped</div></div>' +
@@ -601,6 +662,11 @@
       '<div><b>To:</b> ' + esc(p.to) + '</div>' +
       (p.replyTo ? '<div><b>Replies go to:</b> ' + esc(p.replyTo) + '</div>' : '') +
       '<div><b>Subject:</b> ' + esc(p.subject) + '</div></div><div class="body">' + esc(p.body) + '</div></div>';
+    if (p.samples && p.samples.length > 1) {
+      html += '<p class="small muted" style="margin-top:10px">Each person gets their own name:</p><ul class="small">' + p.samples.map(function (x) {
+        return '<li><b>' + esc(x.name) + '</b> (' + esc(x.email) + '): ' + esc(x.firstLine) + '</li>';
+      }).join('') + '</ul>';
+    }
     if (!r.sender.ok) {
       html += '<div class="notice bad" style="margin-top:14px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
     }
@@ -616,11 +682,9 @@
   function startSending() {
     var st = S.send, r = st.review;
     if (!confirm('Start sending this email to ' + plural(r.willSend, 'person') + '?\n\nOne email every ' + plural(r.delayMinutes, 'minute') + '. You can pause at any time in "Progress".')) return;
-    withBusy('Starting…', call('startCampaign', {
-      shopId: S.shopId, templateId: st.templateId, delayMinutes: st.delay, skipPrevious: st.skipPrevious, name: st.name
-    })).then(function (camp) {
+    withBusy('Starting…', call('startCampaign', sendParams())).then(function (camp) {
       return reloadShop().then(function () {
-        S.send.review = null; S.send.name = '';
+        S.send.review = null; S.send.name = ''; S.send.templateId = camp.template_id;
         S.view = 'progress';
         S.progress = { campaignId: camp.campaign_id, detail: null, filter: 'all' };
         renderShop();

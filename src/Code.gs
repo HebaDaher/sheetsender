@@ -690,13 +690,33 @@ function cleanDelay_(v) {
 function planCampaign_(ss, params) {
   const shop = findShop_(ss, params.shopId);
   if (!isActive_(shop.active)) throw new Error('This shop is marked inactive in the Shops tab.');
-  const template = readTable_(ss, TABS.TEMPLATES).rows.filter(function (t) {
-    return t.template_id === params.templateId;
-  })[0];
-  if (!template) throw new Error('Choose an email template first.');
-  if (template.shop_id !== shop.shop_id) throw new Error('That template belongs to another shop.');
-  if (norm_(template.channel) !== 'email') throw new Error('That is a WhatsApp template. Choose an email template.');
-  if (isNo_(template.active)) throw new Error('That template is switched off (active = no).');
+  let template;
+  if (params.subject !== undefined || params.body !== undefined) {
+    // Message written on the Send page. The same text sent again counts as the same message (for "skip people who
+    // already received it"); new text is saved as a new message when sending starts.
+    const subject = String(params.subject || '').trim();
+    const body = String(params.body || '').replace(/\s+$/, '');
+    if (!subject) throw new Error('Write a subject for the email.');
+    if (!body.trim()) throw new Error('Write the message.');
+    if (subject.length > 250) throw new Error('The subject is too long (max 250 characters).');
+    if (body.length > 20000) throw new Error('The message is too long.');
+    const unknownW = unknownPlaceholders_(subject + ' ' + body);
+    if (unknownW.length) {
+      throw new Error('These fields are not known: ' + unknownW.join(', ') + '. You can use: {' + PLACEHOLDERS.join('}, {') + '}.');
+    }
+    template = readTable_(ss, TABS.TEMPLATES).rows.filter(function (t) {
+      return t.shop_id === shop.shop_id && norm_(t.channel) === 'email' && t.subject === subject && t.body === body;
+    })[0];
+    if (!template) template = { template_id: '', template_name: '', subject: subject, body: body, _new: true };
+  } else {
+    template = readTable_(ss, TABS.TEMPLATES).rows.filter(function (t) {
+      return t.template_id === params.templateId;
+    })[0];
+    if (!template) throw new Error('Choose an email template first.');
+    if (template.shop_id !== shop.shop_id) throw new Error('That template belongs to another shop.');
+    if (norm_(template.channel) !== 'email') throw new Error('That is a WhatsApp template. Choose an email template.');
+    if (isNo_(template.active)) throw new Error('That template is switched off (active = no).');
+  }
   if (!template.subject) throw new Error('The template has no subject.');
   if (!template.body) throw new Error('The template has no message text.');
   const unknown = unknownPlaceholders_(template.subject + ' ' + template.body);
@@ -707,7 +727,7 @@ function planCampaign_(ss, params) {
   const previous = {};
   if (skipPrevious) {
     readTable_(ss, TABS.LOG).rows.forEach(function (l) {
-      if (l.shop_id === shop.shop_id && l.template_id === template.template_id && l.status === 'sent' && l.channel === 'email') {
+      if (template.template_id && l.shop_id === shop.shop_id && l.template_id === template.template_id && l.status === 'sent' && l.channel === 'email') {
         previous[norm_(l.email)] = l.sent_at;
       }
     });
@@ -743,7 +763,12 @@ function planCampaign_(ss, params) {
         fromName: shop.sender_name || shop.shop_name,
         replyTo: shop.reply_to || '',
         subject: renderText_(template.subject, fields),
-        body: renderText_(template.body, fields)
+        body: renderText_(template.body, fields),
+        samples: plan.filter(function (p) { return p.status === 'pending'; }).slice(0, 3).map(function (p) {
+          const f = templateFields_(p.contact, shop);
+          return { name: p.contact.full_name || p.contact.first_name || p.contact.email, email: p.contact.email,
+            firstLine: renderText_(template.body, f).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '' };
+        })
       },
       sender: senderCheck_(shop)
     }
@@ -776,6 +801,15 @@ function startCampaign(params) {
     }
     const now = nowIso_();
     const delay = cleanDelay_(params.delayMinutes);
+    if (p.template._new) {
+      const t = {
+        template_id: newId_('T'), shop_id: p.shop.shop_id,
+        template_name: (String(params.name || '').trim() || p.template.subject).slice(0, 80),
+        channel: 'email', subject: p.template.subject, body: p.template.body, active: 'yes', updated_at: now
+      };
+      appendRows_(readTable_(ctx.ss, TABS.TEMPLATES), [t]);
+      p.template = t;
+    }
     const campaign = {
       campaign_id: newId_('K'), shop_id: p.shop.shop_id,
       campaign_name: String(params.name || '').trim() ||

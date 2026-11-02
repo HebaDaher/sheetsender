@@ -282,6 +282,41 @@ t('another shop sends from its own account with Reply-To and UTF-8 subject', () 
   assert.strictEqual(m.replyTo, 'dad@gmail.com');
 });
 
+console.log('Email written on the Send page');
+t('a written email: each person gets their own name; saved as a new message when sending starts', () => {
+  E.as('dad@gmail.com');
+  C.importContacts('SHOP2', [{ full_name: 'Heba Daher', email: 'heba@x.com', consent_status: 'yes' }, { full_name: 'Adnan Daher', email: 'adnan@x.com', consent_status: 'yes' }], {});
+  const params = { shopId: 'SHOP2', subject: 'News for {first_name}', body: 'Hello {first_name},\n\nThe shop is still available.', delayMinutes: 1 };
+  const p = C.getCampaignPreview(params);
+  assert.strictEqual(p.willSend, 3); // layla + heba + adnan
+  assert(p.preview.samples.some(x => x.firstLine === 'Hello Heba,'));
+  assert(p.preview.samples.some(x => x.firstLine === 'Hello Adnan,'));
+  const before = E.tab('Templates').length;
+  const k = C.startCampaign(params);
+  assert.strictEqual(E.tab('Templates').length, before + 1, 'saved as a new message');
+  const t = E.tab('Templates').find(x => x.template_id === k.template_id);
+  assert.strictEqual(t.subject, 'News for {first_name}');
+  E.runTrigger(4);
+  const heba = E.sent.find(m => m.to === 'heba@x.com'), adnan = E.sent.find(m => m.to === 'adnan@x.com');
+  assert.strictEqual(heba.subject, 'News for Heba');
+  assert(heba.text.startsWith('Hello Heba,'));
+  assert(adnan.text.startsWith('Hello Adnan,'));
+  assert.strictEqual(heba.account, 'shop2@gmail.com');
+});
+t('the exact same written email again skips people who already got it; changed text does not', () => {
+  const same = { shopId: 'SHOP2', subject: 'News for {first_name}', body: 'Hello {first_name},\n\nThe shop is still available.' };
+  throwsMsg(() => C.startCampaign(same), /Already received this message/);
+  const n = E.tab('Templates').length;
+  const changed = C.getCampaignPreview({ shopId: 'SHOP2', subject: 'Update for {first_name}', body: 'Hi {first_name}, new price.' });
+  assert.strictEqual(changed.willSend, 3);
+  assert.strictEqual(E.tab('Templates').length, n, 'preview saves nothing');
+});
+t('a written email is checked before sending', () => {
+  throwsMsg(() => C.getCampaignPreview({ shopId: 'SHOP2', subject: '', body: 'x' }), /Write a subject/);
+  throwsMsg(() => C.getCampaignPreview({ shopId: 'SHOP2', subject: 's', body: '  ' }), /Write the message/);
+  throwsMsg(() => C.getCampaignPreview({ shopId: 'SHOP2', subject: 's', body: 'Hi {name}' }), /not known: \{name\}/);
+});
+
 console.log('Expiry, disconnect, reconnect, errors');
 let c2;
 t('permission revoked/expired at Google → send pauses with reconnect steps; nobody marked failed', () => {
