@@ -133,9 +133,10 @@
     } else if (b.workspace) {
       html += '<span class="ws-name">' + esc(b.workspace.name) + '</span> · ';
     }
-    html += '<span class="small">' + esc(b.user) + '</span>';
+    html += '<span class="small">' + esc(b.user) + '</span> <button class="link small" id="notYou">Not you?</button>';
     if (b.isOwner) html += ' <button class="btn small" id="openSettings" style="margin-left:8px">⚙ Settings</button>';
     $('who').innerHTML = html;
+    $('notYou').addEventListener('click', showAccountHelp);
     if ($('openSettings')) $('openSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
     if ($('wsSel')) $('wsSel').addEventListener('change', function () {
       var v = this.value;
@@ -145,11 +146,33 @@
     });
   }
 
+  /**
+   * Google runs this app as the FIRST Google account signed in to the browser, whatever account is picked later.
+   * So two people on one browser always land in the same account. Each person needs their own browser window
+   * signed in only to their account.
+   */
+  function showAccountHelp() {
+    var old = $('acctHelp'); if (old) { old.remove(); return; }
+    var box = document.createElement('div');
+    box.id = 'acctHelp'; box.className = 'notice info';
+    box.innerHTML = '<b>You are using the app as ' + esc(S.boot.user) + '.</b> Google always opens this app with the <b>first</b> Google account signed in to this browser, ' +
+      'even if you switch accounts. To use it as a different person:<ol style="margin:8px 0 0;padding-left:20px;line-height:1.6">' +
+      '<li>Copy the app link from the address bar.</li>' +
+      '<li>Open a private window: in Chrome press <b>⌘ + Shift + N</b> (Windows: Ctrl + Shift + N); in Safari <b>⌘ + Shift + N</b>.</li>' +
+      '<li>Paste the link, press Enter, and sign in with <b>only</b> the other Google account.</li></ol>' +
+      '<p class="small" style="margin:8px 0 0">Each person who uses the app every day should use their own computer, or their own Chrome profile (Chrome → profile picture at the top right → Add), so they always open their own workspace.</p>' +
+      '<button class="link small" id="acctHelpClose">Close</button>';
+    $('app').insertBefore(box, $('app').firstChild);
+    $('acctHelpClose').addEventListener('click', function () { box.remove(); });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   /** First visit (or "Create my own workspace"): one short form. */
   function renderWelcome(extra) {
     stopAutoRefresh();
     var b = S.boot;
     var html = '<div class="card" style="max-width:640px;margin:0 auto"><h1 style="margin-top:0">Welcome' + (extra ? '' : ' to ' + esc(b.appName || 'Shop Follow-ups')) + '</h1>' +
+      '<p>Signed in as <b>' + esc(b.user) + '</b>. Not you? <button class="link" id="wNotYou">How to use another account</button></p>' +
       '<p>Create your own private workspace. It is a Google Sheet in <b>your</b> Google Drive that keeps your shops, your customers and your sending history. Nobody else can see it unless you add them.</p>' +
       '<label class="field"><span>Workspace name</span><input type="text" id="wName" maxlength="60" value="My shops"></label>' +
       '<label class="field"><span>Your first shop’s name</span><input type="text" id="wShop" maxlength="80" placeholder="e.g. Al Barsha Shop"><span class="muted small" style="font-weight:400">You can add more shops later in ⚙ Settings.</span></label>' +
@@ -165,6 +188,7 @@
         .then(function (b2) { useBoot(b2); showBanner('success', 'Your workspace is ready. Next: open ⚙ Settings and connect the Gmail account that sends for this shop.', true); });
     });
     if ($('wCancel')) $('wCancel').addEventListener('click', function () { useBoot(S.boot); });
+    $('wNotYou').addEventListener('click', showAccountHelp);
   }
 
   function engineNotice() {
