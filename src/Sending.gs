@@ -1,8 +1,9 @@
 /**
  * The sending engine.
  *
- * A time-based trigger (installed by setup, owned by the OWNER) calls processQueue() every minute.
- * It does NOT sleep. Each run it sends at most ONE email per running campaign whose next_send_at is due,
+ * Each workspace owner has their own time-based trigger that calls processQueue() every minute, running as them.
+ * It works only on the workspace that person owns (it can read only that owner's Gmail/WhatsApp permissions).
+ * It does NOT sleep. Each run it sends at most ONE message per running campaign whose next_send_at is due,
  * then sets next_send_at = now + delay_minutes (+ a small random extra, so the timing does not look robotic).
  * When nothing is due it exits in milliseconds.
  *
@@ -13,20 +14,26 @@
  */
 
 function processQueue() {
-  const props = PropertiesService.getScriptProperties();
-  const owner = String(props.getProperty(PROP.OWNER_EMAIL) || '').toLowerCase();
-  const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
-  if (!owner || me !== owner) return; // only the owner's trigger may send
-  props.setProperty(PROP.LAST_ENGINE_RUN, nowIso_());
+  migrate_();
+  const me = norm_(Session.getEffectiveUser().getEmail());
+  const ws = getWs_(userRec_(me).own);
+  if (!ws || ws.owner !== me) return; // only a workspace owner's own trigger sends, and only for that workspace
+  WS = ws;
+  wsSet_('LAST_RUN', nowIso_());
 
-  const nextDue = Number(props.getProperty(PROP.NEXT_DUE_AT) || 0);
+  let ss = null;
+  const open = function () { if (!ss) ss = SpreadsheetApp.openById(ws.sheet_id); return ss; };
+  if (sp_().getKeys().some(function (k) { return k.indexOf(relayPrefix_()) === 0; })) {
+    try { importRelayResults_(open()); } catch (e) { /* next minute */ }
+  }
+
+  const nextDue = Number(wsGet_('NEXT_DUE') || 0);
   if (!nextDue || Date.now() < nextDue) return; // nothing to do yet
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return; // someone is importing/starting; try next minute
   try {
-    const ss = SpreadsheetApp.openById(props.getProperty(PROP.SHEET_ID));
-    runDueCampaigns_(ss, Date.now());
+    runDueCampaigns_(open(), Date.now());
   } finally {
     lock.releaseLock();
   }
@@ -61,6 +68,7 @@ function runDueCampaigns_(ss, nowMs) {
 
 /** Sends the next email of one campaign (skipping anyone no longer eligible). */
 function stepCampaign_(ctx, campaign, nowMs) {
+  if (campaign.channel === 'whatsapp_api') return stepWaApi_(ctx, campaign, nowMs);
   const shop = ctx.shops[campaign.shop_id];
   const template = ctx.templates[campaign.template_id];
   if (!shop) return pause_(campaign, 'The shop was removed from the Shops tab.');
@@ -135,7 +143,7 @@ function stepCampaign_(ctx, campaign, nowMs) {
         item.attempts = String(Number(item.attempts) - 1); // not this contact's fault
         updateRow_(log, item);
         const check = senderCheck_(shop);
-        return pause_(campaign, check.ok ? e.message + ' Owner: open Settings > Gmail accounts and click Reconnect.' : check.reason);
+        return pause_(campaign, check.ok ? e.message + ' The workspace owner must open Settings > Gmail accounts and click Reconnect.' : check.reason);
       } else if (kind === 'QUOTA') {
         item.attempts = String(Number(item.attempts) - 1);
         updateRow_(log, item);
@@ -181,9 +189,8 @@ function indexBy_(rows, key) {
 }
 
 function setNextDue_(ms) {
-  const props = PropertiesService.getScriptProperties();
-  const current = Number(props.getProperty(PROP.NEXT_DUE_AT) || 0);
-  if (!current || ms < current) props.setProperty(PROP.NEXT_DUE_AT, String(ms));
+  const current = Number(wsGet_('NEXT_DUE') || 0);
+  if (!current || ms < current) wsSet_('NEXT_DUE', String(ms));
 }
 
 /** NEXT_DUE_AT = earliest next_send_at of running campaigns (lets the trigger exit instantly when idle). */
@@ -194,9 +201,8 @@ function recomputeNextDue_(campaignRows) {
     const t = c.next_send_at ? new Date(c.next_send_at).getTime() : Date.now();
     if (!min || t < min) min = t;
   });
-  const props = PropertiesService.getScriptProperties();
-  if (min) props.setProperty(PROP.NEXT_DUE_AT, String(min));
-  else props.deleteProperty(PROP.NEXT_DUE_AT);
+  if (min) wsSet_('NEXT_DUE', String(min));
+  else wsDel_('NEXT_DUE');
 }
 
 /* ------------------------------------------------------------------ */
@@ -206,8 +212,7 @@ function recomputeNextDue_(campaignRows) {
 const UAE_OFFSET_MS = 4 * 3600 * 1000; // UAE time is UTC+4 all year (no daylight saving)
 
 function sendingRules_() {
-  let r = {};
-  try { r = JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP.SEND_RULES) || '{}'); } catch (e) { r = {}; }
+  const r = wsJson_('SEND_RULES', {}) || {};
   const cap = Number(r.dailyCap), start = Number(r.startHour), end = Number(r.endHour);
   return {
     dailyCap: cap >= 5 && cap <= 400 ? Math.round(cap) : DEFAULT_DAILY_CAP,

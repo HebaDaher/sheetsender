@@ -10,21 +10,34 @@ errors = []
 def check(c, m): print(('  ok   ' if c else '  FAIL ') + m, flush=True); (None if c else errors.append(m))
 home = Path('/tmp/sf-e2e-home'); shutil.rmtree(home, ignore_errors=True); home.mkdir()
 procs = []
-try:
-    procs.append(subprocess.Popen(['node', os.path.join(TEST, 'server.js')], env=dict(os.environ, REAL_CLOCK='1'), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    procs.append(subprocess.Popen([sys.executable, MOCK, '8796'], cwd=os.path.dirname(MOCK)))
-    time.sleep(1.5)
+# E2E_PAIRED=1: a NEW person's own workspace, a Mac paired with "Set up a Mac" (results travel through the relay)
+PAIRED = bool(os.environ.get('E2E_PAIRED'))
+def start_helper(token):
     helper_log = open('/tmp/sf-e2e-helper.log', 'w')
     helper = subprocess.Popen([sys.executable, os.path.join(WA, 'whatsapp_helper.py')], stdout=helper_log, stderr=subprocess.STDOUT,
-        env=dict(os.environ, HOME=str(home), SF_BRIDGE_URL='http://127.0.0.1:8765/bridge', SF_BRIDGE_TOKEN='test-token',
+        env=dict(os.environ, HOME=str(home), SF_BRIDGE_URL='http://127.0.0.1:8765/bridge', SF_BRIDGE_TOKEN=token,
                  SF_WA_URL='http://127.0.0.1:8796', SF_TIME_SCALE=os.environ.get('E2E_SCALE', '0.002'), SF_HEADLESS='1', SF_POLL_S='1', SF_TICK_S='0.3'))
     procs.append(helper)
+try:
+    procs.append(subprocess.Popen(['node', os.path.join(TEST, 'server.js')], env=dict(os.environ, REAL_CLOCK='1', **({'WEBUSER': 'sara@gmail.com'} if PAIRED else {})),
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    procs.append(subprocess.Popen([sys.executable, MOCK, '8796'], cwd=os.path.dirname(MOCK)))
+    time.sleep(1.5)
+    if not PAIRED: start_helper('test-token')
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_page(viewport={'width': 1200, 'height': 900}); pg.on('dialog', lambda d: d.accept())
-        pg.goto('http://127.0.0.1:8765/'); pg.wait_for_selector('.shop-card'); pg.click('.shop-card'); pg.wait_for_selector('#drop')
+        pg.goto('http://127.0.0.1:8765/')
+        if PAIRED:
+            pg.wait_for_selector('#wCreate'); pg.fill('#wShop', 'Sara Bakery'); pg.click('#wCreate')
+        pg.wait_for_selector('.shop-card'); pg.click('.shop-card'); pg.wait_for_selector('#drop')
         pg.set_input_files('#file', SAMPLE); pg.wait_for_selector('#doImport'); pg.click('#doImport'); pg.wait_for_selector('text=Last import')
         pg.click('[data-view="whatsapp"]'); pg.wait_for_selector('#waHelper')
+        if PAIRED:
+            if pg.is_visible('[data-wamode="mac"]'): pg.click('[data-wamode="mac"]')
+            pg.wait_for_selector('text=No Mac is set up'); pg.click('#waLink'); pg.wait_for_selector('#macCmd')
+            start_helper(pg.input_value('#macCmd').rsplit("'", 2)[-2])
+            check(True, 'paired a Mac with the one-line command\'s secret')
         pg.wait_for_selector('text=The WhatsApp Sender is running', timeout=15000)
         check(True, 'page sees the helper running on the Mac')
         check(pg.is_visible('#waOpen'), '"Open WhatsApp on the Mac" button shown')
@@ -58,8 +71,14 @@ try:
     check(any(m['text'] == 'Hello Fatima, the shop is still available.' for m in sent), 'personal text arrived')
     pairs = [(m['phone'], m['text']) for m in sent]
     check(len(pairs) == len(set(pairs)), 'nobody got the same message twice')
-    state = json.loads(urllib.request.urlopen('http://127.0.0.1:8765/state').read())
-    wa_log = [l for l in state['log'] if l['channel'] == 'whatsapp' and l['status'] == 'sent']
+    if PAIRED:
+        urllib.request.urlopen('http://127.0.0.1:8765/tick').read()  # Sara's trigger saves the relayed results
+        log = json.loads(urllib.request.urlopen('http://127.0.0.1:8765/tab?owner=sara%40gmail.com&name=Send%20Log').read())
+        owner_log = json.loads(urllib.request.urlopen('http://127.0.0.1:8765/state').read())['log']
+        check(not any(l['channel'] == 'whatsapp' for l in owner_log), 'nothing written into the owner\'s Sheet')
+    else:
+        log = json.loads(urllib.request.urlopen('http://127.0.0.1:8765/state').read())['log']
+    wa_log = [l for l in log if l['channel'] == 'whatsapp' and l['status'] == 'sent']
     print('LOG:', [(l['phone'], l['campaign_id'][-6:]) for l in wa_log])
     check(len(wa_log) == len(sent), 'every sent message saved in the Sheet automatically: %d of %d' % (len(wa_log), len(sent)))
 finally:

@@ -210,24 +210,42 @@ def send_one(page, phone, text):
 
     time.sleep(random.uniform(1, 3) * TIME_SCALE)  # a short human-like pause
     # Press Enter in the box; if WhatsApp did not take it, click the Send button. Sent = the box is empty again.
+    # If WhatsApp reloads right after a press, the box fills up again from the link even though the message may
+    # already be sent: then it is NEVER pressed again (no double messages); the chat is checked instead.
     for _ in range(3):
-        box = _safe(lambda: page.query_selector(SEL_COMPOSE))
-        if box is not None:
-            _safe(lambda: box.click())
-            _safe(lambda: page.keyboard.press("Enter"))
+        for action in ("enter", "button"):
+            target = _safe(lambda: page.query_selector(SEL_COMPOSE if action == "enter" else SEL_SEND_BUTTON))
+            if target is None:
+                continue
+            _safe(lambda: page.evaluate("window.__sfPressed = true"))
+            if action == "enter":
+                _safe(lambda: target.click())
+                _safe(lambda: page.keyboard.press("Enter"))
+            else:
+                _safe(lambda: target.click())
             if _wait_box_empty(page, 8):
                 time.sleep(2 * TIME_SCALE)  # let WhatsApp hand the message to the phone
                 return "sent", ""
-        btn = _safe(lambda: page.query_selector(SEL_SEND_BUTTON))
-        if btn is not None:
-            _safe(lambda: btn.click())
-            if _wait_box_empty(page, 8):
-                time.sleep(2 * TIME_SCALE)
-                return "sent", ""
+            if not _safe(lambda: page.evaluate("window.__sfPressed === true"), False):
+                _wait_box_has_text(page, 30)
+                if _in_chat(page, text):
+                    return "sent", ""
+                return "failed", ("WhatsApp reloaded just as the message was being sent. To avoid sending it twice it was not "
+                                  "sent again — check this chat on the phone")
         if _box_text(page) is None:  # the chat disappeared (WhatsApp reloaded): wait for it to come back
             _wait_box_has_text(page, 30)
     shot = _problem_screenshot(page, phone)
     return "failed", "The message stayed in the box (not sent)" + (f" — picture saved: {shot.name}" if shot else "")
+
+
+def _in_chat(page, text):
+    """Is this message already in the open chat as a sent message?"""
+    want = " ".join(str(text).split())[:60]
+    for el in _safe(lambda: page.query_selector_all("div.message-out"), []) or []:
+        got = " ".join((_safe(lambda: el.inner_text(), "") or "").split())
+        if want and want in got:
+            return True
+    return False
 
 
 def _wait_box_has_text(page, seconds):

@@ -13,6 +13,12 @@ function throwsMsg(fn, re) {
   assert(re.test(err.message), 'error was: ' + err.message);
 }
 const arr = a => Array.from(a);
+/** Workspace id of the person who owns it, and that workspace's settings. */
+function wsOf(E, email) {
+  const k = Object.keys(E.scriptProps).find(k => k.startsWith('W_') && JSON.parse(E.scriptProps[k]).owner === email);
+  return k ? k.slice(2) : '';
+}
+function accountsOf(E, email) { return JSON.parse(E.scriptProps['ACCOUNTS@' + wsOf(E, email || 'owner@gmail.com')] || '{}'); }
 
 const E = makeEnv(SRC);
 const C = E.ctx;
@@ -61,9 +67,15 @@ t('owner runs setup: creates the database Sheet, tabs, example, one trigger', ()
   assert.strictEqual(E.tab('Shops')[0].sender_email, '');
 });
 t('nobody else can re-run setup', () => { E.as('dad@gmail.com'); throwsMsg(() => C.setup(), /already done by owner@gmail.com/); });
-t('stranger and view-only people are refused', () => {
-  E.as('stranger@gmail.com'); throwsMsg(() => C.getBootstrap(), /does not have access/);
-  E.as('viewer@gmail.com'); throwsMsg(() => C.getBootstrap(), /not an Editor/);
+t('a stranger or a view-only person sees nobody else\'s data: they are offered their own workspace', () => {
+  ['stranger@gmail.com', 'viewer@gmail.com'].forEach(who => {
+    E.as(who);
+    const b = C.getBootstrap();
+    assert.strictEqual(b.needsWorkspace, true);
+    assert(!b.shops && !b.sheetUrl, 'no data of anyone else');
+    throwsMsg(() => C.getShopData('SHOP1'), /do not have a workspace yet/);
+    throwsMsg(() => C.importContacts('SHOP1', [], {}), /do not have a workspace yet/);
+  });
 });
 t('dad can open the app but not Settings or any Gmail action', () => {
   E.as('dad@gmail.com');
@@ -71,12 +83,12 @@ t('dad can open the app but not Settings or any Gmail action', () => {
   assert.strictEqual(b.isOwner, false);
   assert.strictEqual(b.shops[0].senderOk, false);
   assert(/No Gmail account is chosen/.test(b.shops[0].senderProblem));
-  ['getSettings', 'restartEngine'].forEach(fn => throwsMsg(() => C[fn](), /Only the app owner/));
-  throwsMsg(() => C.saveOAuthClient(G.client.id, G.client.secret), /Only the app owner/);
-  throwsMsg(() => C.startGmailConnect(''), /Only the app owner/);
-  throwsMsg(() => C.assignShopSender('SHOP1', 'x@gmail.com'), /Only the app owner/);
-  throwsMsg(() => C.testGmailAccount('x@gmail.com'), /Only the app owner/);
-  throwsMsg(() => C.disconnectGmailAccount('x@gmail.com'), /Only the app owner/);
+  ['getSettings', 'restartEngine'].forEach(fn => throwsMsg(() => C[fn](), /Only the owner of this workspace/));
+  throwsMsg(() => C.saveOAuthClient(G.client.id, G.client.secret), /Only the owner of this workspace/);
+  throwsMsg(() => C.startGmailConnect(''), /Only the owner of this workspace/);
+  throwsMsg(() => C.assignShopSender('SHOP1', 'x@gmail.com'), /Only the owner of this workspace/);
+  throwsMsg(() => C.testGmailAccount('x@gmail.com'), /Only the owner of this workspace/);
+  throwsMsg(() => C.disconnectGmailAccount('x@gmail.com'), /Only the owner of this workspace/);
 });
 t('owner home screen says what setup is left', () => {
   E.as('owner@gmail.com');
@@ -84,20 +96,28 @@ t('owner home screen says what setup is left', () => {
 });
 
 console.log('Google sign-in client');
-t('client ID is validated; secret is kept only in the owner\'s private store', () => {
+t('client ID is validated; secret is kept server-side only (never in a page or a Sheet)', () => {
   E.as('owner@gmail.com');
   throwsMsg(() => C.saveOAuthClient('nonsense', 'x'), /Client ID/);
   throwsMsg(() => C.saveOAuthClient(G.client.id, ''), /Client secret/);
   C.saveOAuthClient(G.client.id, G.client.secret);
-  assert.strictEqual(E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET, G.client.secret);
-  assert(!JSON.stringify(E.scriptProps).includes(G.client.secret), 'secret not in script properties');
+  assert.strictEqual(E.scriptProps.OAUTH_CLIENT_SECRET, G.client.secret);
+  assert.strictEqual(Object.keys(E.scriptProps).filter(k => E.scriptProps[k].includes(G.client.secret)).join(), 'OAUTH_CLIENT_SECRET');
   const st = C.getSettings();
   assert(!JSON.stringify(st).includes(G.client.secret), 'secret never returned to the page');
   assert.strictEqual(st.clientSecretSaved, true);
   assert.strictEqual(st.redirectUri, G.redirect);
   assert.strictEqual(st.redirectUri, 'https://hebadaher.github.io/sheetsender/callback.html');
   C.saveOAuthClient(G.client.id, ''); // blank keeps the saved secret
-  assert.strictEqual(E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET, G.client.secret);
+  assert.strictEqual(E.scriptProps.OAUTH_CLIENT_SECRET, G.client.secret);
+});
+t('a secret saved by the older version (admin\'s private store) moves to the server store by itself', () => {
+  E.as('owner@gmail.com');
+  delete E.scriptProps.OAUTH_CLIENT_SECRET;
+  E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET = G.client.secret;
+  assert.strictEqual(C.getSettings().clientSecretSaved, true);
+  assert.strictEqual(E.scriptProps.OAUTH_CLIENT_SECRET, G.client.secret);
+  assert.strictEqual(E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET, undefined);
 });
 
 console.log('Connecting Gmail accounts (OAuth)');
@@ -120,7 +140,7 @@ t('connect shop1@gmail.com: token stored privately, status public, nothing secre
   const tok = JSON.parse(E.userProps['owner@gmail.com'].GMAIL_TOKEN_shop1_gmail_com || E.userProps['owner@gmail.com']['GMAIL_TOKEN_shop1@gmail.com']);
   assert(tok.refresh_token.startsWith('rt_'));
   assert(!JSON.stringify(E.scriptProps).includes(tok.refresh_token), 'no token in script properties');
-  assert.strictEqual(JSON.parse(E.scriptProps.GMAIL_ACCOUNTS)['shop1@gmail.com'].status, 'connected');
+  assert.strictEqual(accountsOf(E)['shop1@gmail.com'].status, 'connected');
   assert(!JSON.stringify(C.getSettings()).includes('rt_'), 'no token sent to the page');
 });
 t('a used or unknown state is refused (no replay)', () => {
@@ -143,19 +163,19 @@ t('if "Send email" was not ticked, nothing is saved and the token is revoked', (
   const before = G.revoked.length;
   const r = E.connect('noticks@gmail.com', { tickSend: false });
   assert(/was not ticked/.test(r.html));
-  assert(!JSON.parse(E.scriptProps.GMAIL_ACCOUNTS)['noticks@gmail.com']);
+  assert(!accountsOf(E)['noticks@gmail.com']);
   assert(G.revoked.length > before);
 });
 t('the callback only works for the owner\'s browser session', () => {
   E.as('owner@gmail.com');
   const r = E.connect('sneaky@gmail.com', { callbackAs: 'dad@gmail.com' });
-  assert(/must open while the browser is signed in to Google as owner@gmail.com/.test(r.html));
-  assert(!JSON.parse(E.scriptProps.GMAIL_ACCOUNTS)['sneaky@gmail.com']);
+  assert(/signed in as the owner of the workspace/.test(r.html), r.html);
+  assert(!accountsOf(E)['sneaky@gmail.com']);
 });
 t('only the owner\'s code can read tokens (Dad\'s session and Dad-owned triggers cannot)', () => {
   E.as('dad@gmail.com');
-  throwsMsg(() => C.getAccessToken_('shop1@gmail.com'), /Only the owner account/);
-  throwsMsg(() => C.sendGmail_({ from: 'shop1@gmail.com', to: 'a@b.com', subject: 's', text: 't' }), /Only the owner account/);
+  throwsMsg(() => C.getAccessToken_('shop1@gmail.com'), /Only the workspace owner account/);
+  throwsMsg(() => C.sendGmail_({ from: 'shop1@gmail.com', to: 'a@b.com', subject: 's', text: 't' }), /Only the workspace owner account/);
 });
 t('connect a second account; assign senders per shop', () => {
   E.as('owner@gmail.com');
@@ -348,7 +368,7 @@ t('permission revoked/expired at Google → send pauses with reconnect steps; no
   assert.strictEqual(c.status, 'paused');
   assert(/needs to be reconnected/.test(c.status_reason) && /Reconnect/.test(c.status_reason), c.status_reason);
   assert.strictEqual(E.tab('Send Log').filter(l => l.campaign_id === c2.campaign_id && l.status === 'failed').length, 0);
-  assert.strictEqual(JSON.parse(E.scriptProps.GMAIL_ACCOUNTS)['shop1@gmail.com'].status, 'needs_reconnect');
+  assert.strictEqual(accountsOf(E)['shop1@gmail.com'].status, 'needs_reconnect');
   throwsMsg(() => C.resumeCampaign(c2.campaign_id), /needs to be reconnected/);
   throwsMsg(() => C.startCampaign({ shopId: 'SHOP1', templateId: 'T1', skipPrevious: false }), /needs to be reconnected/);
 });
@@ -465,13 +485,10 @@ t('automatic WhatsApp: results upload is recorded once; next list skips them', (
   throwsMsg(() => C.importWhatsAppResults({ hello: 1 }), /not a WhatsApp results file/);
   throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {price}' }), /not known/);
 });
-t('WhatsApp helper bridge: wrong token refused, must run as owner', () => {
+t('WhatsApp helper bridge: wrong or missing token refused', () => {
   assert.strictEqual(E.bridge({ token: 'nope', action: 'poll' }).error, 'not allowed');
+  assert.strictEqual(E.bridge({ token: 'nope-but-long-enough-to-look-like-a-token', action: 'poll' }).error, 'not allowed');
   assert.strictEqual(E.bridge({ action: 'poll' }).error, 'not allowed');
-  // same token, but running as someone else (e.g. the normal web app deployment called by another user)
-  E.as('dad@gmail.com');
-  const out = JSON.parse(C.doPost({ postData: { contents: JSON.stringify({ token: 'test-token', action: 'poll' }) } }).getContent());
-  assert.strictEqual(out.error, 'bridge must run as the owner');
 });
 t('WhatsApp helper: offline helper → Start is refused with a clear message', () => {
   E.as('dad@gmail.com');
@@ -517,13 +534,14 @@ t('doGet serves the app; include only serves app files', () => {
   assert(C.include('SheetJS').includes('make_xlsx_lib'));
   throwsMsg(() => C.include('Code'), /Unknown file/);
 });
-t('no token or secret anywhere in the Sheet or in script properties', () => {
+t('no token or secret anywhere in the Sheet; no Gmail token in script properties', () => {
   const sheetText = JSON.stringify(E.ss.sheets.map(s => s.grid));
-  assert(!/rt_|at_\d|GOCSPX/.test(sheetText));
-  assert(!/rt_|at_\d|GOCSPX/.test(JSON.stringify(E.scriptProps)));
+  assert(!/\brt_\d|\bat_\d|GOCSPX/.test(sheetText));
+  const props = Object.assign({}, E.scriptProps); delete props.OAUTH_CLIENT_SECRET;
+  assert(!/\brt_\d|\bat_\d|GOCSPX/.test(JSON.stringify(props)));
 });
 t('the app never uses GmailApp', () => {
-  const src = ['Code.gs', 'Senders.gs', 'Sending.gs'].map(f => require('fs').readFileSync(path.join(SRC, f), 'utf8')).join('');
+  const src = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].map(f => require('fs').readFileSync(path.join(SRC, f), 'utf8')).join('');
   assert(!/GmailApp\./.test(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')));
 });
 
@@ -549,7 +567,7 @@ t('emails carry Date, Message-ID and an Unsubscribe header (to the reply-to addr
 });
 t('only the owner can change the rules; values are checked', () => {
   E.as('dad@gmail.com');
-  throwsMsg(() => C.saveSendingRules({ dailyCap: 30, startHour: 9, endHour: 21 }), /Only the app owner/);
+  throwsMsg(() => C.saveSendingRules({ dailyCap: 30, startHour: 9, endHour: 21 }), /Only the owner of this workspace/);
   E.as('owner@gmail.com');
   throwsMsg(() => C.saveSendingRules({ dailyCap: 1000, startHour: 9, endHour: 21 }), /between 5 and 400/);
   throwsMsg(() => C.saveSendingRules({ dailyCap: 30, startHour: 20, endHour: 10 }), /end is after the start/);

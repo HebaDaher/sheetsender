@@ -28,12 +28,17 @@ class H(http.server.BaseHTTPRequestHandler):
             if phone.startswith('97155') and 'reloaded' not in q:
                 reload_js = "setTimeout(function(){ location.replace(location.href + '&reloaded=1'); }, 700);"
             enter_ok = 'false' if phone.startswith('97156') else 'true'
-            return self.send_html('''<div id="pane-side"></div><div id="main"></div>
+            # numbers starting 97158: WhatsApp reloads right after Enter, before the box is cleared (the risky case)
+            if phone.startswith('97158') and 'reloaded' not in q:
+                reload_js = "box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ setTimeout(function(){ location.replace(location.href + '&reloaded=1'); }, 5); }}, true);"
+
+            history = ''.join('<div class="message-out">%s</div>' % m['text'].replace('&', '&amp;').replace('<', '&lt;') for m in SENT if m['phone'] == phone)
+            return self.send_html('''<div id="pane-side"></div><div id="main">''' + history + '''</div>
 <footer><div contenteditable="true" data-tab="10" id="box" style="white-space:pre-wrap">%s</div>
 <button aria-label="Send" id="send"><span data-icon="send"></span></button></footer>
 <script>
 var box=document.getElementById('box'), ENTER_OK=%s;
-function send(){ var t=box.innerText; fetch('/record',{method:'POST',body:JSON.stringify({phone:%s,text:t})}).then(function(){ box.innerText=''; }); }
+function send(){ var t=box.innerText; fetch('/record',{method:'POST',body:JSON.stringify({phone:%s,text:t}),keepalive:true}).then(function(){ setTimeout(function(){ box.innerText=''; }, 50); }); }
 box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); if(ENTER_OK) send(); }});
 document.getElementById('send').addEventListener('click', send);
 %s

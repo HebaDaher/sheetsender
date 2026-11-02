@@ -6,10 +6,11 @@
  * is connected with OAuth (scope gmail.send only) and email is sent with the Gmail API through UrlFetchApp.
  *
  * Where secrets live:
- *  - OAuth client secret and every account's refresh/access token: the OWNER's UserProperties.
- *    Only code running as the owner (the owner's own web session, or the owner's trigger) can read them.
- *    They are never returned to the web page and never written to the Google Sheet.
- *  - Script properties hold only non-secret status: which addresses are connected, last test, last error.
+ *  - Every Gmail account's refresh/access token: the UserProperties of the WORKSPACE OWNER who connected it.
+ *    Only code running as that owner (their own web session, or their own trigger) can read them.
+ *  - The OAuth client secret (one Google sign-in client for the whole app, made by the administrator): script
+ *    properties, read only by server code. Never returned to any web page, never written to any Sheet.
+ *  - Per-workspace status (which addresses are connected, last test, last error) has no secrets.
  */
 
 const OAUTH = {
@@ -35,17 +36,14 @@ const OAUTH_CALLBACK_URL = 'https://hebadaher.github.io/sheetsender/callback.htm
 /* Storage helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-/** The owner's private store. Throws unless the code is running as the owner. */
+/** The workspace owner's private store. Throws unless the code is running as the owner of the open workspace. */
 function ownerSecrets_() {
-  const owner = norm_(PropertiesService.getScriptProperties().getProperty(PROP.OWNER_EMAIL));
   const me = norm_(Session.getEffectiveUser().getEmail());
-  if (!owner || me !== owner) throw new Error('Only the owner account can use Gmail connections.');
+  if (!WS || !WS.owner || me !== WS.owner) throw new Error('Only the workspace owner account can use these connections.');
   return PropertiesService.getUserProperties();
 }
 
-function accountStatus_() {
-  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP.ACCOUNTS) || '{}'); } catch (e) { return {}; }
-}
+function accountStatus_() { return wsJson_('ACCOUNTS', {}) || {}; }
 
 function markAccount_(email, status, error, extra) {
   const all = accountStatus_();
@@ -58,7 +56,7 @@ function markAccount_(email, status, error, extra) {
   Object.keys(extra || {}).forEach(function (k) { acc[k] = extra[k]; });
   acc.updated_at = now;
   all[key] = acc;
-  PropertiesService.getScriptProperties().setProperty(PROP.ACCOUNTS, JSON.stringify(all));
+  wsSet_('ACCOUNTS', JSON.stringify(all));
   return acc;
 }
 
@@ -66,10 +64,28 @@ function redirectUri_() {
   return OAUTH_CALLBACK_URL;
 }
 
+/**
+ * The client secret. Earlier versions kept it in the administrator's private store; it moves (once, when the
+ * administrator's code runs) to server-only script properties so every workspace owner's trigger can use it.
+ */
+function clientSecret_() {
+  const props = PropertiesService.getScriptProperties();
+  let secret = props.getProperty(PROP.OAUTH_CLIENT_SECRET) || '';
+  if (!secret && norm_(Session.getEffectiveUser().getEmail()) === adminEmail_()) {
+    const mine = PropertiesService.getUserProperties();
+    secret = mine.getProperty(SECRET.CLIENT_SECRET) || '';
+    if (secret) { props.setProperty(PROP.OAUTH_CLIENT_SECRET, secret); mine.deleteProperty(SECRET.CLIENT_SECRET); }
+  }
+  return secret;
+}
+
 function oauthClient_() {
   const id = PropertiesService.getScriptProperties().getProperty(PROP.OAUTH_CLIENT_ID) || '';
-  const secret = ownerSecrets_().getProperty(SECRET.CLIENT_SECRET) || '';
-  if (!id || !secret) throw new Error('Google sign-in is not configured yet. Owner: open Settings > Google sign-in and save the Client ID and Client secret.');
+  const secret = clientSecret_();
+  if (!id || !secret) {
+    throw new Error('Google sign-in is not configured yet. The app administrator (' + adminEmail_() +
+      ') must open Settings > Google sign-in and save the Client ID and Client secret.');
+  }
   return { id: id, secret: secret };
 }
 
@@ -87,6 +103,7 @@ function parseJson_(text) { try { return JSON.parse(text); } catch (e) { return 
 
 function getSettings() {
   const ctx = requireOwner_();
+  if (ctx.ws.engine_on) ensureTrigger_();
   const props = PropertiesService.getScriptProperties();
   const shops = readTable_(ctx.ss, TABS.SHOPS).rows.filter(function (s) { return s.shop_id; });
   const accounts = accountStatus_();
@@ -95,19 +112,27 @@ function getSettings() {
     return {
       email: k, status: a.status, connected_at: a.connected_at || '', last_ok_at: a.last_ok_at || '',
       last_test_at: a.last_test_at || '', last_error: a.last_error || '',
-      shops: shops.filter(function (s) { return norm_(s.sender_email) === k; }).map(function (s) { return s.shop_name || s.shop_id; })
+      shops: shops.filter(function (s) { return norm_(s.sender_email) === k && isActive_(s.active); }).map(function (s) { return s.shop_name || s.shop_id; })
     };
   });
-  const uri = redirectUri_();
+  const clientId = props.getProperty(PROP.OAUTH_CLIENT_ID) || '';
+  const secretSaved = !!clientSecret_();
   return {
-    redirectUri: uri,
+    isAdmin: ctx.isAdmin,
+    admin: adminEmail_(),
+    workspace: { id: ctx.ws.id, name: ctx.ws.name || 'My shops', owner: ctx.ws.owner },
+    members: membersOf_(ctx),
+    redirectUri: redirectUri_(),
     redirectLooksWrong: false,
-    clientId: props.getProperty(PROP.OAUTH_CLIENT_ID) || '',
-    clientSecretSaved: !!ownerSecrets_().getProperty(SECRET.CLIENT_SECRET),
+    clientId: ctx.isAdmin ? clientId : '',
+    clientSecretSaved: secretSaved,
+    clientReady: !!clientId && secretSaved,
     accounts: list,
     shops: shops.map(function (s) {
       const c = senderCheck_(s);
-      return { shop_id: s.shop_id, shop_name: s.shop_name, sender_email: norm_(s.sender_email), active: isActive_(s.active), senderOk: c.ok, senderProblem: c.reason };
+      return { shop_id: s.shop_id, shop_name: s.shop_name, sender_email: norm_(s.sender_email), sender_name: s.sender_name,
+        reply_to: s.reply_to, country_code: s.country_code || DEFAULT_COUNTRY_CODE,
+        active: isActive_(s.active), senderOk: c.ok, senderProblem: c.reason };
     }),
     engine: engineStatus_(),
     sendingRules: sendingRules_(),
@@ -115,27 +140,29 @@ function getSettings() {
       const logRows = readTable_(ctx.ss, TABS.LOG).rows;
       return list.map(function (a) { return { email: a.email, n: sentTodayBy_(logRows, a.email, Date.now()) }; });
     })(),
+    waApi: waApiPublic_(true),
+    appUrl: String(ScriptApp.getService().getUrl() || ''),
     sheetUrl: ctx.ss.getUrl()
   };
 }
 
-/** Saves the OAuth client from Google Cloud. The secret goes only into the owner's private store. */
+/** Administrator: saves the OAuth client from Google Cloud. The secret is kept server-side only. */
 function saveOAuthClient(clientId, clientSecret) {
-  requireOwner_();
+  requireAdmin_();
   const id = String(clientId || '').trim();
   const secret = String(clientSecret || '').trim();
   if (!/^[0-9]+-[a-z0-9_]+\.apps\.googleusercontent\.com$/i.test(id)) {
     throw new Error('That does not look like a Google Client ID. It ends with ".apps.googleusercontent.com".');
   }
-  const store = ownerSecrets_();
-  if (!secret && !store.getProperty(SECRET.CLIENT_SECRET)) throw new Error('Paste the Client secret too.');
+  if (!secret && !clientSecret_()) throw new Error('Paste the Client secret too.');
   if (secret && !/^[A-Za-z0-9_\-]{10,}$/.test(secret)) throw new Error('That does not look like a Google Client secret.');
-  PropertiesService.getScriptProperties().setProperty(PROP.OAUTH_CLIENT_ID, id);
-  if (secret) store.setProperty(SECRET.CLIENT_SECRET, secret);
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(PROP.OAUTH_CLIENT_ID, id);
+  if (secret) props.setProperty(PROP.OAUTH_CLIENT_SECRET, secret);
   return { clientId: id, clientSecretSaved: true };
 }
 
-/** Returns the Google consent URL. The owner opens it, signs in as the shop's Gmail and clicks Allow. */
+/** Returns the Google consent URL. The workspace owner opens it, signs in as the shop's Gmail and clicks Allow. */
 function startGmailConnect(loginHint) {
   requireOwner_();
   const client = oauthClient_();
@@ -192,8 +219,7 @@ function completeConnect_(p) {
   try {
     ctx = requireOwner_();
   } catch (e) {
-    const owner = PropertiesService.getScriptProperties().getProperty(PROP.OWNER_EMAIL) || 'the owner';
-    throw new Error('This page must open while the browser is signed in to Google as ' + owner + ' (the app owner) first. ' +
+    throw new Error('Finish the connection in the app tab where you clicked Connect, signed in as the owner of the workspace. ' +
       'Open the app with that account, go to Settings and click Connect again. (' + e.message + ')');
   }
   const cache = CacheService.getUserCache();
@@ -238,6 +264,7 @@ function completeConnect_(p) {
       expires_at: Date.now() + (Number(body.expires_in || 3600) * 1000)
     }));
     markAccount_(email, 'connected', '', { connected_at: nowIso_(), connected_by: ctx.email });
+    ensureTrigger_();
     return email;
   });
 }
@@ -317,7 +344,7 @@ function assignShopSender(shopId, email) {
   });
 }
 
-/** Owner: saves the safe-sending rules. */
+/** Workspace owner: saves the safe-sending rules. */
 function saveSendingRules(rules) {
   requireOwner_();
   rules = rules || {};
@@ -326,19 +353,19 @@ function saveSendingRules(rules) {
   if (!(start >= 0 && start <= 23) || !(end >= 1 && end <= 24) || end <= start) throw new Error('Choose sending hours where the end is after the start.');
   if (end - start < 2) throw new Error('Allow at least 2 sending hours per day.');
   const saved = { dailyCap: cap, startHour: start, endHour: end };
-  PropertiesService.getScriptProperties().setProperty(PROP.SEND_RULES, JSON.stringify(saved));
+  wsSet_('SEND_RULES', JSON.stringify(saved));
   return sendingRules_();
 }
 
 function restartEngine() {
   requireOwner_();
   installTrigger_();
-  PropertiesService.getScriptProperties().setProperty(PROP.LAST_ENGINE_RUN, nowIso_());
+  wsSet_('LAST_RUN', nowIso_());
   return engineStatus_();
 }
 
 /* ------------------------------------------------------------------ */
-/* Tokens and sending (run as the owner: owner session or owner trigger) */
+/* Tokens and sending (run as the workspace owner: their session or trigger) */
 /* ------------------------------------------------------------------ */
 
 function getAccessToken_(email, forceRefresh) {

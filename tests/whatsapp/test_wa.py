@@ -49,10 +49,11 @@ tricky = [
     {'contact_id': 'R1', 'name': 'Reloader', 'phone': '971551234567', 'text': 'Hello Reloader'},
     {'contact_id': 'R2', 'name': 'ButtonOnly', 'phone': '971561234567', 'text': 'Hello ButtonOnly'},
     {'contact_id': 'R3', 'name': 'Normal', 'phone': '971501234567', 'text': 'Hello Normal'},
+    {'contact_id': 'R4', 'name': 'ReloadAfterEnter', 'phone': '971581234567', 'text': 'Hello ReloadAfterEnter'},
 ]
 out_t, sent_t, res_t, _ = run_case('tricky', tricky, all_hours, port=8797)
-check([x['phone'] for x in sent_t] == ['971551234567', '971561234567', '971501234567'], 'each sent exactly once despite reloads: ' + str([x['phone'] for x in sent_t]))
-check(res_t and all(r['status'] == 'sent' for r in res_t['items']) and len(res_t['items']) == 3, 'all three marked sent')
+check([x['phone'] for x in sent_t] == ['971551234567', '971561234567', '971501234567', '971581234567'], 'each sent exactly once despite reloads (also a reload right after Enter): ' + str([x['phone'] for x in sent_t]))
+check(res_t and all(r['status'] == 'sent' for r in res_t['items']) and len(res_t['items']) == 4, 'all four marked sent (the reloaded one found in the chat)')
 
 print('Run again: nothing is sent twice')
 out2, sent2, res2, _ = run_case('normal', items, all_hours, keep_home=home)

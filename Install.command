@@ -34,6 +34,8 @@ cp config/appsscript.json src/appsscript.json
 
 say "Step 4 of 5: upload the code"
 $CLASP push --force || fail "Upload failed. Check your internet connection and try again."
+echo "Publishing the private WhatsApp link (used by the Macs that send WhatsApp messages)..."
+bash whatsapp/deploy-bridge.sh || echo "The WhatsApp link could not be published this time (the rest of the app is fine). Run Install.command again later."
 
 say "Step 5 of 5: publish the web app"
 if [ -f .deployment-id ]; then
@@ -48,9 +50,7 @@ else
   echo "$ID" > .deployment-id
 fi
 
-if [ -f .bridge-deployment-id ]; then
-  say "Updating the WhatsApp Sender link"
-  bash whatsapp/deploy-bridge.sh || echo "The WhatsApp link could not be updated (the app itself is updated)."
+if [ -f "$HOME/Library/LaunchAgents/com.shopfollowups.whatsapp.plist" ]; then
   mkdir -p "$HOME/.shop-followups/app" && cp whatsapp/whatsapp_sender.py whatsapp/whatsapp_helper.py "$HOME/.shop-followups/app/" 2>/dev/null
   launchctl kickstart -k "gui/$(id -u)/com.shopfollowups.whatsapp" 2>/dev/null
 fi

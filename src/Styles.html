@@ -16,6 +16,17 @@
   .logo { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 8px;
     background: var(--accent); color: var(--accent-ink); }
   .who { color: var(--muted); font-size: 14px; text-align: right; }
+  .who { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+  .ws-sel { width: auto; max-width: 260px; padding: 6px 8px; font-size: 14px; }
+  .ws-name { font-weight: 600; color: var(--ink); }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .mode { text-align: left; cursor: pointer; border: 2px solid var(--line); background: var(--card); border-radius: var(--radius);
+    padding: 12px 14px; font: inherit; color: var(--ink); }
+  .mode b { display: block; font-size: 16px; margin-bottom: 2px; }
+  .mode span { color: var(--muted); font-size: 13px; }
+  .mode.active { border-color: var(--accent); background: var(--accent-soft); }
+  .mode:focus-visible { outline: 3px solid var(--accent-soft); }
+  @media (max-width: 640px) { .modes { grid-template-columns: 1fr; } .topbar { flex-wrap: wrap; } .who { justify-content: flex-start; } }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
   h1 { font-size: 26px; margin: 4px 0 4px; }
   h2 { font-size: 20px; margin: 0 0 8px; }

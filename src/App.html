@@ -110,16 +110,61 @@
 
   /* ---------------- Boot ---------------- */
   function start() {
-    call('getBootstrap').then(function (boot) {
-      S.boot = boot;
-      $('who').innerHTML = 'Signed in as <b>' + esc(boot.user) + '</b>' +
-        (boot.isOwner ? ' <button class="btn small" id="openSettings" style="margin-left:8px">⚙ Settings</button>' : '');
-      if (boot.isOwner) $('openSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
-      renderHome();
-    }, function (err) {
+    call('getBootstrap').then(useBoot, function (err) {
       $('app').innerHTML = '<div class="card"><h2>Cannot open the app</h2><p>' + esc(errText(err)) + '</p>' +
         '<p class="muted small">If this keeps happening, send this message to the person who set up the app.</p></div>';
     });
+  }
+
+  function useBoot(boot) {
+    S.boot = boot;
+    if (boot.needsWorkspace) { drawWho(); return renderWelcome(); }
+    drawWho();
+    renderHome();
+  }
+
+  /** Top bar: who is signed in, which workspace (switch if more than one), Settings for the workspace owner. */
+  function drawWho() {
+    var b = S.boot, html = '';
+    if (b.workspaces && (b.workspaces.length > 1 || !b.ownsWorkspace)) {
+      html += '<select id="wsSel" class="ws-sel" title="Workspace">' + b.workspaces.map(function (w) {
+        return '<option value="' + esc(w.id) + '"' + (b.workspace && w.id === b.workspace.id ? ' selected' : '') + '>' + esc(w.name) + (w.mine ? '' : ' (' + esc(w.owner) + ')') + '</option>';
+      }).join('') + (!b.ownsWorkspace ? '<option value="__new">+ Create my own workspace</option>' : '') + '</select> ';
+    } else if (b.workspace) {
+      html += '<span class="ws-name">' + esc(b.workspace.name) + '</span> · ';
+    }
+    html += '<span class="small">' + esc(b.user) + '</span>';
+    if (b.isOwner) html += ' <button class="btn small" id="openSettings" style="margin-left:8px">⚙ Settings</button>';
+    $('who').innerHTML = html;
+    if ($('openSettings')) $('openSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
+    if ($('wsSel')) $('wsSel').addEventListener('change', function () {
+      var v = this.value;
+      if (v === '__new') { renderWelcome(true); return; }
+      stopAutoRefresh();
+      withBusy('Opening the workspace…', call('switchWorkspace', v)).then(function (b2) { hideBanner(); useBoot(b2); });
+    });
+  }
+
+  /** First visit (or "Create my own workspace"): one short form. */
+  function renderWelcome(extra) {
+    stopAutoRefresh();
+    var b = S.boot;
+    var html = '<div class="card" style="max-width:640px;margin:0 auto"><h1 style="margin-top:0">Welcome' + (extra ? '' : ' to ' + esc(b.appName || 'Shop Follow-ups')) + '</h1>' +
+      '<p>Create your own private workspace. It is a Google Sheet in <b>your</b> Google Drive that keeps your shops, your customers and your sending history. Nobody else can see it unless you add them.</p>' +
+      '<label class="field"><span>Workspace name</span><input type="text" id="wName" maxlength="60" value="My shops"></label>' +
+      '<label class="field"><span>Your first shop’s name</span><input type="text" id="wShop" maxlength="80" placeholder="e.g. Al Barsha Shop"><span class="muted small" style="font-weight:400">You can add more shops later in ⚙ Settings.</span></label>' +
+      '<div class="row"><button class="btn primary big" id="wCreate">Create my workspace</button>' + (extra ? '<button class="btn" id="wCancel">Cancel</button>' : '') + '</div>' +
+      (extra ? '' : '<div class="notice info small" style="margin-top:16px"><b>Someone already uses this app with you (for example family)?</b> Ask them to add <b>' + esc(b.user) +
+        '</b> in their ⚙ Settings → People, then reload this page. You will see their shops here instead.</div>') + '</div>';
+    $('app').innerHTML = html;
+    $('wCreate').addEventListener('click', function () {
+      var shop = $('wShop').value.trim();
+      if (!shop) { showBanner('error', 'Write the name of your first shop.'); $('wShop').focus(); return; }
+      withBusy('Creating your workspace (a new Google Sheet in your Drive)…', call('createMyWorkspace', $('wName').value, shop))
+        .then(function () { return call('getBootstrap'); })
+        .then(function (b2) { useBoot(b2); showBanner('success', 'Your workspace is ready. Next: open ⚙ Settings and connect the Gmail account that sends for this shop.', true); });
+    });
+    if ($('wCancel')) $('wCancel').addEventListener('click', function () { useBoot(S.boot); });
   }
 
   function engineNotice() {
@@ -129,7 +174,7 @@
     return '<div class="notice warn"><b>Emails may not be going out.</b> ' + esc(when) +
       (S.boot.isOwner
         ? ' Open ⚙ Settings and click "Restart sender".'
-        : ' Ask ' + esc(S.boot.owner) + ' to open the app, go to Settings and click "Restart sender".') + '</div>';
+        : ' Ask ' + esc(S.boot.owner) + ' (the owner of this workspace) to open the app, go to ⚙ Settings and click "Restart sender".') + '</div>';
   }
 
   /* ---------------- Home ---------------- */
@@ -144,9 +189,8 @@
     }
     b.setupProblems.forEach(function (p) { html += '<div class="notice warn">' + esc(p) + '</div>'; });
     if (!b.shops.length) {
-      html += '<div class="card"><h2>No shops yet</h2><p>Add one row per shop in the <b>Shops</b> tab of the Google Sheet ' +
-        '(shop_id, shop_name, sender_email, active = yes), then reload this page.</p>' +
-        '<p><a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Open the Google Sheet</a></p></div>';
+      html += '<div class="card"><h2>No shops yet</h2><p>' + (b.isOwner ? 'Add your shops in <b>⚙ Settings → Shops</b>.' :
+        'Ask ' + esc(b.owner) + ' (the owner of this workspace) to add shops in ⚙ Settings → Shops.') + '</p></div>';
     } else {
       html += '<div class="shops">';
       b.shops.forEach(function (s) {
@@ -159,8 +203,10 @@
       html += '</div>';
     }
     if (b.isOwner) {
-      html += '<p class="muted small" style="margin-top:20px">You are the owner. Add or rename shops in the ' +
-        '<a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a> (Shops tab); connect Gmail accounts in ⚙ Settings.</p>';
+      html += '<p class="muted small" style="margin-top:20px">This is your workspace. Add shops, connect Gmail accounts, WhatsApp and the people who help you in ⚙ Settings. ' +
+        'Everything is saved in your <a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a>.</p>';
+    } else {
+      html += '<p class="muted small" style="margin-top:20px">Workspace of ' + esc(b.owner) + '.</p>';
     }
     $('app').innerHTML = html;
     if ($('goSettings')) $('goSettings').addEventListener('click', renderSettings);
@@ -214,7 +260,7 @@
     });
     html += '</nav><section id="view"></section>';
     $('app').innerHTML = html;
-    $('backHome').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(function (b) { S.boot = b; renderHome(); }); renderHome(); });
+    $('backHome').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(useBoot); renderHome(); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-view]'), function (el) {
       el.addEventListener('click', function () { S.view = el.getAttribute('data-view'); hideBanner(); renderShop(); });
     });
@@ -556,12 +602,12 @@
       '<label class="check" style="margin:0"><input type="radio" name="' + p + 'When" value="at"' + (sc.when === 'at' ? ' checked' : '') + '><span>At</span></label>' +
       '<input type="datetime-local" id="' + p + 'At" value="' + esc(sc.at) + '"' + (sc.when === 'at' ? '' : ' disabled') + '></div>' +
       '<div class="opt"><span style="min-width:120px">Wait between ' + (opts.word || 'messages') + '</span>' +
-      '<input type="number" id="' + p + 'Min" min="3" max="120" step="1" value="' + esc(sc.minutes) + '"> minutes' +
+      '<input type="number" id="' + p + 'Min" min="' + (sc.minDelay || 3) + '" max="120" step="1" value="' + esc(sc.minutes) + '"> minutes' +
       '<span class="muted small" id="' + p + 'MinNote"></span></div>' +
       '<div class="opt"><label class="switch"><input type="checkbox" id="' + p + 'Rand"' + (sc.random ? ' checked' : '') + '><span class="track"></span>' +
       '<span>Random extra wait <span class="muted small" id="' + p + 'RandNote"></span></span></label></div>';
     if (opts.limits) {
-      html += '<div class="opt"><span style="min-width:120px">At most</span><input type="number" id="' + p + 'Cap" min="1" max="60" value="' + esc(sc.cap) + '"> messages per day</div>' +
+      html += '<div class="opt"><span style="min-width:120px">At most</span><input type="number" id="' + p + 'Cap" min="1" max="' + (sc.maxCap || 60) + '" value="' + esc(sc.cap) + '"> messages per day</div>' +
         '<div class="opt"><span style="min-width:120px">Only between</span><select id="' + p + 'H1" style="width:auto">' + hourOpts(sc.h1, 0, 23) + '</select> and ' +
         '<select id="' + p + 'H2" style="width:auto">' + hourOpts(sc.h2, 1, 24) + '</select></div>';
     }
@@ -598,7 +644,8 @@
     function notes() {
       hw();
       var m = Number(sc.minutes) || 0;
-      $(p + 'MinNote').textContent = m < 3 ? 'At least 3.' : (m < 5 ? 'Fast — 5 or more is safer.' : '');
+      var lo = sc.minDelay || 3;
+      $(p + 'MinNote').textContent = m < lo ? 'At least ' + lo + '.' : (lo === 3 && m < 5 ? 'Fast — 5 or more is safer.' : '');
       $(p + 'RandNote').textContent = sc.random ? '(on: each wait is ' + m + '–' + Math.round(m * 1.4) + ' minutes, which looks more natural)' : '(off: exactly ' + m + ' minutes each time)';
     }
     Array.prototype.forEach.call(document.querySelectorAll('input[name="' + p + 'When"]'), function (r) {
@@ -617,8 +664,8 @@
     if (sc.when === 'now' && hours) { clearInterval(sc._clock); sc._clock = setInterval(function () { if ($(p + 'Hours')) hw(); else clearInterval(sc._clock); }, 60000); }
   }
   function scheduleProblem(sc, opts) {
-    var m = Number(sc.minutes);
-    if (!(m >= 3 && m <= 120 && Math.round(m) === m)) return 'Minutes between messages must be a whole number from 3 to 120.';
+    var m = Number(sc.minutes), lo = sc.minDelay || 3, hi = sc.maxCap || 60;
+    if (!(m >= lo && m <= 120 && Math.round(m) === m)) return 'Minutes between messages must be a whole number from ' + lo + ' to 120.';
     if (sc.when === 'at') {
       var t = new Date(sc.at).getTime();
       if (!sc.at || isNaN(t)) return 'Choose the date and time to start.';
@@ -626,7 +673,7 @@
     }
     if (opts && opts.limits) {
       var c = Number(sc.cap);
-      if (!(c >= 1 && c <= 60 && Math.round(c) === c)) return 'Messages per day must be a whole number from 1 to 60.';
+      if (!(c >= 1 && c <= hi && Math.round(c) === c)) return 'Messages per day must be a whole number from 1 to ' + hi + '.';
       if (!sc.ignoreHours && !(Number(sc.h2) > Number(sc.h1))) return 'The sending hours must end after they start.';
     }
     return '';
@@ -880,7 +927,7 @@
     }
     html += '<div class="table-wrap"><table><tr><th>Name</th><th>Status</th><th>Sent</th><th>Waiting</th><th>Skipped</th><th>Failed</th><th>Started</th><th></th></tr>';
     list.forEach(function (c) {
-      html += '<tr><td>' + esc(c.campaign_name) + '</td><td>' + badge(c.status, statusLabel(c.status)) + '</td>' +
+      html += '<tr><td>' + esc(c.campaign_name) + (c.channel === 'whatsapp_api' ? ' ' + badge('opened_in_whatsapp', 'WhatsApp') : '') + '</td><td>' + badge(c.status, statusLabel(c.status)) + '</td>' +
         '<td>' + esc(c.sent) + '</td><td>' + esc(c.pending) + '</td><td>' + esc(c.skipped) + '</td><td>' + esc(c.failed) + '</td>' +
         '<td>' + esc(fmt(c.started_at)) + '</td><td><button class="btn small" data-camp="' + esc(c.campaign_id) + '">Open</button></td></tr>';
     });
@@ -915,12 +962,16 @@
     var d = S.progress.detail, c = d.campaign, f = S.progress.filter;
     var html = '<button class="link" id="campBack">← All sends</button>';
     html += '<div class="card"><div class="row"><h2 style="margin:0">' + esc(c.campaign_name) + '</h2>' + badge(c.status, statusLabel(c.status)) + '</div>';
+    var isWa = c.channel === 'whatsapp_api';
     var tpl = S.data.templates.filter(function (t) { return t.template_id === c.template_id; })[0];
-    html += '<p class="muted small">Message: ' + esc(tpl ? tpl.template_name : c.template_id) + ' · From ' + esc(c.sender_email) +
-      ' · One email every ' + plural(Number(c.delay_minutes), 'minute') + ' · Started ' + esc(fmt(c.started_at)) + ' by ' + esc(c.created_by) + '</p>';
+    var tplName = tpl ? tpl.template_name : (isWa ? String(c.template_id).split(':')[1] || c.template_id : c.template_id);
+    html += '<p class="muted small">' + (isWa ? 'WhatsApp Business API template: ' : 'Message: ') + esc(tplName) + ' · From ' + esc(String(c.sender_email).replace(/^whatsapp:/, '')) +
+      ' · One ' + (isWa ? 'message' : 'email') + ' every ' + plural(Number(c.delay_minutes), 'minute') + (isWa && c.daily_cap ? ', at most ' + esc(c.daily_cap) + ' per day' : '') +
+      ' · Started ' + esc(fmt(c.started_at)) + ' by ' + esc(c.created_by) + '</p>';
+    if (isWa) html += '<p class="muted small">“Sent” = WhatsApp accepted the message. Delivered / read: see WhatsApp Manager in Meta.</p>';
     if (c.status_reason) html += '<div class="notice ' + (c.status === 'paused' ? 'warn' : 'info') + '">' + esc(c.status_reason) + '</div>';
     if (c.status === 'running') {
-      html += '<p>Next email: <b>' + (c.next_send_at ? esc(fmt(c.next_send_at)) : 'within a minute') + '</b></p>';
+      html += '<p>Next ' + (isWa ? 'message' : 'email') + ': <b>' + (c.next_send_at ? esc(fmt(c.next_send_at)) : 'within a minute') + '</b></p>';
     }
     var n = { all: d.rows.length, sent: 0, pending: 0, skipped: 0, failed: 0 };
     d.rows.forEach(function (r) {
@@ -943,9 +994,9 @@
     });
     html += '<div class="card"><div class="row"><h3 style="margin:0">' + (f === 'all' ? 'Everyone' : statusLabel(f)) + ' (' + rows.length + ')</h3>' +
       (f !== 'all' ? '<button class="link" data-f="all">Show everyone</button>' : '') + '</div>' +
-      '<div class="table-wrap scroll" style="margin-top:10px"><table><tr><th>Name</th><th>Email</th><th>Status</th><th>Reason / details</th><th>Time</th></tr>' +
+      '<div class="table-wrap scroll" style="margin-top:10px"><table><tr><th>Name</th><th>' + (isWa ? 'Phone' : 'Email') + '</th><th>Status</th><th>Reason / details</th><th>Time</th></tr>' +
       rows.map(function (r) {
-        return '<tr><td>' + esc(r.contact_name) + '</td><td>' + esc(r.email) + '</td><td>' + badge(r.status, statusLabel(r.status)) + '</td>' +
+        return '<tr><td>' + esc(r.contact_name) + '</td><td>' + esc(isWa ? (r.phone ? '+' + r.phone : '') : r.email) + '</td><td>' + badge(r.status, statusLabel(r.status)) + '</td>' +
           '<td>' + esc(r.status === 'sent' ? '' : r.reason) + '</td><td>' + esc(fmt(r.sent_at)) + '</td></tr>';
       }).join('') + '</table></div></div>';
     $('view').innerHTML = html;
@@ -955,10 +1006,10 @@
       b.addEventListener('click', function () { S.progress.filter = S.progress.filter === b.getAttribute('data-f') ? 'all' : b.getAttribute('data-f'); renderCampaign(); });
     });
     $('cRefresh').addEventListener('click', function () { loadCampaign(); });
-    if ($('cPause')) $('cPause').addEventListener('click', function () { campAction('pauseCampaign', 'Paused. No more emails will go out until you press Resume.'); });
-    if ($('cResume')) $('cResume').addEventListener('click', function () { campAction('resumeCampaign', 'Resumed. The next email goes out within about a minute.'); });
+    if ($('cPause')) $('cPause').addEventListener('click', function () { campAction('pauseCampaign', 'Paused. Nothing more goes out until you press Resume.'); });
+    if ($('cResume')) $('cResume').addEventListener('click', function () { campAction('resumeCampaign', 'Resumed. The next one goes out within about a minute.'); });
     if ($('cStop')) $('cStop').addEventListener('click', function () {
-      if (confirm('Stop this send for good?\n\nPeople still waiting will NOT get the email. This cannot be undone (you can start a new send later).')) {
+      if (confirm('Stop this send for good?\n\nPeople still waiting will NOT get the message. This cannot be undone (you can start a new send later).')) {
         campAction('stopCampaign', 'Stopped.');
       }
     });
@@ -983,13 +1034,40 @@
   /* =================================================================== */
   /* WHATSAPP — manual (free)                                             */
   /* =================================================================== */
+  /** Which automatic way: a Mac (free) or the WhatsApp Business API (paid). Remembered per workspace on this browser. */
+  function waMode() {
+    if (S.waMode) return S.waMode;
+    var key = 'sf_wa_mode_' + (S.boot.workspace ? S.boot.workspace.id : '');
+    try { S.waMode = localStorage.getItem(key) || ''; } catch (e) { S.waMode = ''; }
+    if (!S.waMode) S.waMode = S.data.waApi && S.data.waApi.configured && S.data.waApi.status === 'connected' ? 'api' : 'mac';
+    return S.waMode;
+  }
+  function setWaMode(m) {
+    S.waMode = m;
+    try { localStorage.setItem('sf_wa_mode_' + (S.boot.workspace ? S.boot.workspace.id : ''), m); } catch (e) { /* not saved: fine */ }
+  }
+  function waModeHtml() {
+    var m = waMode();
+    return '<div class="card"><h2 style="margin-top:0">Send WhatsApp messages automatically</h2><div class="modes">' +
+      '<button class="mode' + (m === 'mac' ? ' active' : '') + '" data-wamode="mac"><b>From a Mac</b><span>Free · your normal WhatsApp · the Mac must be on</span></button>' +
+      '<button class="mode' + (m === 'api' ? ' active' : '') + '" data-wamode="api"><b>WhatsApp Business API</b><span>Paid to Meta per message · works with every laptop off</span></button>' +
+      '</div></div>';
+  }
+  function bindWaMode() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-wamode]'), function (b) {
+      b.addEventListener('click', function () { setWaMode(b.getAttribute('data-wamode')); hideBanner(); viewWhatsApp(); });
+    });
+  }
+
   function viewWhatsApp() {
     var tpls = S.data.templates.filter(function (t) { return t.channel === 'whatsapp' && t.active !== 'no'; });
     var w = S.wa;
     if (!w.templateId && tpls.length) w.templateId = tpls[0].template_id;
-    var html = autoWhatsAppHtml(tpls);
+    var api = waMode() === 'api';
+    var html = waModeHtml() + (api ? apiWhatsAppHtml() : autoWhatsAppHtml(tpls));
+    var bindTop = function () { bindWaMode(); if (api) bindApiWhatsApp(); else bindAutoWhatsApp(tpls); };
     if (!tpls.length) {
-      $('view').innerHTML = html; bindAutoWhatsApp(tpls); return;
+      $('view').innerHTML = html; bindTop(); return;
     }
     var tpl = tpls.filter(function (t) { return t.template_id === w.templateId; })[0] || tpls[0];
     w.templateId = tpl.template_id;
@@ -1028,7 +1106,7 @@
         Object.keys(reasons).map(function (r) { return '<li>' + esc(r) + ': <b>' + reasons[r] + '</b></li>'; }).join('') + '</ul></details></div>';
     }
     $('view').innerHTML = html;
-    bindAutoWhatsApp(tpls);
+    bindTop();
 
     $('wTpl').addEventListener('change', function () { w.templateId = this.value; viewWhatsApp(); });
     $('wSearch').addEventListener('input', function () {
@@ -1065,14 +1143,23 @@
 
   function drawHelper(h) {
     var box = $('waHelper'); if (!box) return;
-    var start = $('waStart'), stop = $('waStop'), open = $('waOpen');
+    var start = $('waStart'), stop = $('waStop'), open = $('waOpen'), link = $('waLink');
     var job = h.job || null, running = job && job.state === 'running';
     var kind = 'info', html = '';
-    if (!h.online) {
+    if (link) {
+      link.classList.toggle('hidden', !h.canLink || (h.installed && h.online));
+      link.textContent = h.installed ? 'Set up a different Mac' : 'Set up a Mac';
+    }
+    if (!h.installed) {
+      kind = 'warn';
+      html = '<b>No Mac is set up for this workspace yet.</b> ' + (h.canLink
+        ? 'Click “Set up a Mac” below, on any computer, and follow the 3 steps on the Mac that will send the messages.'
+        : 'This needs one update by the app administrator first (they run Install.command once more).');
+    } else if (!h.online) {
       kind = 'warn';
       html = '<b>The WhatsApp Sender is not running on the Mac.</b> ' + (h.age_s !== null && h.age_s !== undefined
         ? 'Last seen ' + (h.age_s < 120 ? h.age_s + ' seconds' : Math.round(h.age_s / 60) + ' minutes') + ' ago. Turn on the Mac, log in, and keep it connected to the internet.'
-        : 'Install it once on the Mac that has WhatsApp (see the guide: “Install WhatsApp Sender”).');
+        : 'It has not connected yet. Finish the steps below on the Mac (they take 2–3 minutes), and keep that Mac on.');
     } else if (h.wa === 'connected') {
       kind = 'ok'; html = '<b>✓ WhatsApp connected on the Mac.</b>';
     } else if (h.wa === 'qr') {
@@ -1106,7 +1193,7 @@
       a.templateId = tpls.length ? tpls[0].template_id : '';
       a.body = tpls.length ? tpls[0].body : 'Hello {first_name}, this is {sender_name} about {shop_name}. ';
     }
-    var html = '<div class="card"><h2>Automatic WhatsApp sending</h2>' +
+    var html = '<div class="card"><h2>From a Mac (free)</h2>' +
       '<p class="muted">Write the message once with the person\'s name, choose the schedule and press <b>Start sending</b>. The WhatsApp Sender on the Mac sends it to each person by itself, and you can follow it here.</p>' +
       '<div class="notice warn small">WhatsApp does not allow automatic sending from a normal number. Going slowly lowers the risk, but WhatsApp can still block the number, ' +
       'especially if people report it. Only people who agreed to be contacted are included.</div>';
@@ -1119,7 +1206,9 @@
       '<div id="waHelper" class="notice info" style="margin-top:14px">Checking the WhatsApp Sender on the Mac…</div>' +
       '<div class="row" style="margin-top:10px"><button class="btn primary big" id="waStart" disabled>▶ Start sending</button>' +
       '<button class="btn danger hidden" id="waStop">■ Stop</button>' +
-      '<button class="btn hidden" id="waOpen">Open WhatsApp on the Mac</button></div>' +
+      '<button class="btn hidden" id="waOpen">Open WhatsApp on the Mac</button>' +
+      '<span class="spacer"></span><button class="btn hidden" id="waLink">Set up a Mac</button></div>' +
+      '<div id="macSetup"></div>' +
       '<details style="margin-top:14px"><summary class="small">Without the helper: send list files</summary>' +
       '<p class="small muted">Only if the WhatsApp Sender helper is not installed: download a send list and run the sender by hand, then upload its results.</p>' +
       '<div class="row"><button class="btn small" id="waJob">Download the send list</button>' +
@@ -1194,6 +1283,7 @@
       if (!confirm('Stop sending WhatsApp messages? People not reached yet will not get the message (you can start again later).')) return;
       withBusy('Stopping…', call('stopWhatsAppAuto')).then(function () { showBanner('success', 'Stop sent. The Mac stops within about 10 seconds.'); pollHelper(true); });
     });
+    $('waLink').addEventListener('click', macSetup);
     $('waOpen').addEventListener('click', function () {
       withBusy('Asking the Mac…', call('openWhatsAppOnMac')).then(function () { showBanner('success', 'WhatsApp opens on the Mac within about 10 seconds. Scan the QR code there if it asks.'); pollHelper(true); });
     });
@@ -1211,6 +1301,187 @@
       r.readAsText(f);
     });
     live();
+  }
+
+  /* ---------- "Set up a Mac": one line to paste in the Mac's Terminal ---------- */
+  function macSetup() {
+    if (!confirm('Set up a Mac for this workspace?\n\nYou get one line to paste on that Mac. If another Mac was set up before for this workspace, it stops sending for it.')) return;
+    withBusy('Preparing…', call('createMacLink')).then(function (r) {
+      var box = $('macSetup'); if (!box) return;
+      box.innerHTML = '<div class="sched" style="margin-top:12px"><b>Set up the Mac (one time, 2–3 minutes)</b><ol style="line-height:1.7;margin:8px 0 0;padding-left:20px">' +
+        '<li>On the Mac that will send (signed in, connected to the internet), open <b>Terminal</b>: press <b>⌘ + Space</b>, type <b>Terminal</b>, press <b>Enter</b>.</li>' +
+        '<li>Click <b>Copy</b>, then click in the Terminal window, press <b>⌘ + V</b> and <b>Enter</b>:' +
+        '<div class="row" style="margin-top:6px"><input type="text" id="macCmd" readonly value="' + esc(r.command) + '" style="font-family:monospace;font-size:12px"><button class="btn small primary" id="macCopy">Copy</button></div></li>' +
+        '<li>Wait until it says <b>Done</b> (if it asks to install Python, install it and paste the line again). Keep the Mac on.</li>' +
+        '<li>Back here, the box above turns green. Click <b>Open WhatsApp on the Mac</b> and scan the QR code with the phone: WhatsApp → Settings → Linked devices → Link a device.</li>' +
+        '</ol><p class="small muted" style="margin:8px 0 0">Keep this line private: it is the key that lets that Mac send for this workspace. It is shown only once; click “Set up a Mac” again for a new one.</p></div>';
+      $('macCopy').addEventListener('click', function () { var i = $('macCmd'); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied. Now paste it in the Mac\'s Terminal and press Enter.'); });
+      pollHelper(true);
+    });
+  }
+
+  /* ---------- WhatsApp Business API sending (paid; laptops can be off) ---------- */
+  var FIELD_LABELS = { first_name: 'First name', full_name: 'Full name', shop_name: 'Shop name', sender_name: 'Sender name', phone: 'Phone', email: 'Email' };
+
+  function apiState() {
+    return S.wa.api || (S.wa.api = { templates: null, key: '', mapping: {}, headerMapping: {}, skipPrevious: true, name: '', review: null,
+      sched: defaultSchedule({ minutes: 2, cap: 250, h1: 9, h2: 21, minDelay: 1, maxCap: 1000 }) });
+  }
+
+  function apiWhatsAppHtml() {
+    var api = S.data.waApi || { configured: false };
+    if (!api.configured || api.status !== 'connected') {
+      var who = S.boot.isOwner ? 'Connect it once in <b>⚙ Settings → WhatsApp Business API</b> (the steps are there).' :
+        'Ask ' + esc(S.boot.owner) + ' (the owner of this workspace) to connect it in ⚙ Settings → WhatsApp Business API.';
+      return '<div class="card"><h2>WhatsApp Business API</h2>' +
+        (api.configured ? '<div class="notice warn"><b>The connection needs attention.</b> ' + esc(api.last_error || api.status) + '</div>' :
+          '<p>It is not set up for this workspace yet.</p>') +
+        '<p>' + who + '</p><p class="muted small">You need a Meta (Facebook) business account, a phone number for the API, a payment method in Meta, and message templates approved by Meta.</p>' +
+        (S.boot.isOwner ? '<button class="btn primary" id="apiGoSettings">Open ⚙ Settings</button>' : '') + '</div>';
+    }
+    return '<div class="card" id="apiCard"><h2>WhatsApp Business API</h2><p class="muted">Sends from <b>' + esc(api.verified_name || '') + ' ' + esc(api.display_phone || '') +
+      '</b> through Meta. Works even when every laptop is off. Meta charges your business for each message.</p><div id="apiBody"><div class="spinner"></div></div></div>';
+  }
+
+  function bindApiWhatsApp() {
+    if ($('apiGoSettings')) $('apiGoSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
+    if (!$('apiBody')) return;
+    var a = apiState();
+    if (a.templates) return drawApiBody();
+    call('getWhatsAppApiTemplates').then(function (r) { a.templates = r.templates; if ($('apiBody')) drawApiBody(); },
+      function (e) { if ($('apiBody')) $('apiBody').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>'; });
+  }
+
+  function apiTemplate() {
+    var a = apiState();
+    return (a.templates || []).filter(function (t) { return t.name + '|' + t.language === a.key; })[0];
+  }
+
+  function defaultParam(k, named) {
+    if (!named) return { 1: 'first_name', 2: 'shop_name' }[k] || '';
+    if (FIELD_LABELS[k]) return k;
+    if (/^(name|customer|first)/i.test(k)) return 'first_name';
+    if (/shop|store|business/i.test(k)) return 'shop_name';
+    return '';
+  }
+
+  function paramRow(group, k, value) {
+    var isText = String(value || '').indexOf('text:') === 0;
+    return '<div class="opt"><span style="min-width:90px"><code>{{' + esc(k) + '}}</code></span>' +
+      '<select data-pgroup="' + group + '" data-pkey="' + esc(k) + '" style="width:auto"><option value="">— choose —</option>' +
+      Object.keys(FIELD_LABELS).map(function (f) { return '<option value="' + f + '"' + (value === f ? ' selected' : '') + '>' + FIELD_LABELS[f] + '</option>'; }).join('') +
+      '<option value="text:"' + (isText ? ' selected' : '') + '>Fixed text…</option></select>' +
+      '<input type="text" data-ptext="' + group + '|' + esc(k) + '" maxlength="200" placeholder="the text" value="' + esc(isText ? value.slice(5) : '') + '"' + (isText ? '' : ' class="hidden"') + ' style="max-width:260px"></div>';
+  }
+
+  function drawApiBody() {
+    var a = apiState(), list = a.templates || [];
+    var usable = list.filter(function (t) { return t.status === 'APPROVED' && t.ok; });
+    var box = $('apiBody');
+    if (!usable.length) {
+      box.innerHTML = '<div class="notice warn">No approved message templates yet. Create one in Meta’s WhatsApp Manager (Message templates → Create), wait until it is approved, then ' +
+        (S.boot.isOwner ? 'click “Reload templates” in ⚙ Settings.' : 'ask ' + esc(S.boot.owner) + ' to click “Reload templates” in ⚙ Settings.') + '</div>';
+      return;
+    }
+    if (!apiTemplate()) { a.key = usable[0].name + '|' + usable[0].language; a.mapping = {}; a.headerMapping = {}; a.review = null; }
+    var t = apiTemplate();
+    t.params.forEach(function (k) { if (a.mapping[k] === undefined) a.mapping[k] = defaultParam(k, t.named); });
+    t.header_params.forEach(function (k) { if (a.headerMapping[k] === undefined) a.headerMapping[k] = defaultParam(k, t.named); });
+    var html = '<label class="field"><span>Message template (approved by Meta)</span><select id="apiTpl">' + usable.map(function (x) {
+      var k = x.name + '|' + x.language;
+      return '<option value="' + esc(k) + '"' + (k === a.key ? ' selected' : '') + '>' + esc(x.name) + ' (' + esc(x.language) + ', ' + esc(String(x.category).toLowerCase()) + ')</option>';
+    }).join('') + '</select></label>';
+    html += '<div class="grid2"><div>';
+    if (t.params.length || t.header_params.length) {
+      html += '<div class="field"><span style="display:block;font-weight:600;margin-bottom:4px">What goes in each blank</span>' +
+        t.header_params.map(function (k) { return paramRow('h', k, a.headerMapping[k]); }).join('') +
+        t.params.map(function (k) { return paramRow('b', k, a.mapping[k]); }).join('') + '</div>';
+    } else {
+      html += '<p class="muted small">This template has no blanks: everyone gets the same text.</p>';
+    }
+    html += '<label class="check"><input type="checkbox" id="apiSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this template</span></label>' +
+      '<label class="field"><span>Name for this send (optional)</span><input type="text" id="apiName" maxlength="100" value="' + esc(a.name) + '"></label></div>' +
+      '<div><div class="muted small" style="margin-bottom:4px">What the first people receive</div><div id="apiGreets" class="small"></div></div></div>';
+    html += '<div style="margin-top:12px">' + scheduleHtml('as', a.sched, { limits: true, note: 'UAE time. Meta allows a new business about 250 people per day at first.' }) + '</div>' +
+      '<div id="apiReview"></div>' +
+      '<div class="row" style="margin-top:12px"><button class="btn" id="apiCheck">Check who will receive it</button><button class="btn primary big" id="apiStart">▶ Start sending</button></div>';
+    box.innerHTML = html;
+
+    function render(text, map, c) { return renderTplText(text, map, fieldsFor(c, S.data.shop)); }
+    function live() {
+      var people = S.data.contacts.filter(function (x) { return x.waCheck.ok; }).slice(0, 3);
+      $('apiGreets').innerHTML = people.length ? people.map(function (c) {
+        return '<div class="wa-bubble" style="margin-bottom:6px">' + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
+          '<div class="muted small" style="margin-top:4px">→ ' + esc(c.full_name || c.first_name || c.phone) + '</div></div>';
+      }).join('') : '<span class="muted">Nobody in this shop can be messaged yet (people need a phone number and consent).</span>';
+    }
+    var reset = function () { a.review = null; if ($('apiReview')) $('apiReview').innerHTML = ''; };
+    $('apiTpl').addEventListener('change', function () { a.key = this.value; a.mapping = {}; a.headerMapping = {}; reset(); drawApiBody(); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-pgroup]'), function (sel) {
+      sel.addEventListener('change', function () {
+        var g = sel.getAttribute('data-pgroup'), k = sel.getAttribute('data-pkey'), m = g === 'h' ? a.headerMapping : a.mapping;
+        var txt = document.querySelector('[data-ptext="' + g + '|' + k + '"]');
+        if (sel.value === 'text:') { txt.classList.remove('hidden'); m[k] = 'text:' + txt.value; txt.focus(); } else { txt.classList.add('hidden'); m[k] = sel.value; }
+        reset(); live();
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ptext]'), function (inp) {
+      inp.addEventListener('input', function () {
+        var parts = inp.getAttribute('data-ptext').split('|'), m = parts[0] === 'h' ? a.headerMapping : a.mapping;
+        m[parts[1]] = 'text:' + inp.value; reset(); live();
+      });
+    });
+    $('apiSkip').addEventListener('change', function () { a.skipPrevious = this.checked; reset(); });
+    $('apiName').addEventListener('input', function () { a.name = this.value; });
+    bindSchedule('as', a.sched, reset, function () { return [a.sched.h1, a.sched.h2]; });
+    $('apiCheck').addEventListener('click', function () { apiPreview().catch(function () {}); });
+    $('apiStart').addEventListener('click', apiStart);
+    live();
+  }
+
+  /** Same as the server: fills {{n}} / {{name}} with the chosen field or fixed text (no line breaks inside a value). */
+  function renderTplText(text, map, fields) {
+    return String(text || '').replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, function (m, k) {
+      var spec = map[k]; if (!spec) return m;
+      var v = String(spec).indexOf('text:') === 0 ? String(spec).slice(5) : String(fields[spec] || '');
+      return v.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim() || '-';
+    });
+  }
+
+  function apiParams() {
+    var a = apiState(), t = apiTemplate(), sc = a.sched;
+    return { shopId: S.shopId, template: t.name, language: t.language, mapping: a.mapping, headerMapping: a.headerMapping, skipPrevious: a.skipPrevious,
+      name: a.name, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2),
+      startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours };
+  }
+
+  function apiPreview() {
+    var a = apiState(), prob = scheduleProblem(a.sched, { limits: true });
+    if (prob) { showBanner('error', prob); return Promise.reject(prob); }
+    return withBusy('Checking…', call('getWhatsAppApiPreview', apiParams())).then(function (r) {
+      a.review = r;
+      var R = r.rules;
+      $('apiReview').innerHTML = '<div class="notice ' + (r.willSend ? 'ok' : 'warn') + '" style="margin-top:12px"><b>' + plural(r.willSend, 'person') + ' will get it</b>' +
+        (r.willSkip ? ', ' + r.willSkip + ' skipped' : '') + '. From ' + esc(r.from) + ', ' + (R.randomExtra ? R.delayMinutes + '–' + Math.round(R.delayMinutes * 1.4) : 'exactly ' + R.delayMinutes) +
+        ' minutes apart, at most ' + R.dailyCap + ' per day' + (R.startHour === 0 && R.endHour === 24 ? ', day and night' : ', ' + R.startHour + ':00–' + R.endHour + ':00') +
+        (r.waitsForHoursLabel ? '. The first one goes out at ' + esc(r.waitsForHoursLabel) : '') + (r.estimatedDays > 1 ? '. About ' + r.estimatedDays + ' days in total' : '') + '.' +
+        (r.skipReasons.length ? '<details class="small"><summary>Why people are skipped</summary><ul>' + r.skipReasons.map(function (x) { return '<li>' + esc(x.reason) + ': <b>' + x.count + '</b></li>'; }).join('') + '</ul></details>' : '') + '</div>';
+      return r;
+    });
+  }
+
+  function apiStart() {
+    apiPreview().then(function (r) {
+      if (!r.willSend) return;
+      if (!confirm('Send this WhatsApp template to ' + plural(r.willSend, 'person') + ' through the WhatsApp Business API?\n\nMeta charges your business for each message. You can pause or stop it any time on the Progress tab.')) return;
+      withBusy('Starting…', call('startWhatsAppApiCampaign', apiParams())).then(function (camp) {
+        apiState().review = null;
+        return reloadShop().then(function () {
+          showBanner('success', 'Started. Messages go out automatically from Meta — you can close this page and turn off the laptop. Follow it here.', true);
+          S.view = 'progress'; S.progress = { campaignId: camp.campaign_id, detail: null, filter: 'all' }; renderShop();
+        });
+      });
+    }, function () {});
   }
 
   /* =================================================================== */
@@ -1331,27 +1602,39 @@
     var st = S.settings;
     var connected = st.accounts.filter(function (a) { return a.status === 'connected'; });
     var html = '<button class="link" id="setBack">← All shops</button><h1>Settings</h1>' +
-      '<p class="muted">Only you (the owner) can see this page.</p>';
+      '<div class="row" style="margin-bottom:10px"><span class="muted">Workspace:</span> <b id="wsTitle">' + esc(st.workspace.name) + '</b>' +
+      '<button class="link" id="wsRename">Rename</button><span class="spacer"></span><span class="muted small">Only you (the owner) can see this page.</span></div>';
     html += '<div id="engineBox">' + engineNotice() + '</div>';
 
-    // 1. Google sign-in client
-    html += '<div class="card"><h2>1. Google sign-in (one time)</h2>' +
-      '<p class="muted">Lets each Gmail account give this app permission to send email. Create it in Google Cloud (see the guide), then paste it here.</p>' +
-      '<label class="field"><span>Authorized redirect URI — copy this into Google Cloud</span>' +
-      '<div class="row"><input type="text" id="redir" readonly value="' + esc(st.redirectUri) + '"><button class="btn small" id="copyRedir">Copy</button></div></label>' +
-      
-      '<div class="grid2"><label class="field"><span>Client ID</span><input type="text" id="cid" value="' + esc(st.clientId) + '" placeholder="1234…apps.googleusercontent.com"></label>' +
-      '<label class="field"><span>Client secret</span><input type="text" id="csec" autocomplete="off" placeholder="' + (st.clientSecretSaved ? 'Saved — paste a new one only to replace it' : 'Paste the client secret') + '"></label></div>' +
-      '<div class="row"><button class="btn primary" id="saveClient">Save</button>' +
-      (st.clientId && st.clientSecretSaved ? badge('ok', '✓ Saved') : badge('warn', 'Not set yet')) + '</div>' +
-      '<p class="muted small" style="margin-top:8px">The secret is stored privately on the server for your account only. It is never shown again or written to the Sheet.</p></div>';
+    // Share the app
+    if (st.appUrl) {
+      html += '<div class="card"><h2>Share the app</h2><p class="muted">Anyone with this link can open the app with their Google account. ' +
+        'They get their <b>own</b> empty workspace — they cannot see yours unless you add them under People below.</p>' +
+        '<div class="row"><input type="text" id="appUrl" readonly value="' + esc(st.appUrl) + '"><button class="btn small" id="copyApp">Copy</button></div></div>';
+    }
 
-    // 2. Gmail accounts
-    html += '<div class="card"><div class="row"><h2 style="margin:0">2. Gmail accounts</h2><span class="spacer"></span>' +
+    // Google sign-in client (administrator only)
+    if (st.isAdmin) {
+      html += '<div class="card"><h2>Google sign-in (app administrator, one time)</h2>' +
+        '<p class="muted">Lets each Gmail account give this app permission to send email — for every workspace. Create it in Google Cloud (see the guide), then paste it here.</p>' +
+        '<label class="field"><span>Authorized redirect URI — copy this into Google Cloud</span>' +
+        '<div class="row"><input type="text" id="redir" readonly value="' + esc(st.redirectUri) + '"><button class="btn small" id="copyRedir">Copy</button></div></label>' +
+        '<div class="grid2"><label class="field"><span>Client ID</span><input type="text" id="cid" value="' + esc(st.clientId) + '" placeholder="1234…apps.googleusercontent.com"></label>' +
+        '<label class="field"><span>Client secret</span><input type="text" id="csec" autocomplete="off" placeholder="' + (st.clientSecretSaved ? 'Saved — paste a new one only to replace it' : 'Paste the client secret') + '"></label></div>' +
+        '<div class="row"><button class="btn primary" id="saveClient">Save</button>' +
+        (st.clientReady ? badge('ok', '✓ Saved') : badge('warn', 'Not set yet')) + '</div>' +
+        '<p class="muted small" style="margin-top:8px">The secret is kept on the server only. It is never shown again, never sent to any page and never written to a Sheet. ' +
+        'While the app is not verified by Google, at most 100 Google accounts can ever use it, and everyone sees a “Google hasn’t verified this app” warning first.</p></div>';
+    } else if (!st.clientReady) {
+      html += '<div class="notice warn"><b>Gmail sending is not available yet.</b> The app administrator (' + esc(st.admin) + ') still has to finish the Google sign-in setup.</div>';
+    }
+
+    // Gmail accounts
+    html += '<div class="card"><div class="row"><h2 style="margin:0">Gmail accounts</h2><span class="spacer"></span>' +
       '<button class="btn small" id="refreshSet">↻ Refresh</button>' +
-      '<button class="btn primary" id="connectNew"' + (st.clientId && st.clientSecretSaved ? '' : ' disabled') + '>+ Connect a Gmail account</button></div>' +
+      '<button class="btn primary" id="connectNew"' + (st.clientReady ? '' : ' disabled') + '>+ Connect a Gmail account</button></div>' +
       '<p class="muted" style="margin-top:8px">A Google page opens in a new tab. Sign in as the shop\'s Gmail, tick “Send email on your behalf” and click Allow. ' +
-      'The app can only send email; it cannot read anyone\'s inbox.</p>';
+      'The app can only send email; it cannot read anyone\'s inbox. You can connect as many Gmail accounts as you need.</p>';
     if (!st.accounts.length) html += '<p class="muted">No Gmail accounts connected yet.</p>';
     else {
       html += '<div class="table-wrap"><table><tr><th>Gmail account</th><th>Status</th><th>Used by</th><th>Last test</th><th></th></tr>';
@@ -1370,11 +1653,12 @@
       '<div class="row"><input type="text" id="pasteCode" placeholder="Paste the code from the Google tab"><button class="btn small" id="pasteGo">Finish connecting</button></div></label></div>';
     html += '</div>';
 
-    // 3. Shops
-    html += '<div class="card"><h2>3. Which Gmail sends for each shop</h2>';
-    if (!st.shops.length) html += '<p class="muted">No shops yet. Add rows in the Shops tab of the <a href="' + esc(st.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a>.</p>';
+    // Shops
+    html += '<div class="card"><div class="row"><h2 style="margin:0">Shops</h2><span class="spacer"></span><button class="btn primary small" id="shopAdd">+ Add a shop</button></div>' +
+      '<div id="shopForm"></div>';
+    if (!st.shops.length) html += '<p class="muted">No shops yet. Click “Add a shop”.</p>';
     else {
-      html += '<div class="table-wrap"><table><tr><th>Shop</th><th>Sends from</th><th>Status</th></tr>';
+      html += '<div class="table-wrap" style="margin-top:10px"><table><tr><th>Shop</th><th>Sends emails from</th><th>Status</th><th></th></tr>';
       st.shops.forEach(function (s) {
         var options = '<option value="">— choose a connected Gmail —</option>' + connected.map(function (a) {
           return '<option value="' + esc(a.email) + '"' + (a.email === s.sender_email ? ' selected' : '') + '>' + esc(a.email) + '</option>';
@@ -1382,20 +1666,38 @@
         if (s.sender_email && !connected.some(function (a) { return a.email === s.sender_email; })) {
           options += '<option value="' + esc(s.sender_email) + '" selected disabled>' + esc(s.sender_email) + ' (not connected)</option>';
         }
-        html += '<tr><td>' + esc(s.shop_name || s.shop_id) + (s.active ? '' : ' <span class="muted small">(inactive)</span>') + '</td>' +
+        html += '<tr' + (s.active ? '' : ' class="muted"') + '><td><b>' + esc(s.shop_name || s.shop_id) + '</b>' + (s.active ? '' : ' <span class="small">(hidden)</span>') +
+          '<div class="muted small">' + esc((s.sender_name ? 'Shown as “' + s.sender_name + '”' : '') + (s.reply_to ? ' · replies to ' + s.reply_to : '')) + '</div></td>' +
           '<td><select data-shopsender="' + esc(s.shop_id) + '">' + options + '</select></td>' +
-          '<td>' + (s.senderOk ? badge('ok', '✓ Ready') : '<span class="small" style="color:var(--bad)">' + esc(s.senderProblem) + '</span>') + '</td></tr>';
+          '<td>' + (!s.active ? '—' : s.senderOk ? badge('ok', '✓ Ready') : '<span class="small" style="color:var(--bad)">' + esc(s.senderProblem) + '</span>') + '</td>' +
+          '<td class="row"><button class="btn small" data-shopedit="' + esc(s.shop_id) + '">Edit</button>' +
+          '<button class="btn small" data-shophide="' + esc(s.shop_id) + '">' + (s.active ? 'Hide' : 'Show again') + '</button></td></tr>';
       });
-      html += '</table></div><p class="muted small" style="margin-top:8px">Saved as soon as you choose. Only the email address is saved in the Sheet.</p>';
+      html += '</table></div><p class="muted small" style="margin-top:8px">The sending Gmail is saved as soon as you choose it. A hidden shop keeps its people and history.</p>';
     }
     html += '</div>';
 
-    // 5. Safe sending (shown after section 4 below)
+    // People
+    html += '<div class="card"><h2>People who can use this workspace</h2>' +
+      '<p class="muted">For example family who help you. They open the same app link, signed in with their Google account, and can upload Excel files, send emails and WhatsApp messages and follow the progress. They cannot change these settings.</p>';
+    html += st.members.length
+      ? '<div class="table-wrap"><table>' + st.members.map(function (m) { return '<tr><td>' + esc(m) + '</td><td style="text-align:right"><button class="btn small danger" data-mremove="' + esc(m) + '">Remove</button></td></tr>'; }).join('') + '</table></div>'
+      : '<p class="muted">Only you so far.</p>';
+    html += '<div class="row" style="margin-top:10px"><input type="email" id="mEmail" placeholder="their Gmail address" style="max-width:320px"><button class="btn primary small" id="mAdd">Add</button></div>' +
+      '<p class="muted small">They get Editor access to your workspace’s Google Sheet (that is how Google lets them use it).</p></div>';
+
+    // WhatsApp Business API
+    html += waApiSettingsHtml(st.waApi);
+
+    // Sender engine + safe sending
     var R = st.sendingRules;
     var hourOpts = function (sel, from, to) {
       var o = ''; for (var h = from; h <= to; h++) o += '<option value="' + h + '"' + (h === sel ? ' selected' : '') + '>' + h + ':00</option>'; return o;
     };
-    var safeHtml = '<div class="card"><h2>5. Safe sending (protects your Gmail accounts)</h2>' +
+    html += '<div class="card"><h2>Automatic sender</h2><p>' +
+      (S.boot.engine.lastRun ? 'Last ran ' + esc(fmt(S.boot.engine.lastRun)) + '.' : 'Has not run yet — it switches on by itself when you connect a Gmail account or the WhatsApp Business API.') +
+      ' It wakes up every minute, as you, and sends what is due.</p><button class="btn" id="restartEngine">Restart sender</button></div>';
+    html += '<div class="card"><h2>Safe sending (protects your Gmail accounts)</h2>' +
       '<p class="muted">Gmail watches how many emails an account sends and how people react. Sending a few at a time, at normal hours, keeps accounts safe and out of spam.</p>' +
       '<div class="grid2"><label class="field"><span>Most emails per Gmail account per day</span>' +
       '<input type="text" inputmode="numeric" id="ruleCap" value="' + R.dailyCap + '"><span class="muted small" style="font-weight:400">Recommended: 20–40 for a new or quiet account, up to 80 for an older busy account.</span></label>' +
@@ -1405,58 +1707,153 @@
       (st.sentToday && st.sentToday.length ? '<p class="small">Sent today: ' + st.sentToday.map(function (x) { return esc(x.email) + ' <b>' + x.n + '</b>/' + R.dailyCap; }).join(' · ') + '</p>' : '') +
       '<button class="btn primary" id="saveRules">Save</button></div>';
 
-    // 4. Sender engine
-    html += '<div class="card"><h2>4. Automatic sender</h2><p>' +
-      (S.boot.engine.lastRun ? 'Last ran ' + esc(fmt(S.boot.engine.lastRun)) + '.' : 'Has not run yet.') +
-      ' It wakes up every minute and sends emails that are due.</p><button class="btn" id="restartEngine">Restart sender</button></div>';
-    html += safeHtml;
-
     $('app').innerHTML = html;
-    $('saveRules').addEventListener('click', function () {
+    bindSettings(st);
+  }
+
+  function bindSettings(st) {
+    var on = function (id, fn) { if ($(id)) $(id).addEventListener('click', fn); };
+    var each = function (attr, fn) { Array.prototype.forEach.call(document.querySelectorAll('[' + attr + ']'), function (b) { b.addEventListener('click', function () { fn(b.getAttribute(attr), b); }); }); };
+    on('saveRules', function () {
       withBusy('Saving…', call('saveSendingRules', { dailyCap: $('ruleCap').value, startHour: $('ruleStart').value, endHour: $('ruleEnd').value }))
         .then(function (r) { S.boot.sendingRules = r; showBanner('success', 'Saved. At most ' + r.dailyCap + ' emails per Gmail per day, between ' + r.startHour + ':00 and ' + r.endHour + ':00.'); renderSettings(); });
     });
-
-    $('setBack').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(function (b) { S.boot = b; renderHome(); }); });
-    $('copyRedir').addEventListener('click', function () { var i = $('redir'); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied.'); });
-    $('saveClient').addEventListener('click', function () {
+    on('setBack', function () { hideBanner(); call('getBootstrap').then(useBoot); });
+    on('wsRename', function () {
+      var n = prompt('New name for this workspace:', st.workspace.name);
+      if (!n || !n.trim()) return;
+      withBusy('Saving…', call('renameWorkspace', n)).then(function () { return call('getBootstrap'); }).then(function (b) { S.boot = b; drawWho(); renderSettings(); });
+    });
+    var copy = function (id) { var i = $(id); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied.'); };
+    on('copyApp', function () { copy('appUrl'); });
+    on('copyRedir', function () { copy('redir'); });
+    on('saveClient', function () {
       withBusy('Saving…', call('saveOAuthClient', $('cid').value, $('csec').value)).then(function () {
         showBanner('success', 'Google sign-in saved. Now click “Connect a Gmail account”.'); renderSettings();
       });
     });
-    $('refreshSet').addEventListener('click', renderSettings);
-    $('pasteGo').addEventListener('click', pasteConnectionCode);
+    on('refreshSet', renderSettings);
+    on('pasteGo', pasteConnectionCode);
     if (pendingConnect) $('pasteBox').classList.remove('hidden');
-    $('connectNew').addEventListener('click', function () { connectAccount(''); });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-recon]'), function (b) {
-      b.addEventListener('click', function () { connectAccount(b.getAttribute('data-recon')); });
+    on('connectNew', function () { connectAccount(''); });
+    each('data-recon', function (em) { connectAccount(em); });
+    each('data-test', function (em) {
+      withBusy('Sending a test email…', call('testGmailAccount', em)).then(function (r) { showBanner('success', r.message); renderSettings(); });
     });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-test]'), function (b) {
-      b.addEventListener('click', function () {
-        withBusy('Sending a test email…', call('testGmailAccount', b.getAttribute('data-test'))).then(function (r) {
-          showBanner('success', r.message); renderSettings();
-        });
-      });
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-disc]'), function (b) {
-      b.addEventListener('click', function () {
-        var em = b.getAttribute('data-disc');
-        if (!confirm('Disconnect ' + em + '?\n\nThe app will stop sending from it and any running send using it will pause. You can reconnect later.')) return;
-        withBusy('Disconnecting…', call('disconnectGmailAccount', em)).then(function (r) {
-          showBanner('success', 'Disconnected ' + em + (r.paused ? '. ' + plural(r.paused, 'running send') + ' paused.' : '.')); renderSettings();
-        });
+    each('data-disc', function (em) {
+      if (!confirm('Disconnect ' + em + '?\n\nThe app will stop sending from it and any running send using it will pause. You can reconnect later.')) return;
+      withBusy('Disconnecting…', call('disconnectGmailAccount', em)).then(function (r) {
+        showBanner('success', 'Disconnected ' + em + (r.paused ? '. ' + plural(r.paused, 'running send') + ' paused.' : '.')); renderSettings();
       });
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-shopsender]'), function (sel) {
       sel.addEventListener('change', function () {
-        withBusy('Saving…', call('assignShopSender', sel.getAttribute('data-shopsender'), sel.value)).then(function () {
-          showBanner('success', 'Saved.'); renderSettings();
-        });
+        withBusy('Saving…', call('assignShopSender', sel.getAttribute('data-shopsender'), sel.value)).then(function () { showBanner('success', 'Saved.'); renderSettings(); });
       });
     });
-    $('restartEngine').addEventListener('click', function () {
+    on('shopAdd', function () { shopForm(null); });
+    each('data-shopedit', function (id) { shopForm(st.shops.filter(function (s) { return s.shop_id === id; })[0]); });
+    each('data-shophide', function (id) {
+      var s = st.shops.filter(function (x) { return x.shop_id === id; })[0];
+      withBusy('Saving…', call('saveShop', { shop_id: s.shop_id, shop_name: s.shop_name, sender_name: s.sender_name, reply_to: s.reply_to, country_code: s.country_code, active: !s.active }))
+        .then(function () { showBanner('success', s.active ? 'Hidden. Its people and history are kept.' : 'Shown again.'); renderSettings(); });
+    });
+    on('mAdd', function () {
+      var em = $('mEmail').value.trim();
+      if (!em) { showBanner('error', 'Write their Gmail address.'); return; }
+      withBusy('Adding…', call('addMember', em)).then(function () {
+        showBanner('success', 'Added ' + em + '. Send them the app link: they open it with that Google account and see this workspace.', true); renderSettings();
+      });
+    });
+    each('data-mremove', function (em) {
+      if (!confirm('Remove ' + em + '? They will no longer be able to open this workspace.')) return;
+      withBusy('Removing…', call('removeMember', em)).then(function () { showBanner('success', 'Removed ' + em + '.'); renderSettings(); });
+    });
+    bindWaApiSettings(st.waApi);
+    on('restartEngine', function () {
       withBusy('Restarting…', call('restartEngine')).then(function (e) { S.boot.engine = e; showBanner('success', 'The automatic sender is running.'); renderSettings(); });
     });
+  }
+
+  function shopForm(s) {
+    var box = $('shopForm'); if (!box) return;
+    s = s || { shop_id: '', shop_name: '', sender_name: '', reply_to: '', country_code: '971', active: true };
+    box.innerHTML = '<div class="sched" style="margin-top:12px"><b>' + (s.shop_id ? 'Edit ' + esc(s.shop_name) : 'New shop') + '</b>' +
+      '<div class="grid2" style="margin-top:8px"><label class="field"><span>Shop name</span><input type="text" id="sfName" maxlength="80" value="' + esc(s.shop_name) + '"></label>' +
+      '<label class="field"><span>Name people see on emails (optional)</span><input type="text" id="sfSender" maxlength="80" value="' + esc(s.sender_name) + '" placeholder="e.g. Adnan — Al Barsha Shop"></label>' +
+      '<label class="field"><span>Replies go to (optional)</span><input type="email" id="sfReply" value="' + esc(s.reply_to) + '" placeholder="leave empty = the sending Gmail"></label>' +
+      '<label class="field"><span>Country code for phone numbers</span><input type="text" id="sfCc" inputmode="numeric" maxlength="5" value="' + esc(s.country_code) + '"><span class="muted small" style="font-weight:400">971 = UAE. Numbers like 050… become +971 50…</span></label></div>' +
+      '<div class="row"><button class="btn primary" id="sfSave">Save</button><button class="btn" id="sfCancel">Cancel</button></div></div>';
+    $('sfName').focus();
+    $('sfCancel').addEventListener('click', function () { box.innerHTML = ''; });
+    $('sfSave').addEventListener('click', function () {
+      withBusy('Saving…', call('saveShop', { shop_id: s.shop_id, shop_name: $('sfName').value, sender_name: $('sfSender').value, reply_to: $('sfReply').value,
+        country_code: $('sfCc').value, active: s.active !== false })).then(function (r) {
+        showBanner('success', (s.shop_id ? 'Saved ' : 'Added ') + r.shop_name + '.' + (s.shop_id ? '' : ' Now choose which Gmail sends for it.')); renderSettings();
+      });
+    });
+  }
+
+  /* ---------- WhatsApp Business API: connection (Settings, owner) ---------- */
+  function waApiSettingsHtml(api) {
+    api = api || { configured: false };
+    var stateBadge = !api.configured ? badge('skipped', 'Not connected') : api.status === 'connected' ? badge('ok', '✓ Connected') :
+      api.status === 'needs_reconnect' ? badge('bad', 'Needs a new token') : badge('skipped', 'Disconnected');
+    var html = '<div class="card"><div class="row"><h2 style="margin:0">WhatsApp Business API (optional, paid)</h2>' + stateBadge + '</div>' +
+      '<p class="muted" style="margin-top:8px">Sends WhatsApp messages from Meta’s servers, so it works even when every laptop is off. ' +
+      'Meta charges your business for each message (marketing messages cost more than service/utility ones; see Meta’s price list). ' +
+      'Messages must use templates that Meta approved first. Without it, you can still send for free from a Mac (WhatsApp tab).</p>';
+    if (api.configured && api.status === 'connected') {
+      html += '<p><b>' + esc(api.verified_name || '') + '</b> ' + esc(api.display_phone || '') + (api.quality ? ' · quality: ' + esc(api.quality) : '') +
+        ' · templates loaded ' + esc(fmt(api.templates_at)) + '</p>';
+    } else if (api.configured && api.last_error) {
+      html += '<div class="notice warn small">' + esc(api.last_error) + '</div>';
+    }
+    html += '<div class="grid2"><label class="field"><span>Phone number ID</span><input type="text" id="waPnid" inputmode="numeric" value="' + esc(api.phone_number_id || '') + '"></label>' +
+      '<label class="field"><span>WhatsApp Business Account ID</span><input type="text" id="waWaba" inputmode="numeric" value="' + esc(api.waba_id || '') + '"></label></div>' +
+      '<label class="field"><span>Access token (permanent, from a Meta system user)</span><input type="password" id="waTok" autocomplete="off" placeholder="' +
+      (api.tokenSaved ? 'Saved — paste a new one only to replace it' : 'Paste the access token') + '"></label>' +
+      '<div class="row"><button class="btn primary" id="waSave">Save and test</button>' +
+      (api.configured && api.status === 'connected' ? '<button class="btn" id="waReload">↻ Reload templates</button><button class="btn danger" id="waDisc">Disconnect</button>' : '') + '</div>' +
+      '<p class="muted small" style="margin-top:8px">The token is kept privately on the server for your account only. It is never shown again or written to the Sheet.</p>' +
+      '<div id="waTplList"></div>' +
+      '<details style="margin-top:10px"><summary><b>How to get these (one time, about 20 minutes)</b></summary><ol class="small" style="line-height:1.6">' +
+      '<li>Open <a href="https://business.facebook.com" target="_blank" rel="noopener">business.facebook.com</a> and create (or choose) your business.</li>' +
+      '<li>Open <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a> → <b>Create app</b> → use case <b>Connect with customers through WhatsApp</b> → choose your business → create.</li>' +
+      '<li>In the app: <b>WhatsApp → API Setup</b>. Click <b>Add phone number</b> and verify it with the SMS code. Use a number that is <b>not</b> in the WhatsApp app on a phone (or remove it from the app first). Then copy the <b>Phone number ID</b> and the <b>WhatsApp Business Account ID</b> shown there into the boxes above.</li>' +
+      '<li>Add a payment method: <a href="https://business.facebook.com/wa/manage/" target="_blank" rel="noopener">WhatsApp Manager</a> → <b>Overview / Billing</b> → <b>Add payment method</b>.</li>' +
+      '<li>Make a permanent token: <b>business.facebook.com → Settings → Users → System users → Add</b> (role Admin). Click <b>Assign assets</b>: your app and your WhatsApp account, both with full control. ' +
+      'Then <b>Generate new token</b> → choose your app → expiry <b>Never</b> → tick <b>whatsapp_business_messaging</b> and <b>whatsapp_business_management</b> → copy it into “Access token”. Click <b>Save and test</b>.</li>' +
+      '<li>Make a message: WhatsApp Manager → <b>Message templates → Create template</b> (category Marketing or Utility). Write <b>{{1}}</b> where the person’s name goes and <b>{{2}}</b> for the shop name. ' +
+      'Submit and wait for <b>Approved</b> (minutes to a day). Then click <b>Reload templates</b> here.</li>' +
+      '</ol><p class="small muted">New business accounts can message about 250 people a day at first; Meta raises the limit when people respond well (and after business verification).</p></details></div>';
+    return html;
+  }
+
+  function bindWaApiSettings(api) {
+    if (!$('waSave')) return;
+    $('waSave').addEventListener('click', function () {
+      withBusy('Checking with Meta…', call('saveWhatsAppApi', { phoneNumberId: $('waPnid').value, wabaId: $('waWaba').value, token: $('waTok').value }))
+        .then(function (r) { showBanner('success', '✓ Connected: ' + (r.verified_name || '') + ' ' + (r.display_phone || '') + '. Choose WhatsApp Business API on a shop’s WhatsApp tab to send.', true); renderSettings(); });
+    });
+    if ($('waReload')) $('waReload').addEventListener('click', function () {
+      withBusy('Loading templates from Meta…', call('refreshWhatsAppTemplates')).then(function (r) { showBanner('success', 'Templates reloaded.'); drawTplList(r.templates); });
+    });
+    if ($('waDisc')) $('waDisc').addEventListener('click', function () {
+      if (!confirm('Disconnect the WhatsApp Business API?\n\nThe token is deleted from the app and running WhatsApp API sends pause.')) return;
+      withBusy('Disconnecting…', call('disconnectWhatsAppApi')).then(function (r) { showBanner('success', 'Disconnected' + (r.paused ? '. ' + plural(r.paused, 'running send') + ' paused.' : '.')); renderSettings(); });
+    });
+    if (api && api.configured && api.status === 'connected') call('getWhatsAppApiTemplates').then(function (r) { drawTplList(r.templates); }, function () {});
+  }
+
+  function drawTplList(list) {
+    var box = $('waTplList'); if (!box) return;
+    var ok = list.filter(function (t) { return t.status === 'APPROVED' && t.ok; });
+    var other = list.filter(function (t) { return !(t.status === 'APPROVED' && t.ok); });
+    box.innerHTML = '<p class="small" style="margin-top:10px"><b>Templates you can use (' + ok.length + '):</b> ' + (ok.length ? ok.map(function (t) { return esc(t.name) + ' <span class="muted">(' + esc(t.language) + ')</span>'; }).join(', ') : '<span class="muted">none approved yet</span>') + '</p>' +
+      (other.length ? '<details class="small"><summary>' + other.length + ' other template' + (other.length === 1 ? '' : 's') + '</summary><ul>' + other.map(function (t) {
+        return '<li>' + esc(t.name) + ' (' + esc(t.language) + '): ' + esc(t.status !== 'APPROVED' ? 'status ' + t.status.toLowerCase().replace(/_/g, ' ') : t.why) + '</li>';
+      }).join('') + '</ul></details>' : '');
   }
 
   // Result of "Connect": the callback page sends {code, state} back to this tab (postMessage),

@@ -80,6 +80,11 @@ http.createServer((req, res) => {
   if (req.url === '/tick') { // simulate N minutes of the owner's trigger
     E.runTrigger(Number(process.env.TICK || 6)); res.end(JSON.stringify({ sent: E.sent.length })); return;
   }
+  if (req.url === '/meta') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.meta.sent, sheets: Object.keys(E.sheetsById) })); return; }
+  if (req.url.startsWith('/tab?')) { // any workspace's tab: /tab?owner=sara@gmail.com&name=Send%20Log
+    const q = new URL('http://x' + req.url).searchParams;
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(E.tab(q.get('name'), E.sheetOf(q.get('owner'))))); return;
+  }
   if (req.url === '/state') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.sent, log: E.tab('Send Log'), contacts: E.tab('Contacts') })); return; }
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.end(renderIndex());

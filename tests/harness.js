@@ -42,6 +42,39 @@ function makeEnv(srcDir) {
     expireAll(email) { Object.keys(this.refresh).forEach(t => { if (this.refresh[t] === email) delete this.refresh[t]; }); },
     expireAccessTokens() { Object.keys(this.access).forEach(t => { this.access[t].exp = 0; }); }
   };
+  /* ---------- fake Meta WhatsApp Cloud API (Graph v25.0) ---------- */
+  const meta = {
+    token: 'EAAGtest_token_abcdefghijklmnopqrstuvwxyz0123',
+    pnid: '1112223334445', waba: '5556667778889',
+    display: '+971 50 000 0000', name: 'Heba Shops',
+    templates: [
+      { name: 'shop_followup', language: 'en_US', status: 'APPROVED', category: 'MARKETING',
+        components: [{ type: 'BODY', text: 'Hello {{1}}, this is about {{2}}. Are you still interested?' }, { type: 'BUTTONS', buttons: [{ type: 'QUICK_REPLY', text: 'Yes' }] }] },
+      { name: 'named_hello', language: 'ar', status: 'APPROVED', category: 'UTILITY', parameter_format: 'NAMED',
+        components: [{ type: 'HEADER', format: 'TEXT', text: 'News from {{shop}}' }, { type: 'BODY', text: 'Hi {{first_name}}!' }] },
+      { name: 'with_image', language: 'en_US', status: 'APPROVED', category: 'MARKETING',
+        components: [{ type: 'HEADER', format: 'IMAGE' }, { type: 'BODY', text: 'Look {{1}}' }] },
+      { name: 'waiting_one', language: 'en_US', status: 'PENDING', category: 'MARKETING', components: [{ type: 'BODY', text: 'x' }] }
+    ],
+    sent: [], nextErrors: [], calls: 0
+  };
+  function graph(url, opts) {
+    meta.calls++;
+    const auth = ((opts.headers || {}).Authorization || '').replace('Bearer ', '');
+    if (auth !== meta.token) return resp(401, { error: { message: 'Error validating access token: Session has expired', type: 'OAuthException', code: 190 } });
+    const rest = url.slice('https://graph.facebook.com/v25.0/'.length);
+    const [pathPart] = rest.split('?');
+    if ((opts.method || 'get') === 'get' && pathPart === meta.pnid) return resp(200, { display_phone_number: meta.display, verified_name: meta.name, quality_rating: 'GREEN', id: meta.pnid });
+    if ((opts.method || 'get') === 'get' && pathPart === meta.waba + '/message_templates') return resp(200, { data: meta.templates, paging: {} });
+    if (opts.method === 'post' && pathPart === meta.pnid + '/messages') {
+      if (meta.nextErrors.length) { const e = meta.nextErrors.shift(); return resp(e.http || 400, { error: { message: e.message || 'err', code: e.code } }); }
+      const body = JSON.parse(opts.payload);
+      meta.sent.push({ to: body.to, body, at: new RealDate(clock).toISOString(), as: users.effective });
+      return resp(200, { messaging_product: 'whatsapp', contacts: [{ input: body.to, wa_id: body.to }], messages: [{ id: 'wamid.' + meta.sent.length }] });
+    }
+    return resp(400, { error: { message: 'Unsupported get request. Object with ID does not exist', code: 100 } });
+  }
+
   function b64url(s) { return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
   function resp(code, obj) { const t = JSON.stringify(obj); return { getResponseCode: () => code, getContentText: () => t }; }
   function newAccess(email) { const t = 'at_' + (++google.n); google.access[t] = { email, exp: clock + 3600e3 }; return t; }
@@ -49,6 +82,7 @@ function makeEnv(srcDir) {
   const UrlFetchApp = {
     fetch(url, opts = {}) {
       fetchLog.push({ url, opts, as: users.effective });
+      if (url.indexOf('https://graph.facebook.com/v25.0/') === 0) return graph(url, opts);
       const p = opts.payload || {};
       if (url === 'https://oauth2.googleapis.com/token') {
         if (p.client_id !== google.client.id || p.client_secret !== google.client.secret) return resp(401, { error: 'invalid_client' });
@@ -118,7 +152,7 @@ function makeEnv(srcDir) {
         let val = v;
         if (typeof val === 'string' && val.startsWith('=')) throw new Error('FORMULA WRITTEN: ' + val);
         if (typeof val === 'string' && val.startsWith("'")) val = val.slice(1);
-        if (typeof val === 'string' && /rt_|at_|GOCSPX/.test(val)) throw new Error('SECRET WRITTEN TO SHEET: ' + val);
+        if (typeof val === 'string' && /\b(rt|at)_\d|GOCSPX|EAAGtest/.test(val)) throw new Error('SECRET WRITTEN TO SHEET: ' + val);
         g[this.r - 1 + i][this.c - 1 + j] = val;
       }));
       return this;
@@ -135,14 +169,20 @@ function makeEnv(srcDir) {
     insertRowsAfter(after, n) { this.maxRows += n; }
     setFrozenRows() {}
   }
-  let ss = null;
+  let ss = null;            // the first Sheet made (the administrator's), shared with Dad like before
+  const sheetsById = {};
   function makeSpreadsheet(owner) {
-    return {
+    const first = !ss;
+    const id = first ? 'SHEET123' : 'SHEET' + (Object.keys(sheetsById).length + 123);
+    const book = {
+      id, owner,
       sheets: [new Sheet('Sheet1')],
-      editors: [owner, 'dad@gmail.com'],
-      viewers: ['viewer@gmail.com'],
-      getId() { return 'SHEET123'; },
-      getUrl() { return 'https://docs.google.com/spreadsheets/d/SHEET123'; },
+      editors: first ? [owner, 'dad@gmail.com'] : [owner],
+      viewers: first ? ['viewer@gmail.com'] : [],
+      addEditor(e) { if (!/@/.test(e) || /nogoogle/.test(e)) throw new Error('Invalid email: ' + e); if (this.editors.indexOf(e) === -1) this.editors.push(e); return this; },
+      removeEditor(e) { this.editors = this.editors.filter(x => x !== e); return this; },
+      getId() { return id; },
+      getUrl() { return 'https://docs.google.com/spreadsheets/d/' + id; },
       getSheetByName(n) { return this.sheets.find(s => s.name === n) || null; },
       insertSheet(n) { const s = new Sheet(n); this.sheets.push(s); return s; },
       getSheets() { return this.sheets.slice(); },
@@ -150,20 +190,25 @@ function makeEnv(srcDir) {
       getEditors() { return this.editors.map(e => ({ getEmail: () => e })); },
       setSpreadsheetTimeZone() {}
     };
+    sheetsById[id] = book;
+    if (first) ss = book;
+    return book;
   }
 
   const store = (bucket, key) => { bucket[key] = bucket[key] || {}; const b = bucket[key]; return {
     getProperty: k => (k in b ? b[k] : null), setProperty: (k, v) => { b[k] = String(v); }, deleteProperty: k => { delete b[k]; },
-    get: k => (k in b ? b[k] : null), put: (k, v) => { b[k] = String(v); }, remove: k => { delete b[k]; } }; };
+    get: k => (k in b ? b[k] : null), put: (k, v) => { b[k] = String(v); }, remove: k => { delete b[k]; }, getKeys: () => Object.keys(b) }; };
+  const scriptCache = {};
 
   const ctx = {
     Date: FakeDate, console, JSON, Math: Object.assign(Object.create(Math), { random: () => (globalThis.__rand !== undefined ? globalThis.__rand : 0) }), Object, Array, String, Number, RegExp, Error, Promise,
     SpreadsheetApp: {
-      create: () => { ss = makeSpreadsheet(users.effective); return ss; },
+      create: () => makeSpreadsheet(users.effective),
       openById: (id) => {
-        if (!ss || id !== 'SHEET123') throw new Error('Not found');
-        if (ss.editors.indexOf(users.effective) === -1 && ss.viewers.indexOf(users.effective) === -1) throw new Error('No access');
-        return ss;
+        const book = sheetsById[id];
+        if (!book || book.trashed) throw new Error('Not found');
+        if (book.editors.indexOf(users.effective) === -1 && book.viewers.indexOf(users.effective) === -1) throw new Error('No access');
+        return book;
       },
       getActiveSpreadsheet: () => null
     },
@@ -171,7 +216,7 @@ function makeEnv(srcDir) {
       getScriptProperties: () => store({ s: scriptProps }, 's'),
       getUserProperties: () => store(userProps, users.effective)
     },
-    CacheService: { getUserCache: () => store(userCache, users.effective) },
+    CacheService: { getUserCache: () => store(userCache, users.effective), getScriptCache: () => store({ c: scriptCache }, 'c') },
     Session: {
       getEffectiveUser: () => ({ getEmail: () => users.effective }),
       getActiveUser: () => ({ getEmail: () => users.active })
@@ -192,7 +237,7 @@ function makeEnv(srcDir) {
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (t) => ({ text: t, setMimeType() { return this; }, getContent() { return t; } }) },
     ScriptApp: {
       getService: () => ({ getUrl: () => google.execUrl }),
-      getProjectTriggers: () => triggers.slice(),
+      getProjectTriggers: () => triggers.filter(t => t.owner === users.effective), // like Google: only your own triggers
       deleteTrigger: t => { triggers.splice(triggers.indexOf(t), 1); },
       newTrigger: fn => ({ timeBased: () => ({ everyMinutes: m => ({ create: () => { const t = { fn, m, owner: users.effective, getHandlerFunction: () => fn }; triggers.push(t); return t; } }) }) })
     },
@@ -203,21 +248,40 @@ function makeEnv(srcDir) {
     },
     Logger: { log: () => {} }
   };
+  const services = Object.assign({}, ctx);
+  function compile(dir) {
+    const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].filter(f => fs.existsSync(path.join(dir, f)));
+    return files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n') +
+      (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +
+        (fs.existsSync(path.join(dir, 'Workspaces.gs')) ? "const BRIDGE_URL = 'https://script.google.com/macros/s/AKfycbBRIDGE123/exec';\n" : ''));
+  }
   vm.createContext(ctx);
-  const code = ['Code.gs', 'Senders.gs', 'Sending.gs'].map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n') +
-    (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n");
+  const code = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].filter(f => fs.existsSync(path.join(srcDir, f))).map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n') +
+    (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +
+      "const BRIDGE_URL = 'https://script.google.com/macros/s/AKfycbBRIDGE123/exec';\n");
   vm.runInContext(code, ctx, { filename: 'project.js' });
+  void compile;
 
   const env = {
-    ctx, google, scriptProps, userProps, userCache, triggers, sent, fetchLog, users,
+    /** Same Google account data (Sheets, properties, triggers…), different code: like publishing an update. */
+    loadCode(dir) {
+      const c2 = Object.assign({}, services);
+      vm.createContext(c2);
+      vm.runInContext(compile(dir), c2, { filename: 'project-' + path.basename(dir) + '.js' });
+      env.ctx = c2;
+      return c2;
+    },
+    ctx, google, meta, scriptProps, userProps, userCache, scriptCache, triggers, sent, fetchLog, users, sheetsById,
     get ss() { return ss; },
+    sheetOf(email) { return Object.values(sheetsById).filter(b => b.owner === email).pop(); },
     as(email) { users.active = email; users.effective = email; },
     advance(min) { clock += min * 60000; },
     /** Helper on the Mac calling the bridge deployment (runs as the owner, nobody signed in). */
-    bridge(body) {
+    bridge(body, token) {
+      if (token) body = Object.assign({}, body, { token });
       const a = users.active, e = users.effective;
       users.effective = 'owner@gmail.com'; users.active = '';
-      try { return JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent()); }
+      try { return JSON.parse(env.ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent()); }
       finally { users.active = a; users.effective = e; }
     },
     realClock() { clock = RealDate.now(); setInterval(() => { clock = RealDate.now(); }, 200).unref(); },
@@ -227,29 +291,28 @@ function makeEnv(srcDir) {
       const a = users.active, e = users.effective;
       for (let i = 0; i < minutes; i++) {
         clock += 60000;
-        users.effective = triggers[0] ? triggers[0].owner : 'nobody';
-        users.active = users.effective;
-        ctx.processQueue();
+        triggers.slice().forEach(t => { users.effective = users.active = t.owner; env.ctx.processQueue(); });
       }
       users.active = a; users.effective = e;
     },
     /** Full browser flow: owner clicks Connect, signs in at Google as `email`, clicks Allow; Google redirects back. */
     connect(email, opts = {}) {
-      const url = new URL(ctx.startGmailConnect(opts.hint || ''));
+      const url = new URL(env.ctx.startGmailConnect(opts.hint || ''));
       const q = Object.fromEntries(url.searchParams);
       const code = opts.cancel ? null : google.consent(email, opts);
       const cbUser = opts.callbackAs || users.active;
       const a = users.active, e = users.effective; users.active = users.effective = cbUser;
       let html;
       try {
-        const email = opts.cancel ? ctx.finishGmailConnect('', q.state, 'access_denied') : ctx.finishGmailConnect(code, opts.state || q.state, '');
+        const email = opts.cancel ? env.ctx.finishGmailConnect('', q.state, 'access_denied') : env.ctx.finishGmailConnect(code, opts.state || q.state, '');
         html = 'Connected: ' + email;
       } catch (err) { html = err.message; }
       users.active = a; users.effective = e;
       return { query: q, html };
     },
-    tab(name) {
-      const s = ss.getSheetByName(name);
+    tab(name, book) {
+      const s = (book || ss).getSheetByName(name);
+      if (!s) return [];
       const [h, ...rows] = s.grid;
       return rows.filter(r => r && r.some(v => v !== '' && v !== undefined)).map(r => Object.fromEntries(h.map((k, i) => [k, r[i] === undefined ? '' : r[i]])));
     }

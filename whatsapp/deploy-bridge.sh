@@ -1,7 +1,8 @@
 #!/bin/bash
 # Publishes (or updates) the private "bridge" link that the WhatsApp Sender helper on this Mac uses to talk to the app.
 # It is a second deployment of the same Apps Script project that runs as the owner and accepts only requests with the
-# helper's secret token. Called by "Install WhatsApp Sender.command" and, when present, by Install.command.
+# helper's secret token, or the secret of a Mac paired from the app. Called by Install.command (every time) and by
+# "Install WhatsApp Sender.command". It also writes the bridge address into Bridge.config.gs for "Set up a Mac".
 # Run from the project folder (the one with .clasp.json).
 set -u
 CLASP="npx --yes @google/clasp@3"
@@ -9,17 +10,22 @@ DATA="$HOME/.shop-followups"
 mkdir -p "$DATA"
 
 # 1. Secret token (stays on this Mac) and its SHA-256 for the app.
-python3 - "$DATA/bridge.json" "src/Bridge.config.gs" <<'PY' || exit 1
+write_config() { # $1 = bridge deployment id (may be empty the very first time)
+python3 - "$DATA/bridge.json" "src/Bridge.config.gs" "${1:-}" <<'PY' || exit 1
 import json, hashlib, secrets, sys, os
-cfg_path, gs_path = sys.argv[1], sys.argv[2]
+cfg_path, gs_path, bid = sys.argv[1], sys.argv[2], sys.argv[3]
 try: cfg = json.load(open(cfg_path))
 except Exception: cfg = {}
 if not cfg.get("token"):
     cfg["token"] = secrets.token_urlsafe(32)
 json.dump(cfg, open(cfg_path, "w"), indent=1); os.chmod(cfg_path, 0o600)
 sha = hashlib.sha256(cfg["token"].encode()).hexdigest()
-open(gs_path, "w").write("/** Made by the WhatsApp Sender installer. Fingerprint of the helper's secret token (the token stays on the Mac). */\nconst BRIDGE_TOKEN_SHA256 = '%s';\n" % sha)
+url = "https://script.google.com/macros/s/%s/exec" % bid if bid else ""
+open(gs_path, "w").write("/** Made by the installer: fingerprint of this Mac's helper token (the token stays on the Mac) and the bridge address. */\n"
+  "const BRIDGE_TOKEN_SHA256 = '%s';\nconst BRIDGE_URL = '%s';\n" % (sha, url))
 PY
+}
+write_config "$(cat .bridge-deployment-id 2>/dev/null)"
 
 # 2. Push the code with the bridge settings (runs as the owner, reachable by the helper), publish, then restore.
 python3 - <<'PY' || exit 1
@@ -38,6 +44,7 @@ else
   [ -n "$BID" ] || { cp config/appsscript.json src/appsscript.json; $CLASP push --force >/dev/null; echo "$OUT"; echo "Could not create the bridge."; exit 1; }
   echo "$BID" > .bridge-deployment-id
 fi
+write_config "$BID"
 cp config/appsscript.json src/appsscript.json
 $CLASP push --force >/dev/null || { echo "Restoring the app settings failed. Run Install.command again."; exit 1; }
 
