@@ -56,6 +56,15 @@ http.createServer((req, res) => {
     return;
   }
   if (req.url.startsWith('/as/')) { E.as(decodeURIComponent(req.url.slice(4))); res.end('"ok"'); return; }
+  if (req.url.startsWith('/consent?')) { // fake Google: returns a one-time code for that account
+    const q = new URL('http://x' + req.url).searchParams;
+    res.end(JSON.stringify(E.google.consent(q.get('email')))); return;
+  }
+  if (req.url.startsWith('/pages/')) { // the GitHub Pages files (callback.html, style.css)
+    const f = path.join(process.env.PAGES || path.join(__dirname, 'pages'), path.basename(req.url.split('?')[0]));
+    res.setHeader('content-type', f.endsWith('.css') ? 'text/css' : 'text/html; charset=utf-8');
+    res.end(fs.readFileSync(f)); return;
+  }
   if (req.url.startsWith('/google?')) { // simulate the person signing in at Google and clicking Allow
     const q = new URL('http://x' + req.url).searchParams;
     const code = E.google.consent(q.get('email'));

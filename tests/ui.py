@@ -115,21 +115,49 @@ try:
         o.goto('http://127.0.0.1:8765/'); o.wait_for_selector('#openSettings')
         o.click('#openSettings'); o.wait_for_selector('#connectNew')
         check('shop1@gmail.com' in o.inner_text('main') and 'Connected' in o.inner_text('main'), 'settings lists connected account')
-        check(o.input_value('#redir').endswith('/exec'), 'redirect URI shown: ' + o.input_value('#redir'))
+        check(o.input_value('#redir') == 'https://hebadaher.github.io/sheetsender/callback.html', 'redirect URI shown: ' + o.input_value('#redir'))
         check('GOCSPX' not in o.content(), 'client secret not in the page')
+        import urllib.parse as up
         seen = []
-        o.context.route('https://accounts.google.com/**', lambda route: (seen.append(route.request.url), route.fulfill(body='google')))
+        def fake_google(route):
+            u = route.request.url
+            seen.append(u)
+            state = up.parse_qs(up.urlparse(u).query)['state'][0]
+            code = get('/consent?email=marina%40gmail.com')
+            route.fulfill(status=302, headers={'Location': 'http://127.0.0.1:8765/pages/callback.html?state=' + up.quote(state) + '&code=' + up.quote(code)})
+        o.context.route('https://accounts.google.com/**', fake_google)
         with o.expect_popup() as pop:
             o.click('#connectNew')
         popup = pop.value
-        popup.wait_for_timeout(800)
-        url = seen[0] if seen else popup.url
+        popup.wait_for_selector('#title')
+        url = seen[0] if seen else ''
         check(url.startswith('https://accounts.google.com/o/oauth2/v2/auth'), 'connect opens Google consent: ' + url[:60])
-        import urllib.parse as up
-        state = up.parse_qs(up.urlparse(url).query)['state'][0]
+        check('redirect_uri=https%3A%2F%2Fhebadaher.github.io%2Fsheetsender%2Fcallback.html' in url, 'redirect goes to the callback page')
+        check('Almost done' in popup.inner_text('#title'), 'callback page handed the result back: ' + popup.inner_text('#title'))
+        check('code=' not in popup.url, 'code removed from callback address bar')
+        o.wait_for_selector('text=Connected: marina@gmail.com', timeout=8000)
+        check(True, 'Settings finished the connection by itself')
         popup.close()
-        html = urllib.request.urlopen('http://127.0.0.1:8765/google?state=' + state + '&email=marina%40gmail.com').read().decode()
-        check('Connected: marina@gmail.com' in html, 'callback page confirms connection')
+        # fallback: paste the connection code
+        seen.clear()
+        o.unroute('https://accounts.google.com/**')
+        def fake_google2(route):
+            u = route.request.url
+            state = up.parse_qs(up.urlparse(u).query)['state'][0]
+            code = get('/consent?email=paste%40gmail.com')
+            route.fulfill(status=302, headers={'Location': 'http://127.0.0.1:8765/pages/callback.html?state=' + up.quote(state) + '&code=' + up.quote(code)})
+        o.context.route('https://accounts.google.com/**', fake_google2)
+        o.wait_for_selector('#connectNew')
+        o.context.add_init_script("if (location.pathname.endsWith('callback.html')) Object.defineProperty(window, 'opener', { get: function () { return null; } });")
+        with o.expect_popup() as pop:
+            o.click('#connectNew')
+        p2 = pop.value; p2.wait_for_selector('#code')
+        check('One more step' in p2.inner_text('#title'), 'callback without opener asks to paste: ' + p2.inner_text('#title'))
+        code_text = p2.input_value('#code')
+        p2.close()
+        o.fill('#pasteCode', code_text); o.click('#pasteGo')
+        o.wait_for_selector('text=Connected: paste@gmail.com', timeout=8000)
+        check(True, 'paste-the-code fallback works')
         o.click('#refreshSet'); o.wait_for_selector('text=marina@gmail.com')
         o.select_option('[data-shopsender="SHOP1"]', 'marina@gmail.com'); o.wait_for_selector('text=Saved.')
         o.wait_for_selector('#connectNew')

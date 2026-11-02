@@ -932,7 +932,7 @@
       '<p class="muted">Lets each Gmail account give this app permission to send email. Create it in Google Cloud (see the guide), then paste it here.</p>' +
       '<label class="field"><span>Authorized redirect URI — copy this into Google Cloud</span>' +
       '<div class="row"><input type="text" id="redir" readonly value="' + esc(st.redirectUri) + '"><button class="btn small" id="copyRedir">Copy</button></div></label>' +
-      (st.redirectLooksWrong ? '<div class="notice warn">This address should end with /exec. Open the app from its deployed link (Deploy → Manage deployments), not the test link.</div>' : '') +
+      
       '<div class="grid2"><label class="field"><span>Client ID</span><input type="text" id="cid" value="' + esc(st.clientId) + '" placeholder="1234…apps.googleusercontent.com"></label>' +
       '<label class="field"><span>Client secret</span><input type="text" id="csec" autocomplete="off" placeholder="' + (st.clientSecretSaved ? 'Saved — paste a new one only to replace it' : 'Paste the client secret') + '"></label></div>' +
       '<div class="row"><button class="btn primary" id="saveClient">Save</button>' +
@@ -959,6 +959,8 @@
       });
       html += '</table></div>';
     }
+    html += '<div id="pasteBox" class="hidden" style="margin-top:12px"><label class="field"><span>Connection code (only if this page did not finish by itself)</span>' +
+      '<div class="row"><input type="text" id="pasteCode" placeholder="Paste the code from the Google tab"><button class="btn small" id="pasteGo">Finish connecting</button></div></label></div>';
     html += '</div>';
 
     // 3. Shops
@@ -996,6 +998,8 @@
       });
     });
     $('refreshSet').addEventListener('click', renderSettings);
+    $('pasteGo').addEventListener('click', pasteConnectionCode);
+    if (pendingConnect) $('pasteBox').classList.remove('hidden');
     $('connectNew').addEventListener('click', function () { connectAccount(''); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-recon]'), function (b) {
       b.addEventListener('click', function () { connectAccount(b.getAttribute('data-recon')); });
@@ -1028,19 +1032,51 @@
     });
   }
 
+  // Result of "Connect": the callback page sends {code, state} back to this tab (postMessage),
+  // or the person pastes the connection code it shows. This tab then finishes in the owner's session.
+  var pendingConnect = null;
+  window.addEventListener('message', function (ev) {
+    var d = ev.data;
+    if (!d || d.type !== 'sf-oauth' || !pendingConnect) return;
+    finishConnect(d.code, d.state, d.error);
+  });
+
+  function finishConnect(code, state, error) {
+    if (pendingConnect && pendingConnect.state && state !== pendingConnect.state) return;
+    pendingConnect = null;
+    withBusy('Finishing the connection…', call('finishGmailConnect', code || '', state || '', error || '')).then(function (email) {
+      showBanner('success', '✓ Connected: ' + email + '. Now click “Send test” next to it.', true);
+      renderSettings();
+    });
+  }
+
   function connectAccount(hint) {
     // Open the tab right away (inside the click) so the browser does not block it, then send it to Google.
     var win = window.open('', '_blank');
     call('startGmailConnect', hint).then(function (url) {
+      var state = (url.match(/[?&]state=([^&]+)/) || [])[1];
+      pendingConnect = { state: state ? decodeURIComponent(state) : '' };
       if (win) { win.location.href = url; }
       else { showBanner('error', 'Your browser blocked the new tab. Allow pop-ups for this page and click Connect again.'); return; }
-      showBanner('success', 'Finish in the new tab: sign in' + (hint ? ' as ' + hint : ' as the shop\'s Gmail') +
-        ', tick “Send email on your behalf”, click Allow. Then come back here and click Refresh.', true);
+      showBanner('success', 'Finish in the new tab: choose' + (hint ? ' ' + hint : ' the shop\'s Gmail') +
+        ', click Advanced → Go to Shop Follow-ups, tick “Send email on your behalf”, click Continue. ' +
+        'This page then finishes by itself. If it does not, copy the connection code from that tab and paste it below.', true);
+      var box = $('pasteBox'); if (box) box.classList.remove('hidden');
     }, function (e) {
       if (win) win.close();
       showBanner('error', errText(e));
     });
   }
+
+  function pasteConnectionCode() {
+    var raw = ($('pasteCode').value || '').trim();
+    var d = null;
+    try { d = JSON.parse(atob(raw.replace(/-/g, '+').replace(/_/g, '/'))); } catch (e) { d = null; }
+    if (!d || (!d.code && !d.error) || !d.state) { showBanner('error', 'That is not a valid connection code. Copy the whole code from the Google tab and try again.'); return; }
+    pendingConnect = { state: d.state };
+    finishConnect(d.code, d.state, d.error);
+  }
+
 
   start();
 })();

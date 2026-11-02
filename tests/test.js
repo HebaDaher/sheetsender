@@ -95,7 +95,7 @@ t('client ID is validated; secret is kept only in the owner\'s private store', (
   assert(!JSON.stringify(st).includes(G.client.secret), 'secret never returned to the page');
   assert.strictEqual(st.clientSecretSaved, true);
   assert.strictEqual(st.redirectUri, G.redirect);
-  assert.strictEqual(st.redirectLooksWrong, false);
+  assert.strictEqual(st.redirectUri, 'https://hebadaher.github.io/sheetsender/callback.html');
   C.saveOAuthClient(G.client.id, ''); // blank keeps the saved secret
   assert.strictEqual(E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET, G.client.secret);
 });

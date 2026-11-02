@@ -24,7 +24,8 @@ function makeEnv(srcDir) {
   /* ---------- fake Google OAuth + Gmail ---------- */
   const google = {
     client: { id: '123456789-abcdef.apps.googleusercontent.com', secret: 'GOCSPX-test_secret_123' },
-    redirect: 'https://script.google.com/macros/s/DEPLOY123/exec',
+    redirect: 'https://hebadaher.github.io/sheetsender/callback.html',
+    execUrl: 'https://script.google.com/macros/s/DEPLOY123/exec',
     codes: {},          // code -> {email, scopes}
     refresh: {},        // refresh token -> email (valid)
     access: {},         // access token -> {email, exp}
@@ -186,7 +187,7 @@ function makeEnv(srcDir) {
     },
     UrlFetchApp,
     ScriptApp: {
-      getService: () => ({ getUrl: () => google.redirect }),
+      getService: () => ({ getUrl: () => google.execUrl }),
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: t => { triggers.splice(triggers.indexOf(t), 1); },
       newTrigger: fn => ({ timeBased: () => ({ everyMinutes: m => ({ create: () => { const t = { fn, m, owner: users.effective, getHandlerFunction: () => fn }; triggers.push(t); return t; } }) }) })
@@ -225,9 +226,13 @@ function makeEnv(srcDir) {
       const code = opts.cancel ? null : google.consent(email, opts);
       const cbUser = opts.callbackAs || users.active;
       const a = users.active, e = users.effective; users.active = users.effective = cbUser;
-      const page = ctx.doGet({ parameter: opts.cancel ? { state: q.state, error: 'access_denied' } : { state: opts.state || q.state, code } });
+      let html;
+      try {
+        const email = opts.cancel ? ctx.finishGmailConnect('', q.state, 'access_denied') : ctx.finishGmailConnect(code, opts.state || q.state, '');
+        html = 'Connected: ' + email;
+      } catch (err) { html = err.message; }
       users.active = a; users.effective = e;
-      return { query: q, html: page.html };
+      return { query: q, html };
     },
     tab(name) {
       const s = ss.getSheetByName(name);

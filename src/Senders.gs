@@ -23,6 +23,14 @@ const OAUTH = {
 };
 const SECRET = { CLIENT_SECRET: 'OAUTH_CLIENT_SECRET', TOKEN_PREFIX: 'GMAIL_TOKEN_' };
 
+/**
+ * Where Google sends people back after they click Allow. A small static page (on GitHub Pages) hands the result
+ * back to the app's Settings tab, which finishes the connection in the OWNER's session. This avoids Google's
+ * "unable to open the file" error when the browser is signed in to several Google accounts at once.
+ * Must be listed exactly under "Authorized redirect URIs" of the OAuth client in Google Cloud.
+ */
+const OAUTH_CALLBACK_URL = 'https://hebadaher.github.io/sheetsender/callback.html';
+
 /* ------------------------------------------------------------------ */
 /* Storage helpers                                                      */
 /* ------------------------------------------------------------------ */
@@ -55,7 +63,7 @@ function markAccount_(email, status, error, extra) {
 }
 
 function redirectUri_() {
-  return String(ScriptApp.getService().getUrl() || '').split('?')[0];
+  return OAUTH_CALLBACK_URL;
 }
 
 function oauthClient_() {
@@ -93,7 +101,7 @@ function getSettings() {
   const uri = redirectUri_();
   return {
     redirectUri: uri,
-    redirectLooksWrong: !/\/exec$/.test(uri),
+    redirectLooksWrong: false,
     clientId: props.getProperty(PROP.OAUTH_CLIENT_ID) || '',
     clientSecretSaved: !!ownerSecrets_().getProperty(SECRET.CLIENT_SECRET),
     accounts: list,
@@ -144,7 +152,15 @@ function startGmailConnect(loginHint) {
   }).join('&');
 }
 
-/** Google redirects here (doGet) after the account owner clicks Allow or Cancel. */
+/**
+ * Called by the owner's Settings page with the code + state that the callback page handed back.
+ * Returns the connected address.
+ */
+function finishGmailConnect(code, state, error) {
+  return completeConnect_({ code: code, state: state, error: error });
+}
+
+/** Older redirect target (the web app itself). Kept so an old Cloud setting still works when only one account is signed in. */
 function oauthCallbackPage_(p) {
   let ok = false, title, detail;
   try {
@@ -162,7 +178,7 @@ function oauthCallbackPage_(p) {
     '.c{max-width:560px;margin:0 auto;background:#fff;border:1px solid #dfe3ea;border-radius:12px;padding:24px}' +
     'h1{font-size:22px;margin:0 0 10px;color:' + (ok ? '#1f7a3a' : '#b42318') + '}a{color:#0f6e5c;font-weight:600}</style></head><body><div class="c">' +
     '<h1>' + (ok ? '✓ ' : '') + escapeHtml_(title) + '</h1><p>' + escapeHtml_(detail) + '</p>' +
-    '<p><a href="' + escapeHtml_(redirectUri_()) + '" target="_top">Back to the app</a></p></div></body></html>';
+    '<p><a href="' + escapeHtml_(String(ScriptApp.getService().getUrl() || '')) + '" target="_top">Back to the app</a></p></div></body></html>';
   return HtmlService.createHtmlOutput(html).setTitle(APP_NAME + ' — Gmail connection');
 }
 

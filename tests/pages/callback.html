@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connecting… — Shop Follow-ups</title><link rel="stylesheet" href="style.css">
+<style>
+  .code{display:flex;gap:8px;margin:12px 0}
+  .code input{flex:1;min-width:0;font:14px ui-monospace,Menlo,monospace;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink)}
+  button{font:inherit;font-weight:600;padding:9px 14px;border-radius:9px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}
+  .ok{color:#1f7a3a}.bad{color:#b42318}
+  @media (prefers-color-scheme:dark){.ok{color:#5fd08a}.bad{color:#ff8a80}}
+</style></head>
+<body><main><div class="card">
+<div class="logo">✉</div>
+<h1 id="title">Connecting…</h1>
+<p id="msg" class="muted">One moment.</p>
+<div id="fallback" hidden>
+  <p>If the app's Settings page did not say <b>Connected</b>, copy this connection code and paste it there under <b>Connection code</b>, then click <b>Finish connecting</b>:</p>
+  <div class="code"><input id="code" readonly><button id="copy" type="button">Copy</button></div>
+</div>
+</div></main>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var data = { type: 'sf-oauth', code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '' };
+  var title = document.getElementById('title'), msg = document.getElementById('msg');
+  // Remove the code from the address bar and history.
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  if (!data.state) {
+    title.textContent = 'Nothing to connect';
+    msg.textContent = 'Open the Shop Follow-ups app, go to Settings and click "Connect a Gmail account".';
+    return;
+  }
+  if (data.error) {
+    title.textContent = 'Not connected';
+    title.className = 'bad';
+    msg.textContent = data.error === 'access_denied'
+      ? 'Permission was not given. Go back to the app and click Connect again, then click Continue.'
+      : 'Google returned: ' + data.error + '. Go back to the app and click Connect again.';
+  }
+  var code = btoa(JSON.stringify({ code: data.code, state: data.state, error: data.error })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  document.getElementById('code').value = code;
+  document.getElementById('copy').onclick = function () {
+    var i = document.getElementById('code'); i.select();
+    (navigator.clipboard ? navigator.clipboard.writeText(i.value) : Promise.reject()).catch(function () { document.execCommand('copy'); });
+    this.textContent = 'Copied';
+  };
+  var sent = false;
+  try { if (window.opener) { window.opener.postMessage(data, '*'); sent = true; } } catch (e) {}
+  if (!data.error) {
+    if (sent) {
+      title.textContent = 'Almost done';
+      title.className = 'ok';
+      msg.textContent = 'Go back to the Shop Follow-ups tab. It finishes the connection by itself. You can close this tab.';
+    } else {
+      title.textContent = 'One more step';
+      msg.textContent = 'Go back to the Shop Follow-ups Settings tab and paste the connection code below.';
+    }
+  }
+  document.getElementById('fallback').hidden = !!data.error && !data.code;
+})();
+</script>
+</body></html>
