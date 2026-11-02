@@ -48,7 +48,7 @@ const HEADERS = {
   Templates: ['template_id', 'shop_id', 'template_name', 'channel', 'subject', 'body', 'active', 'updated_at'],
   Campaigns: ['campaign_id', 'shop_id', 'campaign_name', 'template_id', 'sender_email', 'delay_minutes',
     'skip_previous_recipients', 'status', 'status_reason', 'created_by', 'created_at', 'started_at',
-    'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending'],
+    'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending', 'random_extra'],
   'Send Log': ['log_id', 'campaign_id', 'shop_id', 'contact_id', 'contact_name', 'email', 'phone', 'template_id',
     'channel', 'sender_email', 'status', 'reason', 'queued_at', 'sent_at', 'attempts', 'done_by']
 };
@@ -241,12 +241,17 @@ function readTable_(ss, tab) {
   const sheet = ss.getSheetByName(tab);
   if (!sheet) throw new Error('The "' + tab + '" tab is missing from the Sheet. The owner should run setup again in the Apps Script editor.');
   const values = sheet.getLastRow() > 0 ? sheet.getDataRange().getValues() : [[]];
-  const headers = (values[0] || []).map(function (h) { return String(h).trim(); });
-  HEADERS[tab].forEach(function (h) {
-    if (headers.indexOf(h) === -1) {
-      throw new Error('Column "' + h + '" is missing in the "' + tab + '" tab. The owner should run setup again in the Apps Script editor.');
+  let headers = (values[0] || []).map(function (h) { return String(h).trim(); });
+  // Columns added in newer versions of the app are added to the end of the tab automatically.
+  const missing = HEADERS[tab].filter(function (h) { return headers.indexOf(h) === -1; });
+  if (missing.length) {
+    if (!headers.filter(String).length) {
+      throw new Error('The "' + tab + '" tab has no header row. The owner should run setup again in the Apps Script editor.');
     }
-  });
+    while (headers.length && !headers[headers.length - 1]) headers.pop();
+    sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+    headers = headers.concat(missing);
+  }
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const r = values[i];
@@ -687,9 +692,26 @@ function saveTemplate(t) {
 /* Campaigns                                                            */
 /* ------------------------------------------------------------------ */
 
+/** Minutes between messages: any whole number from 1 to 120 (the screens offer 3 or more). */
 function cleanDelay_(v) {
-  const n = Number(v);
-  return ALLOWED_DELAYS.indexOf(n) !== -1 ? n : DEFAULT_DELAY_MINUTES;
+  const n = Math.round(Number(v));
+  return n >= 1 && n <= 120 ? n : DEFAULT_DELAY_MINUTES;
+}
+
+/** Optional start time chosen on the screen. Returns ms, or 0 for "now". */
+function cleanStartAt_(v) {
+  if (!v) return 0;
+  const t = new Date(v).getTime();
+  if (isNaN(t)) throw new Error('The start time is not valid. Choose a date and time again.');
+  if (t < Date.now() - 5 * 60000) throw new Error('The start time is in the past. Choose a later time, or choose "Now".');
+  if (t > Date.now() + 60 * 24 * 3600 * 1000) throw new Error('The start time is more than 60 days away.');
+  return t > Date.now() ? t : 0;
+}
+
+function fmtUae_(ms) {
+  const d = new Date(ms + 4 * 3600 * 1000);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return d.getUTCDate() + ' ' + months[d.getUTCMonth()] + ' ' + ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2);
 }
 
 /** Works out who would receive a campaign, without saving anything. */
@@ -787,6 +809,9 @@ function getCampaignPreview(params) {
   const delay = cleanDelay_(params.delayMinutes);
   const s = p.summary;
   s.delayMinutes = delay;
+  s.randomExtra = params.randomExtra !== false;
+  const startMsP = cleanStartAt_(params.startAt);
+  s.startAtLabel = startMsP ? fmtUae_(startMsP) : '';
   s.estimatedHours = Math.round(s.willSend * delay * 1.2 / 6) / 10;
   const rules = sendingRules_();
   s.rules = rules;
@@ -810,6 +835,7 @@ function startCampaign(params) {
     }
     const now = nowIso_();
     const delay = cleanDelay_(params.delayMinutes);
+    const startMs = cleanStartAt_(params.startAt);
     if (p.template._new) {
       const t = {
         template_id: newId_('T'), shop_id: p.shop.shop_id,
@@ -824,10 +850,12 @@ function startCampaign(params) {
       campaign_name: String(params.name || '').trim() ||
         (p.template.template_name + ' — ' + Utilities.formatDate(new Date(), 'Asia/Dubai', 'd MMM yyyy HH:mm')),
       template_id: p.template.template_id, sender_email: norm_(p.shop.sender_email), delay_minutes: String(delay),
-      skip_previous_recipients: p.skipPrevious ? 'yes' : 'no', status: 'running', status_reason: '',
-      created_by: ctx.email, created_at: now, started_at: now, next_send_at: now, finished_at: '',
+      skip_previous_recipients: p.skipPrevious ? 'yes' : 'no', status: 'running',
+      status_reason: startMs ? 'Scheduled: the first email goes out at ' + fmtUae_(startMs) + ' (UAE time).' : '',
+      created_by: ctx.email, created_at: now, started_at: startMs ? new Date(startMs).toISOString() : now,
+      next_send_at: startMs ? new Date(startMs).toISOString() : now, finished_at: '',
       total: String(p.plan.length), sent: '0', skipped: String(p.summary.willSkip), failed: '0',
-      pending: String(p.summary.willSend)
+      pending: String(p.summary.willSend), random_extra: params.randomExtra === false ? 'no' : 'yes'
     };
     const logRows = p.plan.map(function (item) {
       const c = item.contact;
@@ -840,7 +868,7 @@ function startCampaign(params) {
     });
     appendRows_(readTable_(ctx.ss, TABS.CAMPAIGNS), [campaign]);
     appendRows_(readTable_(ctx.ss, TABS.LOG), logRows);
-    setNextDue_(Date.now());
+    setNextDue_(startMs || Date.now());
     return stripRow_(campaign);
   });
 }
@@ -940,7 +968,21 @@ function logWhatsAppOpened(contactId, templateId) {
 /* WhatsApp — automatic sending on the user's Mac                       */
 /* ------------------------------------------------------------------ */
 
-const WA_DEFAULTS = { delayMinutes: 5, dailyCap: 30, startHour: 9, endHour: 21 };
+const WA_DEFAULTS = { delayMinutes: 5, dailyCap: 30, startHour: 9, endHour: 21, randomExtra: true, startAt: '' };
+
+/** Schedule chosen on the WhatsApp tab, checked. Minimum 3 minutes between messages, at most 60 per day. */
+function whatsAppRules_(p) {
+  const delay = Math.round(Number(p.delayMinutes || WA_DEFAULTS.delayMinutes));
+  if (!(delay >= 3 && delay <= 120)) throw new Error('Minutes between WhatsApp messages must be from 3 to 120. 5 or more is safest.');
+  const cap = Math.round(Number(p.dailyCap || WA_DEFAULTS.dailyCap));
+  if (!(cap >= 1 && cap <= 60)) throw new Error('WhatsApp messages per day must be from 1 to 60. 30 or fewer is safest.');
+  const sh = p.startHour === undefined ? WA_DEFAULTS.startHour : Math.round(Number(p.startHour));
+  const eh = p.endHour === undefined ? WA_DEFAULTS.endHour : Math.round(Number(p.endHour));
+  if (!(sh >= 0 && sh <= 23 && eh >= 1 && eh <= 24 && eh > sh)) throw new Error('Choose sending hours where the end is after the start.');
+  const startMs = cleanStartAt_(p.startAt);
+  return { delayMinutes: delay, dailyCap: cap, startHour: sh, endHour: eh, randomExtra: p.randomExtra !== false,
+    startAt: startMs ? new Date(startMs).toISOString() : '' };
+}
 
 /**
  * Makes the list for the Mac sender: only people who agreed, are not opted out, have a valid phone and have not
@@ -950,6 +992,7 @@ const WA_DEFAULTS = { delayMinutes: 5, dailyCap: 30, startHour: 9, endHour: 21 }
 function getWhatsAppJob(params) {
   const ctx = requireUser_();
   params = params || {};
+  const rules = whatsAppRules_(params); // check the schedule first
   return withLock_(function () {
     const shop = findShop_(ctx.ss, params.shopId);
     const templates = readTable_(ctx.ss, TABS.TEMPLATES);
@@ -994,7 +1037,7 @@ function getWhatsAppJob(params) {
     return {
       kind: 'shop-followups-whatsapp-job', version: 1,
       job_id: newId_('W'), shop_id: shop.shop_id, shop_name: shop.shop_name, template_id: template.template_id,
-      created_at: nowIso_(), created_by: ctx.email, rules: WA_DEFAULTS,
+      created_at: nowIso_(), created_by: ctx.email, rules: rules,
       items: items,
       skipped: Object.keys(skipped).map(function (r) { return { reason: r, count: skipped[r] }; })
     };

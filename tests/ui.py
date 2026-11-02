@@ -70,6 +70,15 @@ try:
         check('looks like a normal personal message' in page.inner_text('#sSpam'), 'spam check passes a normal email')
         greets = page.inner_text('#sGreets')
         check('Hello Fatima,' in greets and 'Hello Omar,' in greets, 'each person gets their own name: ' + greets.replace(chr(10), ' | ')[:120])
+        page.fill('#esMin', '2')
+        check('At least 3' in page.inner_text('#esMinNote'), 'warns below 3 minutes')
+        page.click('#sReview'); page.wait_for_selector('#reviewBox .notice.bad')
+        check('from 3 to 120' in page.inner_text('#reviewBox'), 'refuses 2 minutes')
+        page.fill('#esMin', '5')
+        page.click('#esRand + .track')
+        check('exactly 5 minutes' in page.inner_text('#esRandNote'), 'switch off: exact minutes')
+        page.click('#esRand + .track')
+        check('5–7 minutes' in page.inner_text('#esRandNote'), 'switch on: 5–7 minutes')
         page.click('#sReview')
         page.wait_for_selector('#sStart')
         txt = page.inner_text('#reviewBox')
@@ -111,10 +120,18 @@ try:
         page.fill('#waBody', 'Hello ')
         page.click('#waBody'); page.keyboard.press('End'); page.click('#waName'); page.keyboard.type(', the shop is still available.')
         check('Fatima Hassan: Hello Fatima, the shop' in page.inner_text('#waGreets'), 'WhatsApp preview per person')
+        page.check('input[name="wsWhen"][value="at"]')
+        from datetime import datetime as _dt, timedelta as _td
+        when = (_dt.now() + _td(days=2)).replace(hour=10, minute=30, second=0, microsecond=0)
+        page.fill('#wsAt', when.strftime('%Y-%m-%dT%H:%M')); page.fill('#wsMin', '7'); page.fill('#wsCap', '20')
+        page.select_option('#wsH1', '10'); page.select_option('#wsH2', '19')
+        page.click('#wsRand + .track')
         with page.expect_download() as dl:
             page.click('#waJob')
         job_path = dl.value.path(); job = json.load(open(job_path))
         check(dl.value.suggested_filename.startswith('whatsapp-job-example-shop-') and len(job['items']) == 7, 'send list downloaded: %s, %d people' % (dl.value.suggested_filename, len(job['items'])))
+        R = job['rules']
+        check(R['delayMinutes'] == 7 and R['dailyCap'] == 20 and R['startHour'] == 10 and R['endHour'] == 19 and R['randomExtra'] is False and R['startAt'] != '', 'schedule saved in the send list: ' + json.dumps(R))
         res = {'kind': 'shop-followups-whatsapp-results', 'job_id': job['job_id'], 'shop_id': job['shop_id'], 'template_id': job['template_id'], 'created_at': job['created_at'],
                'items': [{'contact_id': it['contact_id'], 'status': 'sent', 'at': '2026-11-02T12:00:00'} for it in job['items'][:3]]}
         rp = SHOTS + '/x-results.json'; json.dump(res, open(rp, 'w'))

@@ -82,4 +82,16 @@ time.sleep(8); p.terminate(); o = p.communicate(timeout=20)[0]
 sent = get(8792, '/sent'); srv.kill()
 check(sent == [] and 'Outside sending hours' in o, 'no sending outside the hours')
 
+print('Exact minutes (random extra OFF) and a scheduled start')
+from datetime import datetime, timezone, timedelta
+start = (datetime.now(timezone.utc) + timedelta(seconds=6)).isoformat().replace('+00:00', 'Z')
+t0 = time.time()
+out, sent, res, home = run_case('sched', items[:2], dict(all_hours, delayMinutes=7, randomExtra=False, startAt=start), port=8793)
+check('Scheduled: waiting until' in out.stdout, 'waits for the start time')
+check(time.time() - t0 >= 6, 'nothing sent before the start time')
+check(len(sent) == 2, 'sends after the start time')
+check('exactly 7 min between messages' in out.stdout and 'Waiting 7.0 minutes' in out.stdout, 'exact wait when random extra is off')
+out, sent, res, home = run_case('fast', items[:2], dict(all_hours, delayMinutes=1), port=8794)
+check('Rules: 3–4 min' in out.stdout, 'never faster than 3 minutes even if the list says 1: ' + [l for l in out.stdout.splitlines() if 'Rules' in l][0])
+
 print('\nALL WHATSAPP CHECKS PASSED' if not errors else '\nFAILED: ' + '; '.join(errors))

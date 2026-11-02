@@ -127,7 +127,7 @@ function stepCampaign_(ctx, campaign, nowMs) {
       item.contact_name = contact.full_name || contact.first_name;
       item.email = email;
       finish_(log, item, 'sent', 'Sent from ' + norm_(shop.sender_email));
-      campaign.next_send_at = new Date(nowMs + Math.round(delayMs * (1 + Math.random() * 0.4))).toISOString();
+      campaign.next_send_at = new Date(nowMs + Math.round(delayMs * (1 + (campaign.random_extra === 'no' ? 0 : Math.random() * 0.4)))).toISOString();
       campaign.status_reason = '';
     } catch (e) {
       const kind = e.kind || 'FAIL';

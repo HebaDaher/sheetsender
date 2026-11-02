@@ -539,6 +539,71 @@
     return S.data.templates.filter(function (t) { return t.channel === 'email' && t.active !== 'no'; });
   }
 
+
+  /* ---------- Sending schedule (shared by email and WhatsApp) ---------- */
+  function pad2(n) { return ('0' + n).slice(-2); }
+  function localInputValue(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+  function defaultSchedule(extra) {
+    var tomorrow9 = new Date(); tomorrow9.setDate(tomorrow9.getDate() + 1); tomorrow9.setHours(9, 0, 0, 0);
+    return Object.assign({ when: 'now', at: localInputValue(tomorrow9), minutes: 5, random: true }, extra || {});
+  }
+  function scheduleHtml(p, sc, opts) {
+    opts = opts || {};
+    var hourOpts = function (sel, from, to) { var o = ''; for (var h = from; h <= to; h++) o += '<option value="' + h + '"' + (h === Number(sel) ? ' selected' : '') + '>' + h + ':00</option>'; return o; };
+    var html = '<div class="sched"><b>Sending schedule</b>' +
+      '<div class="opt"><span style="min-width:120px">Start sending</span>' +
+      '<label class="check" style="margin:0"><input type="radio" name="' + p + 'When" value="now"' + (sc.when === 'now' ? ' checked' : '') + '><span>Now</span></label>' +
+      '<label class="check" style="margin:0"><input type="radio" name="' + p + 'When" value="at"' + (sc.when === 'at' ? ' checked' : '') + '><span>At</span></label>' +
+      '<input type="datetime-local" id="' + p + 'At" value="' + esc(sc.at) + '"' + (sc.when === 'at' ? '' : ' disabled') + '></div>' +
+      '<div class="opt"><span style="min-width:120px">Wait between ' + (opts.word || 'messages') + '</span>' +
+      '<input type="number" id="' + p + 'Min" min="3" max="120" step="1" value="' + esc(sc.minutes) + '"> minutes' +
+      '<span class="muted small" id="' + p + 'MinNote"></span></div>' +
+      '<div class="opt"><label class="switch"><input type="checkbox" id="' + p + 'Rand"' + (sc.random ? ' checked' : '') + '><span class="track"></span>' +
+      '<span>Random extra wait <span class="muted small" id="' + p + 'RandNote"></span></span></label></div>';
+    if (opts.limits) {
+      html += '<div class="opt"><span style="min-width:120px">At most</span><input type="number" id="' + p + 'Cap" min="1" max="60" value="' + esc(sc.cap) + '"> messages per day</div>' +
+        '<div class="opt"><span style="min-width:120px">Only between</span><select id="' + p + 'H1" style="width:auto">' + hourOpts(sc.h1, 0, 23) + '</select> and ' +
+        '<select id="' + p + 'H2" style="width:auto">' + hourOpts(sc.h2, 1, 24) + '</select></div>';
+    }
+    if (opts.note) html += '<p class="muted small" style="margin:6px 0 0">' + opts.note + '</p>';
+    return html + '</div>';
+  }
+  function bindSchedule(p, sc, onChange) {
+    function notes() {
+      var m = Number(sc.minutes) || 0;
+      $(p + 'MinNote').textContent = m < 3 ? 'At least 3.' : (m < 5 ? 'Fast — 5 or more is safer.' : '');
+      $(p + 'RandNote').textContent = sc.random ? '(on: each wait is ' + m + '–' + Math.round(m * 1.4) + ' minutes, which looks more natural)' : '(off: exactly ' + m + ' minutes each time)';
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="' + p + 'When"]'), function (r) {
+      r.addEventListener('change', function () { sc.when = r.value; $(p + 'At').disabled = sc.when !== 'at'; onChange(); });
+    });
+    $(p + 'At').addEventListener('change', function () { sc.at = this.value; onChange(); });
+    $(p + 'Min').addEventListener('input', function () { sc.minutes = this.value; notes(); onChange(); });
+    $(p + 'Rand').addEventListener('change', function () { sc.random = this.checked; notes(); onChange(); });
+    if ($(p + 'Cap')) {
+      $(p + 'Cap').addEventListener('input', function () { sc.cap = this.value; onChange(); });
+      $(p + 'H1').addEventListener('change', function () { sc.h1 = Number(this.value); onChange(); });
+      $(p + 'H2').addEventListener('change', function () { sc.h2 = Number(this.value); onChange(); });
+    }
+    notes();
+  }
+  function scheduleProblem(sc, opts) {
+    var m = Number(sc.minutes);
+    if (!(m >= 3 && m <= 120 && Math.round(m) === m)) return 'Minutes between messages must be a whole number from 3 to 120.';
+    if (sc.when === 'at') {
+      var t = new Date(sc.at).getTime();
+      if (!sc.at || isNaN(t)) return 'Choose the date and time to start.';
+      if (t < Date.now() - 60000) return 'The start time is in the past. Choose a later time, or choose "Now".';
+    }
+    if (opts && opts.limits) {
+      var c = Number(sc.cap);
+      if (!(c >= 1 && c <= 60 && Math.round(c) === c)) return 'Messages per day must be a whole number from 1 to 60.';
+      if (!(Number(sc.h2) > Number(sc.h1))) return 'The sending hours must end after they start.';
+    }
+    return '';
+  }
+  function startAtIso(sc) { return sc.when === 'at' && sc.at ? new Date(sc.at).toISOString() : ''; }
+
   function sendSample() {
     var c = S.data.contacts.filter(function (x) { return x.emailCheck.ok; })[0] ||
       S.data.contacts.filter(function (x) { return x.full_name || x.first_name; })[0] ||
@@ -575,10 +640,10 @@
       '<div class="muted small" style="margin:12px 0 4px">How it starts for each person</div><div id="sGreets" class="small"></div>' +
       '<div id="sSpam" style="margin-top:12px"></div></div></div></div>';
 
+    if (!st.sched) st.sched = defaultSchedule();
     html += '<div class="card"><h2>2. Sending options</h2><div class="grid2"><div>' +
-      '<label class="field"><span>Wait between emails</span><select id="sDelay">' +
-      S.boot.allowedDelays.map(function (m) { return '<option value="' + m + '"' + (m === Number(st.delay) ? ' selected' : '') + '>' + plural(m, 'minute') + (m === S.boot.defaultDelay ? ' (recommended)' : '') + '</option>'; }).join('') +
-      '</select></label></div><div>' +
+      scheduleHtml('es', st.sched, { word: 'emails', note: 'Emails also respect the safe-sending limits in Settings (most per day and sending hours).' }) +
+      '</div><div>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="sName" placeholder="Example: November follow-up" value="' + esc(st.name) + '"></label>' +
       '<label class="check"><input type="checkbox" id="sSkip"' + (st.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact email from this shop</span></label>' +
       '</div></div><button class="btn primary" id="sReview">3. Check who will get it →</button></div>';
@@ -622,7 +687,7 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-sph]'), function (b) {
       b.addEventListener('click', function () { insertAt('{' + b.getAttribute('data-sph') + '}'); });
     });
-    $('sDelay').addEventListener('change', function () { st.delay = Number(this.value); st.review = null; $('reviewBox').innerHTML = ''; });
+    bindSchedule('es', st.sched, function () { st.review = null; if ($('reviewBox')) $('reviewBox').innerHTML = ''; });
     $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; });
     $('sName').addEventListener('input', function () { st.name = this.value; });
     $('sReview').addEventListener('click', loadReview);
@@ -653,12 +718,15 @@
 
   function sendParams() {
     var st = S.send;
-    return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: st.delay, skipPrevious: st.skipPrevious, name: st.name };
+    return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: Number(st.sched.minutes), randomExtra: !!st.sched.random,
+      startAt: startAtIso(st.sched), skipPrevious: st.skipPrevious, name: st.name };
   }
 
   function loadReview() {
     var st = S.send;
     var box = $('reviewBox');
+    var prob = scheduleProblem(st.sched);
+    if (prob) { if (box) box.innerHTML = '<div class="notice bad">' + esc(prob) + '</div>'; return; }
     if (box) box.innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Checking contacts…</p></div>';
     call('getCampaignPreview', sendParams())
       .then(function (r) { st.review = r; renderReview(); if ($('reviewBox')) $('reviewBox').scrollIntoView({ behavior: 'smooth' }); }, function (e) {
@@ -681,7 +749,9 @@
         return '<li>' + esc(s.reason) + ': <b>' + s.count + '</b></li>';
       }).join('') + '</ul></details>';
     }
-    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time), about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) + ' minutes apart.</p>';
+    if (r.startAtLabel) html += '<div class="notice info" style="margin-top:10px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
+    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time), ' +
+      (r.randomExtra ? 'about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) : 'exactly ' + r.delayMinutes) + ' minutes apart.</p>';
     if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:10px">' + esc(r.dailyLimitNote) + '</div>';
     html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
       '<div class="email-preview"><div class="meta">' +
@@ -698,7 +768,7 @@
       html += '<div class="notice bad" style="margin-top:14px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
     }
     html += '<div class="row" style="margin-top:16px"><button class="btn primary big" id="sStart"' + (!r.sender.ok || !r.willSend ? ' disabled' : '') + '>' +
-      '▶ Start sending to ' + plural(r.willSend, 'person') + '</button></div>';
+      (r.startAtLabel ? '⏱ Schedule for ' : '▶ Start sending to ') + plural(r.willSend, 'person') + '</button></div>';
     if (!r.willSend && r.sender.ok) html += '<p class="muted small">Nobody can receive this email right now — see the reasons above.</p>';
     html += '</div>';
     box.innerHTML = html;
@@ -708,14 +778,15 @@
 
   function startSending() {
     var st = S.send, r = st.review;
-    if (!confirm('Start sending this email to ' + plural(r.willSend, 'person') + '?\n\nOne email every ' + plural(r.delayMinutes, 'minute') + '. You can pause at any time in "Progress".')) return;
+    if (!confirm((r.startAtLabel ? 'Schedule' : 'Start sending') + ' this email to ' + plural(r.willSend, 'person') + '?\n\n' +
+      (r.startAtLabel ? 'First email: ' + r.startAtLabel + ' (UAE time).\n' : '') + 'One email every ' + plural(r.delayMinutes, 'minute') + (r.randomExtra ? ' or a little more' : '') + '. You can pause at any time in "Progress".')) return;
     withBusy('Starting…', call('startCampaign', sendParams())).then(function (camp) {
       return reloadShop().then(function () {
         S.send.review = null; S.send.name = ''; S.send.templateId = camp.template_id;
         S.view = 'progress';
         S.progress = { campaignId: camp.campaign_id, detail: null, filter: 'all' };
         renderShop();
-        showBanner('success', 'Sending has started. The first email goes out within about a minute.');
+        showBanner('success', camp.status_reason ? camp.status_reason : 'Sending has started. The first email goes out within about a minute.');
       });
     });
   }
@@ -905,7 +976,7 @@
 
   /* ---------- Automatic WhatsApp (runs on the Mac) ---------- */
   function autoWhatsAppHtml(tpls) {
-    var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', skipPrevious: true });
+    var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', skipPrevious: true, sched: defaultSchedule({ cap: 30, h1: 9, h2: 21 }) });
     if (a.body === undefined) {
       a.templateId = tpls.length ? tpls[0].template_id : '';
       a.body = tpls.length ? tpls[0].body : 'Hello {first_name}, this is {sender_name} about {shop_name}. ';
@@ -923,6 +994,7 @@
       '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
+      '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are your Mac\'s time. The Mac must be on, awake and running the WhatsApp Sender at that time (start it any time before — it waits).' }) + '</div>' +
       '<div class="row" style="margin-top:12px"><button class="btn primary" id="waJob">1. Download the send list</button>' +
       '<label class="btn">2. Upload results<input type="file" id="waResults" accept=".json" class="hidden"></label></div>' +
       '<details style="margin-top:12px"><summary>How to start the sender on the Mac</summary><ol class="small steps">' +
@@ -951,18 +1023,26 @@
     });
     $('waBody').addEventListener('input', live);
     $('waSkip').addEventListener('change', function () { a.skipPrevious = this.checked; });
+    bindSchedule('ws', a.sched, function () {});
     $('waName').addEventListener('click', function () {
       var ta = $('waBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd, ins = '{first_name}';
       ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live();
     });
     $('waJob').addEventListener('click', function () {
-      withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious })).then(function (job) {
+      var prob = scheduleProblem(a.sched, { limits: true });
+      if (prob) { showBanner('error', prob); return; }
+      var sc = a.sched;
+      withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious,
+        delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc) })).then(function (job) {
         var name = 'whatsapp-job-' + String(job.shop_name || job.shop_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() + '-' + job.created_at.slice(0, 16).replace(/[:T]/g, '-') + '.json';
         var blob = new Blob([JSON.stringify(job, null, 1)], { type: 'application/json' });
         var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name;
         document.body.appendChild(link); link.click(); setTimeout(function () { URL.revokeObjectURL(link.href); link.remove(); }, 2000);
         var skip = job.skipped.length ? ' Skipped: ' + job.skipped.map(function (x) { return x.count + ' × ' + x.reason; }).join('; ') + '.' : '';
-        showBanner('success', 'Send list ready: ' + plural(job.items.length, 'person') + ' (file "' + name + '" in Downloads). Now start the WhatsApp Sender on the Mac.' + skip, true);
+        var R = job.rules;
+        showBanner('success', 'Send list ready: ' + plural(job.items.length, 'person') + ' (file "' + name + '" in Downloads). ' +
+          (R.startAt ? 'Starts ' + fmt(R.startAt) + ', ' : 'Starts as soon as the sender runs, ') + (R.randomExtra ? R.delayMinutes + '–' + Math.round(R.delayMinutes * 1.4) : 'exactly ' + R.delayMinutes) +
+          ' minutes apart, at most ' + R.dailyCap + ' per day, ' + R.startHour + ':00–' + R.endHour + ':00. Now start the WhatsApp Sender on the Mac.' + skip, true);
         reloadShop();
       });
     });

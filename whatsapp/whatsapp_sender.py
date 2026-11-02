@@ -36,9 +36,10 @@ LEDGER_FILE = DATA_DIR / "whatsapp-ledger.json"       # every message sent from 
 WA_URL = os.environ.get("SF_WA_URL", "https://web.whatsapp.com").rstrip("/")
 TIME_SCALE = float(os.environ.get("SF_TIME_SCALE", "1"))  # tests only: 0.001 makes waits 1000x shorter
 
-MIN_DELAY_MINUTES = 5          # never wait less than this between messages
-MAX_EXTRA = 0.40               # each wait is up to 40% longer, at random
-DAILY_CAP = 30                 # messages per day from this phone number
+MIN_DELAY_MINUTES = 3          # never wait less than this between messages (the app's default is 5)
+MAX_EXTRA = 0.40               # with "Random extra wait" on, each wait is up to 40% longer, at random
+DAILY_CAP = 30                 # default messages per day from this phone number (the app can set 1-60)
+MAX_DAILY_CAP = 60
 START_HOUR, END_HOUR = 9, 21   # sending hours (local time)
 MAX_PROBLEMS_IN_A_ROW = 3
 LOGIN_TIMEOUT_S = int(os.environ.get("SF_LOGIN_TIMEOUT", "180"))
@@ -181,9 +182,16 @@ def main():
     job = load_json(job_path, None)
     items = validate_job(job)
     rules = job.get("rules") or {}
-    delay = max(MIN_DELAY_MINUTES, float(rules.get("delayMinutes", MIN_DELAY_MINUTES)))
-    cap = min(DAILY_CAP, int(rules.get("dailyCap", DAILY_CAP)))
+    delay = max(MIN_DELAY_MINUTES, float(rules.get("delayMinutes", 5)))
+    cap = max(1, min(MAX_DAILY_CAP, int(rules.get("dailyCap", DAILY_CAP))))
     start_h, end_h = int(rules.get("startHour", START_HOUR)), int(rules.get("endHour", END_HOUR))
+    extra = MAX_EXTRA if rules.get("randomExtra", True) else 0.0
+    start_at = None
+    if rules.get("startAt"):
+        try:
+            start_at = datetime.fromisoformat(str(rules["startAt"]).replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            start_at = None
 
     res_path = results_path(job_path)
     results = load_json(res_path, None) or {
@@ -196,7 +204,9 @@ def main():
     todo = [it for it in items if it["contact_id"] not in done and (it["phone"] + "|" + job["job_id"]) not in already_phones]
     say(f"Send list: {job_path.name} — shop '{job.get('shop_name', '')}'")
     say(f"{plural(len(items), 'person', 'people')} in the list, {len(items) - len(todo)} already done, {len(todo)} to send.")
-    say(f"Rules: {delay:g}–{delay * (1 + MAX_EXTRA):.0f} min between messages, max {cap}/day, {start_h}:00–{end_h}:00.")
+    gap = f"{delay:g}–{delay * (1 + extra):.0f}" if extra else f"exactly {delay:g}"
+    say(f"Rules: {gap} min between messages, max {cap}/day, {start_h}:00–{end_h}:00"
+        + (f", starting {start_at.strftime('%d %b %H:%M')}" if start_at else "") + ".")
     if not todo:
         say(f"Nothing left to send. Upload '{res_path.name}' in the app (WhatsApp tab → Upload results).")
         return
@@ -214,6 +224,14 @@ def main():
         if not wait_for_login(page):
             ctx.close()
             sys.exit("Not logged in to WhatsApp Web. Run again and scan the QR code within 3 minutes.")
+
+        # Scheduled start
+        while start_at and not stop_requested and datetime.now().astimezone() < start_at:
+            left = (start_at - datetime.now().astimezone()).total_seconds()
+            say(f"Scheduled: waiting until {start_at.strftime('%d %b %H:%M')} to start ({left / 60:.0f} min). Keep the Mac awake.")
+            end = time.time() + min(600, max(0.5, left))  # real time: the start time is a clock time
+            while time.time() < end and not stop_requested:
+                time.sleep(min(1.0, end - time.time()))
 
         for i, it in enumerate(todo, 1):
             if stop_requested:
@@ -251,7 +269,7 @@ def main():
                     break
 
             if i < len(todo) and not stop_requested:
-                wait_min = delay * (1 + random.random() * MAX_EXTRA)
+                wait_min = delay * (1 + random.random() * extra)
                 say(f"  Waiting {wait_min:.1f} minutes before the next message…")
                 sleep_s(wait_min * 60)
 

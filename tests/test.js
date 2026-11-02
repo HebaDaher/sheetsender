@@ -532,6 +532,53 @@ t('no emails outside sending hours (e.g. 23:00 UAE); continues at 9:00', () => {
   E.runTrigger(2);
   assert.strictEqual(E.sent.length, before + 1);
 });
+t('scheduled start: nothing goes out before the chosen time; custom minutes; random extra off = exact', () => {
+  E.setClock('2026-11-06T06:00:00Z'); // 10:00 UAE
+  E.as('dad@gmail.com');
+  C.importContacts('SHOP1', [{ full_name: 'Sched One', email: 's1@ex.com', consent_status: 'yes' }, { full_name: 'Sched Two', email: 's2@ex.com', consent_status: 'yes' }], {});
+  const params = { shopId: 'SHOP1', subject: 'Plan {first_name}', body: 'Hello {first_name}, a scheduled note about the shop for you.',
+    delayMinutes: 8, randomExtra: false, startAt: '2026-11-06T09:00:00Z' }; // 13:00 UAE
+  const pv = C.getCampaignPreview(params);
+  assert.strictEqual(pv.startAtLabel, '6 Nov 13:00');
+  assert.strictEqual(pv.randomExtra, false);
+  globalThis.__rand = 0.999;
+  const k = C.startCampaign(params);
+  assert(/Scheduled: the first email goes out at 6 Nov 13:00/.test(k.status_reason));
+  const mine = () => E.sent.filter(m => /^Plan /.test(m.subject));
+  E.runTrigger(170); // until 12:50 UAE
+  assert.strictEqual(mine().length, 0, 'nothing before the start time');
+  E.runTrigger(12);
+  assert.strictEqual(mine().length, 1, 'first email at the start time');
+  assert(Date.parse(mine()[0].at) >= Date.parse('2026-11-06T09:00:00Z'));
+  const c = E.tab('Campaigns').find(x => x.campaign_id === k.campaign_id);
+  const gap = (Date.parse(c.next_send_at) - Date.parse(mine()[0].at)) / 60000;
+  assert.strictEqual(gap, 8, 'exactly 8 minutes when random extra is off');
+  assert.strictEqual(c.status_reason, '', 'scheduled note cleared after the first email');
+  globalThis.__rand = undefined;
+  E.runTrigger(30);
+  const plan = mine().map(m => Date.parse(m.at));
+  assert(plan.length >= 3, 'keeps sending after the start');
+  for (let i = 1; i < plan.length; i++) assert(plan[i] - plan[i - 1] >= 8 * 60000, 'at least 8 minutes apart');
+});
+t('schedule checks: past start time and out-of-range values are refused', () => {
+  throwsMsg(() => C.startCampaign({ shopId: 'SHOP1', subject: 'x {first_name}', body: 'Hello {first_name}, some text about the shop here.', startAt: '2026-01-01T00:00:00Z' }), /in the past/);
+  throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {first_name}', delayMinutes: 2 }), /from 3 to 120/);
+  throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {first_name}', dailyCap: 100 }), /from 1 to 60/);
+  throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {first_name}', startHour: 20, endHour: 9 }), /end is after the start/);
+});
+t('WhatsApp send list carries the chosen schedule', () => {
+  C.importContacts('SHOP1', [{ full_name: 'Phone Person', phone: '0501231234', consent_status: 'yes' }], {});
+  const job = C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {first_name}', delayMinutes: 12, randomExtra: false, dailyCap: 15, startHour: 10, endHour: 18, startAt: '2026-11-07T06:30:00Z' });
+  assert.strictEqual(JSON.stringify(job.rules), JSON.stringify({ delayMinutes: 12, dailyCap: 15, startHour: 10, endHour: 18, randomExtra: false, startAt: '2026-11-07T06:30:00.000Z' }));
+});
+t('old Campaigns tab without the new column still works (column is added by itself)', () => {
+  const sh = E.ss.getSheetByName('Campaigns');
+  const col = sh.grid[0].indexOf('random_extra');
+  sh.grid.forEach(r => r.splice(col, 1));
+  assert(!sh.grid[0].includes('random_extra'));
+  C.getShopData('SHOP1');
+  assert(E.ss.getSheetByName('Campaigns').grid[0].includes('random_extra'));
+});
 t('random spacing is never shorter than the chosen wait (up to 40% longer)', () => {
   globalThis.__rand = 0.999;
   C.importContacts('SHOP1', [{ full_name: 'J1', email: 'j1@ex.com', consent_status: 'yes' }, { full_name: 'J2', email: 'j2@ex.com', consent_status: 'yes' }], {});
