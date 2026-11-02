@@ -423,6 +423,33 @@ t('WhatsApp open is logged; ineligible refused', () => {
   assert(C.logWhatsAppOpened(c.find(x => x.email === 'omar@example.com').contact_id, 'T2').at);
   throwsMsg(() => C.logWhatsAppOpened(c.find(x => x.email === 'nc@example.com').contact_id, 'T2'), /No consent recorded/);
 });
+t('automatic WhatsApp: send list has only eligible people with their own name', () => {
+  E.as('dad@gmail.com');
+  const job = C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hello {first_name}, the shop is still available.' });
+  assert.strictEqual(job.kind, 'shop-followups-whatsapp-job');
+  const omar = job.items.find(i => i.phone === '971502222222');
+  assert(omar && omar.text === 'Hello Omar, the shop is still available.', JSON.stringify(omar));
+  assert(!job.items.some(i => i.phone === '971503333333'), 'no-consent person excluded');
+  assert(job.skipped.some(x => x.reason === 'No consent recorded'));
+  assert.strictEqual(job.rules.delayMinutes, 5);
+  assert.strictEqual(job.rules.dailyCap, 30);
+  assert(E.tab('Templates').some(t => t.channel === 'whatsapp' && t.body === 'Hello {first_name}, the shop is still available.'), 'message saved');
+  global.__job = job;
+});
+t('automatic WhatsApp: results upload is recorded once; next list skips them', () => {
+  const job = global.__job;
+  const results = { kind: 'shop-followups-whatsapp-results', job_id: job.job_id, shop_id: job.shop_id, template_id: job.template_id, created_at: job.created_at,
+    items: [{ contact_id: job.items[0].contact_id, status: 'sent', at: '2026-11-02T10:00:00' }, { contact_id: job.items[1].contact_id, status: 'failed', reason: 'This number is not on WhatsApp' }] };
+  const n = C.importWhatsAppResults(results);
+  assert.strictEqual(n.sent, 1); assert.strictEqual(n.failed, 1);
+  const again = C.importWhatsAppResults(results);
+  assert.strictEqual(again.sent + again.failed, 0); assert.strictEqual(again.already, 2);
+  const next = C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hello {first_name}, the shop is still available.' });
+  assert(!next.items.some(i => i.contact_id === job.items[0].contact_id), 'sent person skipped next time');
+  assert(next.items.some(i => i.contact_id === job.items[1].contact_id), 'failed person can be tried again');
+  throwsMsg(() => C.importWhatsAppResults({ hello: 1 }), /not a WhatsApp results file/);
+  throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {price}' }), /not known/);
+});
 t('doGet serves the app; include only serves app files', () => {
   assert.strictEqual(C.doGet({ parameter: {} }).page, 'Index');
   assert(C.include('SheetJS').includes('make_xlsx_lib'));

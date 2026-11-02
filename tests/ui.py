@@ -107,13 +107,26 @@ try:
         href = page.get_attribute('[data-wa]', 'href')
         check(href.startswith('https://wa.me/9715') and 'text=Hello%20' in href, 'WhatsApp link: ' + href[:70])
         rows = page.locator('[data-wa]').count()
-        check(rows == 7, 'WhatsApp-eligible people: %d (5 + Noura phone-only + Hamad bad email)' % rows)
+        check(rows == 7 or rows == 7, 'WhatsApp-eligible people: %d (5 + Noura phone-only + Hamad bad email)' % rows)
+        page.fill('#waBody', 'Hello ')
+        page.click('#waBody'); page.keyboard.press('End'); page.click('#waName'); page.keyboard.type(', the shop is still available.')
+        check('Fatima Hassan: Hello Fatima, the shop' in page.inner_text('#waGreets'), 'WhatsApp preview per person')
+        with page.expect_download() as dl:
+            page.click('#waJob')
+        job_path = dl.value.path(); job = json.load(open(job_path))
+        check(dl.value.suggested_filename.startswith('whatsapp-job-example-shop-') and len(job['items']) == 7, 'send list downloaded: %s, %d people' % (dl.value.suggested_filename, len(job['items'])))
+        res = {'kind': 'shop-followups-whatsapp-results', 'job_id': job['job_id'], 'shop_id': job['shop_id'], 'template_id': job['template_id'], 'created_at': job['created_at'],
+               'items': [{'contact_id': it['contact_id'], 'status': 'sent', 'at': '2026-11-02T12:00:00'} for it in job['items'][:3]]}
+        rp = SHOTS + '/x-results.json'; json.dump(res, open(rp, 'w'))
+        page.set_input_files('#waResults', rp); page.wait_for_selector('text=Results saved: 3 sent')
+        check(True, 'results uploaded in the app')
+        page.wait_for_selector('#waJob')
         page.screenshot(path=SHOTS + '/7-whatsapp.png', full_page=True)
         with page.expect_popup() as pop:
             page.click('[data-wa]')
         pop.value.close()
         page.wait_for_timeout(600)
-        check(page.locator('td >> text=never').count() == 6, 'opened chat recorded (6 left never): %d' % page.locator('td >> text=never').count())
+        check(page.locator('td >> text=never').count() == 3, 'opened chat recorded (3 left never after 3 auto-sent + 1 opened): %d' % page.locator('td >> text=never').count())
 
         page.click('[data-view="templates"]')
         page.click('#tNew')

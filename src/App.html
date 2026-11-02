@@ -840,12 +840,9 @@
     var tpls = S.data.templates.filter(function (t) { return t.channel === 'whatsapp' && t.active !== 'no'; });
     var w = S.wa;
     if (!w.templateId && tpls.length) w.templateId = tpls[0].template_id;
-    var html = '<div class="notice info"><b>How WhatsApp works in this free version:</b> press the green button next to a person. ' +
-      'WhatsApp opens with the message already written. Check it and press Send yourself. ' +
-      'The app never sends WhatsApp messages on its own — fully automatic WhatsApp needs the official WhatsApp Business Platform, which may cost money.</div>';
+    var html = autoWhatsAppHtml(tpls);
     if (!tpls.length) {
-      html += '<div class="card"><p>This shop has no WhatsApp template yet. Open <b>Message templates</b> and create one with type “WhatsApp”.</p></div>';
-      $('view').innerHTML = html; return;
+      $('view').innerHTML = html; bindAutoWhatsApp(tpls); return;
     }
     var tpl = tpls.filter(function (t) { return t.template_id === w.templateId; })[0] || tpls[0];
     w.templateId = tpl.template_id;
@@ -856,7 +853,7 @@
     var shown = ok.filter(function (c) { return !q || [c.full_name, c.first_name, c.phone].join(' ').toLowerCase().indexOf(q) !== -1; });
     shown.sort(function (a, b) { return (a.lastWhatsAppAt ? 1 : 0) - (b.lastWhatsAppAt ? 1 : 0); });
 
-    html += '<div class="card"><div class="grid2"><div><label class="field"><span>Which message?</span><select id="wTpl">' +
+    html += '<div class="card"><h2>Send one by one yourself (optional)</h2><p class="muted small">Opens WhatsApp with the message written; you press Send.</p><div class="grid2"><div><label class="field"><span>Which message?</span><select id="wTpl">' +
       tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === w.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
       '</select></label><input type="search" id="wSearch" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">Example message</div><div class="wa-bubble">' +
@@ -865,7 +862,7 @@
     html += '<div class="card"><h2>' + plural(ok.length, 'person') + ' can be messaged</h2>';
     if (!shown.length) html += '<p class="muted">Nobody to show.</p>';
     else {
-      html += '<div class="table-wrap scroll"><table><tr><th>Name</th><th>Phone</th><th>Last opened</th><th></th></tr>';
+      html += '<div class="table-wrap scroll"><table><tr><th>Name</th><th>Phone</th><th>Last WhatsApp</th><th></th></tr>';
       shown.slice(0, 500).forEach(function (c) {
         var text = renderText(tpl.body, fieldsFor(c, S.data.shop));
         var url = 'https://wa.me/' + encodeURIComponent(c.phone) + '?text=' + encodeURIComponent(text);
@@ -884,6 +881,7 @@
         Object.keys(reasons).map(function (r) { return '<li>' + esc(r) + ': <b>' + reasons[r] + '</b></li>'; }).join('') + '</ul></details></div>';
     }
     $('view').innerHTML = html;
+    bindAutoWhatsApp(tpls);
 
     $('wTpl').addEventListener('change', function () { w.templateId = this.value; viewWhatsApp(); });
     $('wSearch').addEventListener('input', function () {
@@ -902,6 +900,85 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-optout]'), function (b) {
       b.addEventListener('click', function () { optOut(b.getAttribute('data-optout'), viewWhatsApp); });
     });
+  }
+
+
+  /* ---------- Automatic WhatsApp (runs on the Mac) ---------- */
+  function autoWhatsAppHtml(tpls) {
+    var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', skipPrevious: true });
+    if (a.body === undefined) {
+      a.templateId = tpls.length ? tpls[0].template_id : '';
+      a.body = tpls.length ? tpls[0].body : 'Hello {first_name}, this is {sender_name} about {shop_name}. ';
+    }
+    var html = '<div class="card"><h2>Automatic WhatsApp sending</h2>' +
+      '<p class="muted">Write the message once with the person\'s name. The WhatsApp Sender on your Mac then sends it to each person by itself, ' +
+      'waiting <b>5–7 minutes</b> between messages, at most <b>30 per day</b>, between <b>9:00 and 21:00</b>.</p>' +
+      '<div class="notice warn small">WhatsApp does not allow automatic sending from a normal number. Going slowly lowers the risk, but WhatsApp can still block the number, ' +
+      'especially if people report it. Only people who agreed to be contacted are included.</div>';
+    if (tpls.length) {
+      html += '<label class="field"><span>Start from a saved message (optional)</span><select id="waTpl"><option value="">— Write a new message —</option>' +
+        tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === a.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') + '</select></label>';
+    }
+    html += '<div class="grid2"><div><label class="field"><span>WhatsApp message</span><textarea id="waBody" style="min-height:150px">' + esc(a.body) + '</textarea></label>' +
+      '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
+      '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
+      '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
+      '<div class="row" style="margin-top:12px"><button class="btn primary" id="waJob">1. Download the send list</button>' +
+      '<label class="btn">2. Upload results<input type="file" id="waResults" accept=".json" class="hidden"></label></div>' +
+      '<details style="margin-top:12px"><summary>How to start the sender on the Mac</summary><ol class="small steps">' +
+      '<li>Click <b>Download the send list</b>. A file named <code>whatsapp-job-….json</code> goes to your Downloads folder.</li>' +
+      '<li>On the Mac, open the <b>shop-followups</b> folder and run <b>WhatsApp Sender</b> (see the guide). It picks the newest send list by itself.</li>' +
+      '<li>The first time only, scan the QR code with the phone: WhatsApp → Settings → Linked devices → Link a device.</li>' +
+      '<li>Leave the Mac on and awake. You can stop any time with Ctrl+C; running it again continues where it stopped.</li>' +
+      '<li>When it finishes (or each evening), click <b>Upload results</b> and choose the <code>…-results.json</code> file from Downloads, so nobody gets the same message twice.</li>' +
+      '</ol></details></div>';
+    return html;
+  }
+
+  function bindAutoWhatsApp(tpls) {
+    var a = S.wa.auto;
+    function live() {
+      a.body = $('waBody').value;
+      var people = S.data.contacts.filter(function (x) { return x.waCheck.ok; }).slice(0, 4);
+      $('waGreets').innerHTML = people.length ? people.map(function (x) {
+        var first = renderText(a.body, fieldsFor(x, S.data.shop)).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '';
+        return '<div style="padding:4px 0;border-bottom:1px solid var(--line)"><b>' + esc(x.full_name || x.first_name || x.phone) + ':</b> ' + esc(first) + '</div>';
+      }).join('') : '<span class="muted">Nobody can be messaged yet.</span>';
+    }
+    if ($('waTpl')) $('waTpl').addEventListener('change', function () {
+      var t = tpls.filter(function (x) { return x.template_id === $('waTpl').value; })[0];
+      a.templateId = $('waTpl').value; a.body = t ? t.body : 'Hello {first_name}, '; $('waBody').value = a.body; live();
+    });
+    $('waBody').addEventListener('input', live);
+    $('waSkip').addEventListener('change', function () { a.skipPrevious = this.checked; });
+    $('waName').addEventListener('click', function () {
+      var ta = $('waBody'), s0 = ta.selectionStart, e0 = ta.selectionEnd, ins = '{first_name}';
+      ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live();
+    });
+    $('waJob').addEventListener('click', function () {
+      withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious })).then(function (job) {
+        var name = 'whatsapp-job-' + String(job.shop_name || job.shop_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() + '-' + job.created_at.slice(0, 16).replace(/[:T]/g, '-') + '.json';
+        var blob = new Blob([JSON.stringify(job, null, 1)], { type: 'application/json' });
+        var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name;
+        document.body.appendChild(link); link.click(); setTimeout(function () { URL.revokeObjectURL(link.href); link.remove(); }, 2000);
+        var skip = job.skipped.length ? ' Skipped: ' + job.skipped.map(function (x) { return x.count + ' × ' + x.reason; }).join('; ') + '.' : '';
+        showBanner('success', 'Send list ready: ' + plural(job.items.length, 'person') + ' (file "' + name + '" in Downloads). Now start the WhatsApp Sender on the Mac.' + skip, true);
+        reloadShop();
+      });
+    });
+    $('waResults').addEventListener('change', function () {
+      var f = this.files[0]; if (!f) return;
+      var r = new FileReader();
+      r.onload = function () {
+        var data; try { data = JSON.parse(r.result); } catch (e) { showBanner('error', 'This file could not be read. Choose the file that ends with "-results.json".'); return; }
+        withBusy('Saving results…', call('importWhatsAppResults', data)).then(function (n) {
+          showBanner('success', 'Results saved: ' + n.sent + ' sent, ' + n.failed + ' not sent' + (n.already ? ', ' + n.already + ' were already saved' : '') + '.');
+          reloadShop().then(viewWhatsApp);
+        });
+      };
+      r.readAsText(f);
+    });
+    live();
   }
 
   /* =================================================================== */

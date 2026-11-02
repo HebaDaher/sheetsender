@@ -935,3 +935,103 @@ function logWhatsAppOpened(contactId, templateId) {
     return { at: now };
   });
 }
+
+/* ------------------------------------------------------------------ */
+/* WhatsApp — automatic sending on the user's Mac                       */
+/* ------------------------------------------------------------------ */
+
+const WA_DEFAULTS = { delayMinutes: 5, dailyCap: 30, startHour: 9, endHour: 21 };
+
+/**
+ * Makes the list for the Mac sender: only people who agreed, are not opted out, have a valid phone and have not
+ * already received this WhatsApp message. Each item carries the personal text ("Hello Heba, …").
+ * params: {shopId, templateId?, body?, skipPrevious}
+ */
+function getWhatsAppJob(params) {
+  const ctx = requireUser_();
+  params = params || {};
+  return withLock_(function () {
+    const shop = findShop_(ctx.ss, params.shopId);
+    const templates = readTable_(ctx.ss, TABS.TEMPLATES);
+    let template = null;
+    if (params.body !== undefined) {
+      const body = String(params.body || '').trim();
+      if (!body) throw new Error('Write the WhatsApp message.');
+      if (body.length > 3000) throw new Error('The message is too long for WhatsApp (max 3000 characters).');
+      const unknown = unknownPlaceholders_(body);
+      if (unknown.length) throw new Error('These fields are not known: ' + unknown.join(', ') + '. You can use: {' + PLACEHOLDERS.join('}, {') + '}.');
+      template = templates.rows.filter(function (t) { return t.shop_id === shop.shop_id && norm_(t.channel) === 'whatsapp' && t.body === body; })[0];
+      if (!template) {
+        template = { template_id: newId_('T'), shop_id: shop.shop_id, template_name: body.split(/\r?\n/)[0].slice(0, 60),
+          channel: 'whatsapp', subject: '', body: body, active: 'yes', updated_at: nowIso_() };
+        appendRows_(templates, [template]);
+      }
+    } else {
+      template = templates.rows.filter(function (t) { return t.template_id === params.templateId; })[0];
+      if (!template || template.shop_id !== shop.shop_id || norm_(template.channel) !== 'whatsapp') throw new Error('Choose a WhatsApp message.');
+    }
+    const already = {};
+    if (params.skipPrevious !== false) {
+      readTable_(ctx.ss, TABS.LOG).rows.forEach(function (l) {
+        if (l.shop_id === shop.shop_id && l.channel === 'whatsapp' && l.status === 'sent' && l.template_id === template.template_id) already[l.phone] = true;
+      });
+    }
+    const items = [], skipped = {};
+    const seen = {};
+    readTable_(ctx.ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }).forEach(function (c) {
+      const check = eligibility_(c, 'whatsapp');
+      let reason = check.ok ? '' : check.reason;
+      if (!reason && seen[c.phone]) reason = 'Same phone number appears twice';
+      if (!reason && already[c.phone]) reason = 'Already received this WhatsApp message';
+      if (reason) { skipped[reason] = (skipped[reason] || 0) + 1; return; }
+      seen[c.phone] = true;
+      items.push({ contact_id: c.contact_id, name: c.full_name || c.first_name || '', phone: c.phone,
+        text: renderText_(template.body, templateFields_(c, shop)) });
+    });
+    if (!items.length) {
+      throw new Error('Nobody can receive this WhatsApp message. ' + Object.keys(skipped).map(function (r) { return skipped[r] + ' × ' + r; }).join('; ') + '.');
+    }
+    return {
+      kind: 'shop-followups-whatsapp-job', version: 1,
+      job_id: newId_('W'), shop_id: shop.shop_id, shop_name: shop.shop_name, template_id: template.template_id,
+      created_at: nowIso_(), created_by: ctx.email, rules: WA_DEFAULTS,
+      items: items,
+      skipped: Object.keys(skipped).map(function (r) { return { reason: r, count: skipped[r] }; })
+    };
+  });
+}
+
+/** Records the results file that the Mac sender wrote. Safe to upload twice (nothing is counted twice). */
+function importWhatsAppResults(results) {
+  const ctx = requireUser_();
+  if (!results || results.kind !== 'shop-followups-whatsapp-results' || !results.job_id || !Array.isArray(results.items)) {
+    throw new Error('This is not a WhatsApp results file. Choose the file that ends with "-results.json".');
+  }
+  if (results.items.length > 2000) throw new Error('Too many rows.');
+  return withLock_(function () {
+    const shop = findShop_(ctx.ss, results.shop_id);
+    const contacts = indexBy_(readTable_(ctx.ss, TABS.CONTACTS).rows, 'contact_id');
+    const log = readTable_(ctx.ss, TABS.LOG);
+    const campaignId = 'WHATSAPP-' + String(results.job_id).replace(/[^A-Za-z0-9]/g, '').slice(0, 20);
+    const done = {};
+    log.rows.forEach(function (l) { if (l.campaign_id === campaignId) done[l.contact_id] = true; });
+    const rows = [], n = { sent: 0, failed: 0, already: 0 };
+    results.items.forEach(function (it) {
+      const c = contacts[it.contact_id];
+      if (!c || c.shop_id !== shop.shop_id) return;
+      if (it.status !== 'sent' && it.status !== 'failed') return;
+      if (done[c.contact_id]) { n.already++; return; }
+      done[c.contact_id] = true;
+      n[it.status]++;
+      rows.push({
+        log_id: newId_('L'), campaign_id: campaignId, shop_id: shop.shop_id, contact_id: c.contact_id,
+        contact_name: c.full_name || c.first_name, email: c.email, phone: c.phone, template_id: String(results.template_id || ''),
+        channel: 'whatsapp', sender_email: '', status: it.status,
+        reason: it.status === 'sent' ? 'Sent automatically from WhatsApp on the Mac' : String(it.reason || 'Not sent').slice(0, 300),
+        queued_at: String(results.created_at || ''), sent_at: String(it.at || nowIso_()), attempts: '1', done_by: ctx.email
+      });
+    });
+    appendRows_(log, rows);
+    return n;
+  });
+}
