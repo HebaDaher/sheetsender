@@ -207,6 +207,7 @@ function makeEnv(srcDir) {
       openById: (id) => {
         const book = sheetsById[id];
         if (!book || book.trashed) throw new Error('Not found');
+        if (book.failOnce) { book.failOnce = false; throw new Error('Service Spreadsheets failed while accessing document'); }
         if (book.editors.indexOf(users.effective) === -1 && book.viewers.indexOf(users.effective) === -1) throw new Error('No access');
         return book;
       },

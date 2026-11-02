@@ -32,9 +32,11 @@ function adminEmail_() { return norm_(sp_().getProperty(PROP.OWNER_EMAIL)); }
 function readJsonProp_(key, fallback) {
   try { const v = sp_().getProperty(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 }
+/** Size in bytes (UTF-8): Google's limits are in bytes, and Arabic letters take 2 bytes each. */
+function byteLen_(s) { return unescape(encodeURIComponent(String(s))).length; }
 function writeJsonProp_(key, obj) {
   const s = JSON.stringify(obj);
-  if (s.length > 8800) throw new Error('Too much data to save in one setting.');
+  if (byteLen_(s) > 8800) throw new Error('Too much data to save in one setting.');
   sp_().setProperty(key, s);
 }
 
@@ -58,6 +60,14 @@ function saveUserRec_(rec) {
 
 function getWs_(id) { return id ? readJsonProp_('W_' + id, null) : null; }
 function saveWs_(ws) { writeJsonProp_('W_' + ws.id, ws); if (WS && WS.id === ws.id) WS = ws; }
+/** Changes only some fields of a workspace, on its newest saved copy. */
+function patchWs_(id, patch) {
+  const ws = getWs_(id);
+  if (!ws) return null;
+  Object.keys(patch).forEach(function (k) { if (patch[k] === null) delete ws[k]; else ws[k] = patch[k]; });
+  saveWs_(ws);
+  return ws;
+}
 
 /** Workspace setting names are stored as NAME@workspaceId. */
 function wsKey_(name, ws) {
@@ -106,7 +116,10 @@ function migrate_() {
     const sheetId = props.getProperty(PROP.SHEET_ID);
     const owner = norm_(props.getProperty(PROP.OWNER_EMAIL));
     if (sheetId && owner) {
-      const ws = { id: newId_('W'), owner: owner, sheet_id: sheetId, name: 'My shops', created_at: nowIso_(),
+      // The id is saved first, so a run that stopped half-way continues with the same workspace.
+      let id = props.getProperty('WS_MIGRATION_ID');
+      if (!id) { id = newId_('W'); props.setProperty('WS_MIGRATION_ID', id); }
+      const ws = { id: id, owner: owner, sheet_id: sheetId, name: 'My shops', created_at: nowIso_(),
         shared_by_sheet: true, engine_on: true };
       writeJsonProp_('W_' + ws.id, ws);
       const rec = userRec_(owner);
@@ -167,13 +180,16 @@ function requireUser_() {
   const id = ids.indexOf(rec.current) !== -1 ? rec.current : ids[0];
   if (!id) throw noWorkspaceError_();
   const ws = getWs_(id);
-  let ss = null;
-  try { ss = SpreadsheetApp.openById(ws.sheet_id); } catch (e) { ss = null; }
+  let ss = null, openError = '';
+  try { ss = SpreadsheetApp.openById(ws.sheet_id); } catch (e) { ss = null; openError = String(e && e.message || e); }
   const ok = ss && (email === ws.owner || editorsOf_(ss).indexOf(email) !== -1);
   if (!ok) {
     if (email === ws.owner) {
       throw new Error('The Google Sheet of your workspace "' + ws.name + '" cannot be opened. It may be in the trash of your Google Drive: ' +
         'restore it there, then reload this page.');
+    }
+    if (!ss && !/permission|not found|missing|deleted|does not exist|don't have|denied/i.test(openError)) {
+      throw new Error('Google could not open the workspace right now (' + openError + '). Wait a minute and reload the page.');
     }
     rec.member = rec.member.filter(function (x) { return x !== id; });
     if (rec.current === id) rec.current = '';
@@ -249,7 +265,7 @@ function renameWorkspace(name) {
   const ctx = requireOwner_();
   const n = String(name || '').trim().slice(0, 60);
   if (!n) throw new Error('Write a name.');
-  return withLock_(function () { const ws = getWs_(ctx.ws.id); ws.name = n; saveWs_(ws); return n; });
+  return withLock_(function () { patchWs_(ctx.ws.id, { name: n }); return n; });
 }
 
 function membersOf_(ctx) {
@@ -286,6 +302,8 @@ function removeMember(email) {
       if (rec.current === ctx.ws.id) rec.current = '';
       saveUserRec_(rec);
     }
+    const ws = getWs_(ctx.ws.id);
+    if (ws.mac_token && norm_(ws.mac_linked_by) === addr) revokeMac_(ws); // their Mac stops too
     return membersOf_(ctx);
   });
 }
@@ -329,7 +347,7 @@ function installTrigger_() {
   });
   ScriptApp.newTrigger('processQueue').timeBased().everyMinutes(1).create();
   if (WS && norm_(Session.getEffectiveUser().getEmail()) === WS.owner && !WS.engine_on) {
-    const ws = getWs_(WS.id); ws.engine_on = true; ws.engine_on_at = nowIso_(); saveWs_(ws);
+    patchWs_(WS.id, { engine_on: true, engine_on_at: nowIso_() });
   }
   try { CacheService.getUserCache().put('trigger_ok', '1', 21600); } catch (e) { /* best effort */ }
 }
@@ -341,7 +359,7 @@ function ensureTrigger_() {
   if (cache.get('trigger_ok') && WS.engine_on) return true;
   const has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'processQueue'; });
   if (!has) installTrigger_();
-  else if (!WS.engine_on) { const ws = getWs_(WS.id); ws.engine_on = true; ws.engine_on_at = nowIso_(); saveWs_(ws); }
+  else if (!WS.engine_on) patchWs_(WS.id, { engine_on: true, engine_on_at: nowIso_() });
   cache.put('trigger_ok', '1', 21600);
   return true;
 }

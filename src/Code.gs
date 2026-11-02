@@ -1147,11 +1147,49 @@ function recordWhatsAppResults_(ss, results, actor) {
 const WA_HELPER_ONLINE_S = 45;
 const MAC_INSTALL_URL = 'https://hebadaher.github.io/sheetsender/mac/install.sh';
 const JOB_CACHE_S = 21600; // the send list waits up to 6 hours for the Mac to fetch it (it fetches it within seconds)
+const RELAY_MAX_BYTES = 60000; // results waiting for one workspace (the whole app shares 500 KB of settings)
 
-function waCommands_() { return wsJson_('WA_COMMANDS', []); }
-function saveWaCommands_(list) { wsSet_('WA_COMMANDS', JSON.stringify(list.slice(-10))); }
+/*
+ * The Mac asks every few seconds. To stay far inside Google's daily limits for settings reads/writes, what the Mac
+ * reads and writes on each poll lives in the script cache (commands are also kept in the settings, the safe copy).
+ */
+function waCommands_() {
+  const c = CacheService.getScriptCache().get('WAC_' + WS.id);
+  if (c !== null && c !== undefined) { try { return JSON.parse(c); } catch (e) { /* read the settings */ } }
+  const list = wsJson_('WA_COMMANDS', []);
+  CacheService.getScriptCache().put('WAC_' + WS.id, JSON.stringify(list), 21600);
+  return list;
+}
+function saveWaCommands_(list) {
+  const s = JSON.stringify(list.slice(-10));
+  wsSet_('WA_COMMANDS', s);
+  CacheService.getScriptCache().put('WAC_' + WS.id, s, 21600);
+}
+/** Only known fields with plain values are kept from what a Mac reports (it is shown on the owner's page). */
+function cleanHelperStatus_(st) {
+  st = st && typeof st === 'object' ? st : {};
+  const txt = function (v, n) { return String(v === undefined || v === null ? '' : v).slice(0, n); };
+  const num = function (v) { const n = Number(v); return isFinite(n) && n >= 0 ? Math.min(Math.round(n), 100000) : 0; };
+  const out = { version: num(st.version), wa: ['closed', 'loading', 'qr', 'connected'].indexOf(st.wa) !== -1 ? st.wa : 'closed',
+    sent_today: num(st.sent_today), error: txt(st.error, 200), mac_time: txt(st.mac_time, 40) };
+  const j = st.job;
+  if (j && typeof j === 'object') {
+    out.job = { job_id: txt(j.job_id, 40), shop_id: txt(j.shop_id, 40), shop_name: txt(j.shop_name, 80),
+      state: ['running', 'done', 'stopped'].indexOf(j.state) !== -1 ? j.state : 'stopped', message: txt(j.message, 300),
+      total: num(j.total), sent: num(j.sent), failed: num(j.failed), left: num(j.left), next_at: txt(j.next_at, 40), cap: num(j.cap),
+      last: j.last && typeof j.last === 'object' ? { status: j.last.status === 'sent' ? 'sent' : 'failed', phone: txt(j.last.phone, 20).replace(/\D/g, ''),
+        reason: txt(j.last.reason, 200), at: txt(j.last.at, 40) } : null };
+  }
+  return out;
+}
+function saveHelperStatus_(st) {
+  CacheService.getScriptCache().put('WAH_' + WS.id, JSON.stringify(st), 21600);
+}
 function helperStatus_() {
-  const st = wsJson_('WA_HELPER', {}) || {};
+  let st = null;
+  const c = CacheService.getScriptCache().get('WAH_' + WS.id);
+  if (c) { try { st = JSON.parse(c); } catch (e) { st = null; } }
+  if (!st) st = wsJson_('WA_HELPER', {}) || {}; // status saved by the earlier version
   const age = st.seen_at ? Math.round((Date.now() - new Date(st.seen_at).getTime()) / 1000) : null;
   st.online = age !== null && age <= WA_HELPER_ONLINE_S;
   st.age_s = age;
@@ -1165,9 +1203,22 @@ function bridgeUrl_() {
   return typeof BRIDGE_URL !== 'undefined' && /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(BRIDGE_URL))
     ? String(BRIDGE_URL) : '';
 }
+/** The administrator's original Mac (set up with the first WhatsApp installer) belongs to the admin's workspace until a new Mac is set up. */
+function legacyMacWs_(ws) {
+  return !!(ws && bridgeConfigured_() && !ws.legacy_mac_off && ws.owner === adminEmail_() && ws.id === userRec_(adminEmail_()).own);
+}
 /** Is a Mac linked to the current workspace? */
-function macLinked_() {
-  return !!(WS && (WS.mac_token || (bridgeConfigured_() && WS.owner === adminEmail_() && WS.id === userRec_(adminEmail_()).own)));
+function macLinked_() { return !!(WS && (WS.mac_token || legacyMacWs_(WS))); }
+
+/** Stops the Mac of a workspace (its secret no longer works). */
+function revokeMac_(ws) {
+  const patch = { mac_token: null, mac_linked_at: null, mac_linked_by: null };
+  const cache = CacheService.getScriptCache();
+  if (ws.mac_token) { sp_().deleteProperty('T_' + ws.mac_token); cache.remove('MACWS_' + ws.mac_token); }
+  if (legacyMacWs_(ws)) { patch.legacy_mac_off = true; cache.remove('MACWS_' + String(BRIDGE_TOKEN_SHA256)); }
+  cache.remove('WAH_' + ws.id);
+  sp_().deleteProperty('WA_HELPER@' + ws.id);
+  return patchWs_(ws.id, patch);
 }
 
 /** For the WhatsApp tab: is the helper running, is WhatsApp connected, how is the current send going. */
@@ -1177,7 +1228,9 @@ function getWhatsAppHelper() {
   const st = helperStatus_();
   st.pending = waCommands_().map(function (c) { return { type: c.type, at: c.at }; });
   st.installed = macLinked_();
-  st.canLink = !!bridgeUrl_();
+  st.bridgeReady = !!bridgeUrl_();
+  st.canLink = st.bridgeReady && ctx.isOwner; // only the owner makes a Mac secret
+  st.owner = ctx.ws.owner;
   st.linkedAt = ctx.ws.mac_linked_at || '';
   return st;
 }
@@ -1197,8 +1250,8 @@ function putJob_(commandId, job) {
   const cache = CacheService.getScriptCache();
   const text = JSON.stringify(job);
   const parts = [];
-  for (let i = 0; i < text.length; i += 90000) parts.push(text.slice(i, i + 90000));
-  if (parts.length > 40) throw new Error('This send list is too big. Split the contacts into smaller files.');
+  for (let i = 0; i < text.length; i += 30000) parts.push(text.slice(i, i + 30000)); // ≤ 90 KB even in Arabic
+  if (parts.length > 100) throw new Error('This send list is too big. Split the contacts into smaller files.');
   parts.forEach(function (p, i) { cache.put('JOB_' + commandId + '_' + i, p, JOB_CACHE_S); });
   cache.put('JOB_' + commandId, String(parts.length), JOB_CACHE_S);
 }
@@ -1243,7 +1296,7 @@ function openWhatsAppOnMac() { const ctx = requireUser_(); queueWaCommand_({ typ
  * Terminal. Shown once; the app keeps only its fingerprint. A Mac set up earlier for this workspace is disconnected.
  */
 function createMacLink() {
-  const ctx = requireUser_();
+  const ctx = requireOwner_(); // the secret lets a Mac read this workspace's send lists
   const url = bridgeUrl_();
   if (!url) {
     throw new Error('Setting up a Mac is not available on this app yet: the app administrator (' + adminEmail_() +
@@ -1251,12 +1304,10 @@ function createMacLink() {
   }
   return withLock_(function () {
     const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
-    const ws = getWs_(ctx.ws.id);
-    if (ws.mac_token) sp_().deleteProperty('T_' + ws.mac_token);
+    revokeMac_(getWs_(ctx.ws.id)); // the Mac set up before (if any) stops
     const sha = sha256Hex_(token);
-    sp_().setProperty('T_' + sha, ws.id);
-    ws.mac_token = sha; ws.mac_linked_at = nowIso_(); ws.mac_linked_by = ctx.email;
-    saveWs_(ws);
+    sp_().setProperty('T_' + sha, ctx.ws.id);
+    patchWs_(ctx.ws.id, { mac_token: sha, mac_linked_at: nowIso_(), mac_linked_by: ctx.email });
     wsDel_('WA_HELPER');
     return { command: "curl -fsSL " + MAC_INSTALL_URL + " | bash -s -- '" + url + "' '" + token + "'" };
   });
@@ -1271,24 +1322,24 @@ function relayAdd_(results) {
   if (results.items.length > 2000) throw new Error('Too many rows.');
   const props = sp_();
   const prefix = relayPrefix_();
-  if (props.getKeys().filter(function (k) { return k.indexOf(prefix) === 0; }).length > 60) {
-    throw new Error('busy: results are waiting to be saved; trying again later');
-  }
-  const head = {};
-  Object.keys(results).forEach(function (k) { if (k !== 'items') head[k] = results[k]; });
+  let waiting = 0;
+  props.getKeys().forEach(function (k) { if (k.indexOf(prefix) === 0) waiting += byteLen_(props.getProperty(k) || ''); });
+  const t = function (v, n) { return String(v === undefined || v === null ? '' : v).slice(0, n); };
+  const head = { kind: results.kind, job_id: t(results.job_id, 40), shop_id: t(results.shop_id, 40),
+    template_id: t(results.template_id, 40), created_at: t(results.created_at, 40) };
+  const chunks = [];
   let chunk = [];
-  const flush = function () {
-    if (!chunk.length) return;
-    props.setProperty(prefix + Date.now() + '_' + newId_('R'), JSON.stringify(Object.assign({}, head, { items: chunk })));
-    chunk = [];
-  };
   results.items.forEach(function (it) {
-    const small = { contact_id: String(it.contact_id || '').slice(0, 40), phone: String(it.phone || '').slice(0, 20),
-      status: String(it.status || ''), reason: String(it.reason || '').slice(0, 200), at: String(it.at || '').slice(0, 30) };
-    if (JSON.stringify(chunk.concat([small])).length > 7000) flush();
+    const small = { contact_id: t(it.contact_id, 40), phone: t(it.phone, 20).replace(/\D/g, ''),
+      status: it.status === 'sent' ? 'sent' : 'failed', reason: t(it.reason, 200), at: t(it.at, 30) };
+    if (chunk.length && byteLen_(JSON.stringify(Object.assign({}, head, { items: chunk.concat([small]) }))) > 8000) { chunks.push(chunk); chunk = []; }
     chunk.push(small);
   });
-  flush();
+  if (chunk.length) chunks.push(chunk);
+  const texts = chunks.map(function (c) { return JSON.stringify(Object.assign({}, head, { items: c })); });
+  const adding = texts.reduce(function (n, s) { return n + byteLen_(s); }, 0);
+  if (waiting + adding > RELAY_MAX_BYTES) throw new Error('busy: results are waiting to be saved; trying again later');
+  texts.forEach(function (s) { props.setProperty(prefix + Date.now() + '_' + newId_('R'), s); });
 }
 
 /** Writes waiting WhatsApp results into this workspace's Send Log (called from the page and the owner's trigger). */
@@ -1322,26 +1373,40 @@ function jsonOut_(obj) {
 function workspaceForToken_(token) {
   if (!token) return null;
   const sha = sha256Hex_(token);
-  if (bridgeConfigured_() && sha === String(BRIDGE_TOKEN_SHA256)) return getWs_(userRec_(adminEmail_()).own);
-  const id = sp_().getProperty('T_' + sha);
-  const ws = id ? getWs_(id) : null;
-  return ws && ws.mac_token === sha ? ws : null;
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('MACWS_' + sha);
+  if (hit) { try { return JSON.parse(hit); } catch (e) { /* look it up */ } }
+  let ws = null;
+  if (bridgeConfigured_() && sha === String(BRIDGE_TOKEN_SHA256)) {
+    const a = getWs_(userRec_(adminEmail_()).own);
+    if (legacyMacWs_(a)) ws = a;
+  }
+  if (!ws) {
+    const id = sp_().getProperty('T_' + sha);
+    const w = id ? getWs_(id) : null;
+    if (w && w.mac_token === sha) ws = w;
+  }
+  if (ws) cache.put('MACWS_' + sha, JSON.stringify(ws), 300); // forgotten at once when the Mac is disconnected
+  return ws;
 }
 
 /** The bridge. Only Mac helpers with a valid token; each sees only its own workspace. */
 function doPost(e) {
   let req = {};
   try { req = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return jsonOut_({ ok: false, error: 'bad request' }); }
-  try { migrate_(); } catch (err) { return jsonOut_({ ok: false, error: 'busy' }); }
+  try {
+    const cache = CacheService.getScriptCache(); // no settings read on each poll (daily limits)
+    if (cache.get('WSV') !== WS_VERSION) { migrate_(); cache.put('WSV', WS_VERSION, 21600); }
+  } catch (err) { return jsonOut_({ ok: false, error: 'busy' }); }
   const ws = workspaceForToken_(req.token);
   if (!ws) return jsonOut_({ ok: false, error: 'not allowed' });
   WS = ws;
   const me = norm_(Session.getEffectiveUser().getEmail());
   try {
     if (req.action === 'poll') {
-      const status = req.status || {};
+      const status = cleanHelperStatus_(req.status);
       status.seen_at = nowIso_();
-      wsSet_('WA_HELPER', JSON.stringify(status).slice(0, 4000));
+      saveHelperStatus_(status);
       return jsonOut_({ ok: true, commands: waCommands_() });
     }
     if (req.action === 'ack') {

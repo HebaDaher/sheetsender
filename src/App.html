@@ -1154,6 +1154,7 @@
       kind = 'warn';
       html = '<b>No Mac is set up for this workspace yet.</b> ' + (h.canLink
         ? 'Click “Set up a Mac” below, on any computer, and follow the 3 steps on the Mac that will send the messages.'
+        : h.bridgeReady ? 'Ask ' + esc(h.owner) + ' (the owner of this workspace) to click “Set up a Mac” here on the WhatsApp tab.'
         : 'This needs one update by the app administrator first (they run Install.command once more).');
     } else if (!h.online) {
       kind = 'warn';
@@ -1169,7 +1170,9 @@
     } else {
       html = '<b>The WhatsApp Sender is running.</b> WhatsApp is not open yet — it opens by itself when you start sending, or click “Open WhatsApp on the Mac” to check the connection.';
     }
+    var num = function (v) { var n = Number(v); return isFinite(n) && n >= 0 ? Math.round(n) : 0; };
     if (job) {
+      job.sent = num(job.sent); job.failed = num(job.failed); job.left = num(job.left); job.total = num(job.total);
       var done = job.sent + job.failed;
       html += '<div style="margin-top:8px"><b>' + esc(job.shop_name || '') + ':</b> ' + job.sent + ' sent' + (job.failed ? ', ' + job.failed + ' not sent' : '') +
         ', ' + job.left + ' left of ' + job.total + (running ? '' : ' — ' + esc({ done: 'finished', stopped: 'stopped' }[job.state] || job.state)) + '.' +
@@ -1177,7 +1180,7 @@
         (job.last ? '<br><span class="small">Last: ' + esc(job.last.status === 'sent' ? '✓ sent ' : '✗ not sent ') + '(+' + esc(job.last.phone) + ')' + (job.last.reason ? ' — ' + esc(job.last.reason) : '') + '</span>' : '') +
         '<div style="height:8px;background:var(--line);border-radius:4px;margin-top:6px;overflow:hidden"><div style="height:100%;width:' + (job.total ? Math.round(done * 100 / job.total) : 0) + '%;background:var(--accent)"></div></div></div>';
     }
-    if (h.online) html += '<div class="small muted" style="margin-top:6px">Sent today from this Mac: ' + (h.sent_today || 0) + (h.pending && h.pending.length ? ' · waiting for the Mac to pick up: ' + h.pending.map(function (p) { return p.type; }).join(', ') : '') + '</div>';
+    if (h.online) html += '<div class="small muted" style="margin-top:6px">Sent today from this Mac: ' + num(h.sent_today) + (h.pending && h.pending.length ? ' · waiting for the Mac to pick up: ' + esc(h.pending.map(function (p) { return p.type; }).join(', ')) : '') + '</div>';
     box.className = 'notice ' + kind;
     box.innerHTML = html;
     start.disabled = !h.online || running || (h.pending || []).some(function (p) { return p.type === 'start'; });

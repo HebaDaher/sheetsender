@@ -310,6 +310,58 @@ t('a big results batch is split safely and saved in full', () => {
   assert.strictEqual(E.tab('Send Log', E.sheetOf('sara@gmail.com')).filter(l => l.reason === 'x'.repeat(150)).length, job.items.length);
 });
 
+console.log('Security checks (from the independent review)');
+t('only the workspace owner can make a Mac secret (it reads the send lists)', () => {
+  E.as('dad@gmail.com'); C.switchWorkspace(C.getBootstrap().workspaces.find(w => w.owner === 'sara@gmail.com').id);
+  throwsMsg(() => C.createMacLink(), /Only the owner/);
+  C.switchWorkspace(C.getBootstrap().workspaces.find(w => w.owner === 'owner@gmail.com').id);
+});
+t('a Mac cannot put code into the owner\'s page: its status is reduced to plain known values', () => {
+  E.as('sara@gmail.com');
+  const tok = C.createMacLink().command.match(/'([0-9a-f]{64})'$/)[1];
+  const evil = '<img src=x onerror=alert(1)>';
+  E.bridge({ action: 'poll', status: { wa: evil, sent_today: evil, extra: evil, job: { sent: evil, total: '5', state: evil, shop_name: 'x'.repeat(500),
+    last: { status: 'sent', phone: '+971 50 123', reason: 'r' } } } }, tok);
+  const h = C.getWhatsAppHelper();
+  assert.strictEqual(h.wa, 'closed'); assert.strictEqual(h.sent_today, 0); assert.strictEqual(h.extra, undefined);
+  assert.strictEqual(h.job.sent, 0); assert.strictEqual(h.job.total, 5); assert.strictEqual(h.job.state, 'stopped');
+  assert.strictEqual(h.job.shop_name.length, 80); assert.strictEqual(h.job.last.phone, '97150123');
+  global.SARA_TOKEN2 = tok;
+});
+t('a Mac\'s regular check-in does not use Google\'s daily settings quota', () => {
+  const before = JSON.stringify(E.scriptProps);
+  for (let i = 0; i < 5; i++) E.bridge({ action: 'poll', status: { wa: 'connected' } }, SARA_TOKEN2);
+  assert.strictEqual(JSON.stringify(E.scriptProps), before);
+});
+t('one huge results upload cannot fill the app\'s shared storage', () => {
+  const items = []; for (let i = 0; i < 2000; i++) items.push({ contact_id: 'C' + i, phone: '9715' + i, status: 'failed', reason: 'ي'.repeat(200) });
+  const r = E.bridge({ action: 'results', results: { kind: 'shop-followups-whatsapp-results', job_id: 'J', shop_id: 'SHOP1', created_at: 'x'.repeat(5000), items } }, SARA_TOKEN2);
+  assert.strictEqual(r.ok, false); assert(/busy/.test(r.error));
+  assert(!Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')), 'nothing stored');
+});
+t('a short Google hiccup does not remove anyone from a workspace', () => {
+  E.as('dad@gmail.com'); const sw = C.getBootstrap().workspaces.find(w => w.owner === 'sara@gmail.com');
+  C.switchWorkspace(sw.id);
+  E.sheetOf('sara@gmail.com').failOnce = true;
+  throwsMsg(() => C.getBootstrap(), /could not open the workspace right now/);
+  assert.strictEqual(C.getBootstrap().workspace.id, sw.id, 'still a member');
+  C.switchWorkspace(C.getBootstrap().workspaces.find(w => w.owner === 'owner@gmail.com').id);
+});
+t('setting up a new Mac for the administrator\'s workspace also stops the original Mac', () => {
+  assert(E.bridge({ action: 'poll', status: {} }, 'test-token').ok);
+  E.as('owner@gmail.com'); C.createMacLink();
+  assert.strictEqual(E.bridge({ action: 'poll', status: {} }, 'test-token').error, 'not allowed');
+});
+t('sends saved by the Mac are written with plain text only (no formulas)', () => {
+  E.as('sara@gmail.com');
+  const tok = C.createMacLink().command.match(/'([0-9a-f]{64})'$/)[1];
+  const job = C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Formula test {first_name}', skipPrevious: false });
+  E.bridge({ action: 'results', results: { kind: 'shop-followups-whatsapp-results', job_id: job.job_id, shop_id: 'SHOP1', template_id: job.template_id,
+    created_at: '=HYPERLINK("x")', items: [{ contact_id: job.items[0].contact_id, phone: job.items[0].phone, status: 'failed', reason: '=IMPORTXML("http://x")' }] } }, tok);
+  C.getWhatsAppHelper(); // saves them (the harness refuses any formula written to a Sheet)
+  assert(E.tab('Send Log', E.sheetOf('sara@gmail.com')).some(l => l.reason === '=IMPORTXML("http://x")'));
+});
+
 /* ======================================================================= */
 console.log('WhatsApp Business API (paid; sends with every laptop off)');
 const okMap = { 1: 'first_name', 2: 'shop_name' };
