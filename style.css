@@ -5,3 +5,7 @@ main{max-width:760px;margin:0 auto;padding:40px 16px 60px}.card{background:var(-
 h1{font-size:28px;margin:0 0 6px}h2{font-size:19px;margin:24px 0 6px}p,li{color:var(--ink)}.muted{color:var(--muted)}a{color:var(--accent)}
 .logo{display:inline-grid;place-items:center;width:40px;height:40px;border-radius:10px;background:var(--accent);color:#fff;font-size:20px;margin-bottom:10px}
 footer{margin-top:20px;font-size:14px;color:var(--muted)}
+.btn{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;font-weight:600;padding:12px 20px;border-radius:10px;margin:6px 0}
+.btn:hover{filter:brightness(1.08)}ol{padding-left:22px}li{margin:6px 0}.tip{border-left:4px solid var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);padding:10px 14px;border-radius:8px;margin:14px 0}
+.step{font-weight:700}code{background:color-mix(in srgb,var(--muted) 15%,transparent);padding:1px 5px;border-radius:5px;font-size:14px;word-break:break-all}
+nav.toc{display:flex;flex-wrap:wrap;gap:4px 14px;margin:8px 0}nav.toc a{white-space:nowrap}
