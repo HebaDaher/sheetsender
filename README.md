@@ -10,7 +10,9 @@ Anyone opens the link with their Google account and gets their **own private wor
 - **Excel reading:** SheetJS Community Edition 0.18.12, bundled locally in `src/SheetJS.html` (Apache 2.0, see `third-party/`)
 - **WhatsApp:** (1) free, from a Mac: a background helper sends through WhatsApp Web — paired from the app with one Terminal line (`mac/install.sh`); (2) paid, the **WhatsApp Business API** (Meta Cloud API, Graph v25.0) with approved templates — works with every laptop off; (3) by hand: a button opens WhatsApp with the message written
 
-The full setup and usage guide is in the shared document that came with this project.
+**Use it:** [Open Shop Follow-ups](https://script.google.com/macros/s/AKfycbxbNPWgRTi4oL_4c0Z_jNo2FH-zCCc7M20dGO-TMZkIkq5vpFTXS2kv1RzDlk4K8S4/exec) · **New users, start here:** [How to start](https://hebadaher.github.io/sheetsender/start.html)
+
+The full setup guide for the administrator is in the shared document that came with this project.
 
 ## Why the Gmail API instead of GmailApp
 
