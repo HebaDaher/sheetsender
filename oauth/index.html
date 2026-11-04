@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex">
+<title>Shop Follow-ups — returning to the app</title><link rel="stylesheet" href="../style.css"></head>
+<body><main><div class="card">
+<!-- sf-oauth-forwarder: Google sends people here after "Sign in with Google" / "Connect a Gmail account". -->
+<!-- This page only passes Google's answer straight on to the app (nothing is stored, shown or sent anywhere else). -->
+<div class="logo">✉</div><h1>Going back to Shop Follow-ups…</h1>
+<p id="msg">If nothing happens, <a id="go" href="https://script.google.com/macros/s/AKfycbxbNPWgRTi4oL_4c0Z_jNo2FH-zCCc7M20dGO-TMZkIkq5vpFTXS2kv1RzDlk4K8S4/exec">open the app</a>.</p>
+</div></main>
+<script>
+(function () {
+  var APP = "https://script.google.com/macros/s/AKfycbxbNPWgRTi4oL_4c0Z_jNo2FH-zCCc7M20dGO-TMZkIkq5vpFTXS2kv1RzDlk4K8S4/exec";
+  var q = new URLSearchParams(location.search), out = new URLSearchParams();
+  // Only what Google sends back, and only in the form it uses.
+  var code = q.get('code') || '', state = q.get('state') || '', error = q.get('error') || '';
+  if (/^[A-Za-z0-9\/_.~-]{1,512}$/.test(code)) out.set('code', code);
+  if (/^[A-Za-z0-9-]{1,80}$/.test(state)) out.set('state', state);
+  if (/^[a-z_]{1,40}$/.test(error)) out.set('error', error);
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  location.replace(APP + (out.toString() ? '?' + out.toString() : ''));
+})();
+</script>
+</body></html>
