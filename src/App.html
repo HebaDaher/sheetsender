@@ -378,6 +378,7 @@
     S.progress = { campaignId: null, detail: null, filter: 'all' };
     S.wa = { templateId: '', search: '' };
     S.tpl = { editing: null };
+    S.aud = { mode: 'all', ids: [] }; S.contactList = ''; S.uploadQueue = []; S.uploadDone = 0;
     return withBusy('Loading shop…', call('getShopData', shopId)).then(function (data) {
       S.data = data;
       S.boot.engine = data.engine;
@@ -431,32 +432,157 @@
   function viewContacts() {
     var html = '';
     if (!S.upload) {
-      html += '<div class="card"><h2>Upload this shop’s Excel file</h2>' +
-        '<p class="muted">The file should have one row per person and a header row (for example: Name, Email, Phone, Consent). ' +
-        'Uploading again is safe: people already in the list are updated, not duplicated.</p>' +
-        '<div class="drop" id="drop"><p><b>Drag the Excel file here</b> or</p>' +
-        '<label class="btn primary">Choose file<input type="file" id="file" accept=".xlsx,.xls,.csv" class="hidden"></label>' +
-        '<p class="muted small" style="margin-top:10px">.xlsx, .xls or .csv</p></div></div>';
+      html += '<div class="card"><h2>Upload this shop’s Excel files</h2>' +
+        '<p class="muted">Each file should have one row per person and a header row (for example: Name, Email, Phone, Consent). ' +
+        'You can choose several files at once. Every file is kept in the <b>Upload history</b> below, so you can send it a different message later without uploading it again. ' +
+        'A person in several files is saved once.</p>' +
+        '<div class="drop" id="drop"><p><b>Drag the Excel files here</b> or</p>' +
+        '<label class="btn primary">Choose files<input type="file" id="file" accept=".xlsx,.xls,.csv" multiple class="hidden"></label>' +
+        '<p class="muted small" style="margin-top:10px">.xlsx, .xls or .csv — one or more</p></div></div>';
     } else {
       html += mappingHtml();
     }
     if (S.importResult) html += importResultHtml(S.importResult);
+    html += listsHtml();
     html += contactsListHtml();
     $('view').innerHTML = html;
     if (!S.upload) bindUpload(); else bindMapping();
+    bindLists();
     bindContactsList();
   }
 
+  /* ---------- Upload history: every uploaded file, ready to use again ---------- */
+  function listById(id) { return (S.data.lists || []).filter(function (l) { return l.list_id === id; })[0]; }
+  function campaignName(id) {
+    var k = S.data.campaigns.filter(function (c) { return c.campaign_id === id; })[0];
+    return k ? k.campaign_name : '';
+  }
+  function listsHtml() {
+    var lists = S.data.lists || [];
+    if (!lists.length) return '';
+    var html = '<div class="card" id="historyCard"><h2>Upload history (' + lists.length + ')</h2>' +
+      '<p class="muted small">Every file you uploaded. Use one again for a <b>new message</b> — no need to upload it again. ' +
+      'The same message is never sent twice to the same person (unless you untick that on the send page).</p><div class="lists">';
+    lists.forEach(function (l) {
+      var used = (l.campaigns || []).map(campaignName).filter(String);
+      html += '<div class="list-row"><div class="list-main"><b>' + esc(l.name) + '</b>' +
+        (l.name !== l.file_name ? ' <span class="muted small">(' + esc(l.file_name) + ')</span>' : '') +
+        '<div class="muted small">' + plural(l.people, 'person') + ' · ' + l.emailOk + ' can get emails · ' + l.waOk + ' can get WhatsApp · uploaded ' + esc(fmt(l.updated_at)) +
+        (l.created_by ? ' by ' + esc(l.created_by) : '') + '</div>' +
+        (used.length ? '<details class="small"><summary>Sent to this file ' + used.length + (used.length === 1 ? ' time' : ' times') + '</summary><ul>' +
+          used.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul></details>' : '<div class="small muted">Nothing sent to this file yet.</div>') +
+        '</div><div class="row list-actions">' +
+        '<button class="btn small primary" data-lsend="' + esc(l.list_id) + '">✉ Send email</button>' +
+        '<button class="btn small wa" data-lwa="' + esc(l.list_id) + '">WhatsApp</button>' +
+        '<button class="btn small" data-lshow="' + esc(l.list_id) + '">Show people</button>' +
+        '<button class="link small" data-lren="' + esc(l.list_id) + '">Rename</button>' +
+        '<button class="link small danger-link" data-ldel="' + esc(l.list_id) + '">Remove</button></div></div>';
+    });
+    return html + '</div></div>';
+  }
+  function bindLists() {
+    var each = function (attr, fn) {
+      Array.prototype.forEach.call(document.querySelectorAll('[' + attr + ']'), function (b) {
+        b.addEventListener('click', function () { fn(b.getAttribute(attr)); });
+      });
+    };
+    each('data-lsend', function (id) { S.aud = { mode: 'pick', ids: [id] }; S.send.review = null; S.view = 'send'; hideBanner(); renderShop(); });
+    each('data-lwa', function (id) { S.aud = { mode: 'pick', ids: [id] }; if (S.wa.api) S.wa.api.review = null; S.view = 'whatsapp'; hideBanner(); renderShop(); });
+    each('data-lshow', function (id) {
+      S.contactList = id; S.contactFilter = 'all'; S.contactSearch = ''; viewContacts();
+      var c = $('contactsCard'); if (c) c.scrollIntoView({ behavior: 'smooth' });
+    });
+    each('data-lren', function (id) {
+      var l = listById(id); if (!l) return;
+      var name = prompt('New name for this uploaded file:', l.name);
+      if (name === null || !name.trim() || name.trim() === l.name) return;
+      withBusy('Saving…', call('renameList', S.shopId, id, name)).then(reloadShop).then(function () { showBanner('success', 'Renamed.'); viewContacts(); });
+    });
+    each('data-ldel', function (id) {
+      var l = listById(id); if (!l) return;
+      if (!confirm('Remove “' + l.name + '” from the upload history?\n\nThe ' + plural(l.people, 'person') + ' in it stay in your contacts ' +
+        '(and in other files they are in). Only this file’s group is removed.')) return;
+      withBusy('Removing…', call('removeList', S.shopId, id)).then(reloadShop).then(function () {
+        S.aud.ids = S.aud.ids.filter(function (x) { return x !== id; });
+        if (S.contactList === id) S.contactList = '';
+        showBanner('success', 'Removed from the upload history.'); viewContacts();
+      });
+    });
+  }
+
+  /* ---------- "Who gets it?": everyone, or people from chosen uploaded files ---------- */
+  function audienceIds() {
+    var a = S.aud || { mode: 'all', ids: [] };
+    if (a.mode !== 'pick') return [];
+    return a.ids.filter(function (id) { return listById(id); });
+  }
+  /** Contacts on the current send: the chosen files' people, or everyone. */
+  function audienceContacts() {
+    var ids = audienceIds();
+    if (!ids.length) return S.data.contacts;
+    return S.data.contacts.filter(function (c) {
+      return String(c.lists || '').split(',').some(function (x) { return ids.indexOf(x) !== -1; });
+    });
+  }
+  function audienceHtml(p) {
+    var lists = S.data.lists || [], a = S.aud;
+    if (!lists.length) return '';
+    var html = '<div class="field aud" id="' + p + 'Aud"><span>Who gets it?</span>' +
+      '<label class="check"><input type="radio" name="' + p + 'AudMode" value="all"' + (a.mode !== 'pick' ? ' checked' : '') + '><span>Everyone in this shop (' + plural(S.data.contacts.length, 'person') + ')</span></label>' +
+      '<label class="check"><input type="radio" name="' + p + 'AudMode" value="pick"' + (a.mode === 'pick' ? ' checked' : '') + '><span>Only people from these uploaded files:</span></label>' +
+      '<div class="aud-lists' + (a.mode === 'pick' ? '' : ' hidden') + '">';
+    lists.forEach(function (l) {
+      html += '<label class="check"><input type="checkbox" data-aud="' + p + '" value="' + esc(l.list_id) + '"' + (a.ids.indexOf(l.list_id) !== -1 ? ' checked' : '') + '>' +
+        '<span>' + esc(l.name) + ' <span class="muted small">— ' + plural(l.people, 'person') + ', uploaded ' + esc(fmt(l.updated_at)) +
+        ((l.campaigns || []).length ? ', sent to ' + l.campaigns.length + '×' : '') + '</span></span></label>';
+    });
+    if (a.mode === 'pick' && !audienceIds().length) html += '<div class="small" style="color:var(--bad)">Tick at least one file.</div>';
+    else if (a.mode === 'pick') html += '<div class="small muted">' + plural(audienceContacts().length, 'person') + ' in the chosen files (someone in two files gets it once).</div>';
+    return html + '</div></div>';
+  }
+  function bindAudience(p, onChange) {
+    var box = $(p + 'Aud'); if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll('input[name="' + p + 'AudMode"]'), function (r) {
+      r.addEventListener('change', function () { S.aud.mode = r.value; onChange(); });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-aud="' + p + '"]'), function (c) {
+      c.addEventListener('change', function () {
+        var ids = S.aud.ids.filter(function (x) { return x !== c.value; });
+        if (c.checked) ids.push(c.value);
+        S.aud.ids = ids; onChange();
+      });
+    });
+  }
+  /** Stops a send when "chosen files" is picked but none is ticked. */
+  function audienceProblem() { return S.aud.mode === 'pick' && !audienceIds().length ? 'Tick at least one uploaded file under “Who gets it?” (or choose Everyone).' : ''; }
+
   function bindUpload() {
     var drop = $('drop'), input = $('file');
-    input.addEventListener('change', function () { if (input.files[0]) readFile(input.files[0]); });
+    input.addEventListener('change', function () { queueFiles(input.files); });
     ['dragenter', 'dragover'].forEach(function (ev) {
       drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
     });
     ['dragleave', 'drop'].forEach(function (ev) {
       drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
     });
-    drop.addEventListener('drop', function (e) { if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+    drop.addEventListener('drop', function (e) { queueFiles(e.dataTransfer.files); });
+  }
+
+  /** Several files: each one is checked (columns) and imported in turn. */
+  function queueFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    var bad = files.filter(function (f) { return !/\.(xlsx|xls|csv)$/i.test(f.name); });
+    if (bad.length) { showBanner('error', 'Please choose Excel files only (.xlsx, .xls or .csv). Not an Excel file: ' + bad.map(function (f) { return f.name; }).join(', ')); return; }
+    if (files.length > 20) { showBanner('error', 'Choose at most 20 files at a time.'); return; }
+    S.uploadQueue = files.slice(1); S.uploadTotal = files.length; S.uploadDone = 0; S.importResult = null;
+    readFile(files[0]);
+  }
+  function nextQueued() {
+    S.uploadDone = (S.uploadDone || 0) + 1;
+    if (S.uploadQueue && S.uploadQueue.length) { readFile(S.uploadQueue.shift()); return true; }
+    S.uploadTotal = 0;
+    return false;
   }
 
   function readFile(file) {
@@ -471,14 +597,16 @@
         var wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
         var sheets = wb.SheetNames.filter(function (n) { return sheetRows(wb.Sheets[n]).length > 0; });
         if (!sheets.length) throw new Error('The file is empty.');
-        S.upload = { fileName: file.name, wb: wb, sheets: sheets };
+        S.upload = { fileName: file.name, wb: wb, sheets: sheets, asNew: false };
         chooseSheet(sheets[0]);
         done();
-        S.importResult = null;
+        if (!S.uploadDone) S.importResult = null; // several files: the totals add up until the last one
         viewContacts();
       } catch (err) {
         done();
-        showBanner('error', 'This file could not be opened: ' + (err.message || err) + '\nTry opening it in Excel and saving as .xlsx.');
+        var more = S.uploadQueue && S.uploadQueue.length;
+        showBanner('error', '“' + file.name + '” could not be opened: ' + (err.message || err) + '\nTry opening it in Excel and saving as .xlsx.' + (more ? '\nThe next file is shown below.' : ''), !!more);
+        if (more) nextQueued(); else { S.upload = null; S.uploadTotal = 0; viewContacts(); }
       }
     };
     reader.readAsArrayBuffer(file);
@@ -571,10 +699,18 @@
 
   function mappingHtml() {
     var u = S.upload;
-    var html = '<div class="card"><div class="row"><h2>Check the columns</h2><span class="spacer"></span>' +
-      '<button class="btn small" id="cancelUpload">Cancel</button></div>' +
+    var many = S.uploadTotal > 1, left = S.uploadQueue ? S.uploadQueue.length : 0;
+    var html = '<div class="card"><div class="row"><h2>Check the columns' + (many ? ' — file ' + (S.uploadDone + 1) + ' of ' + S.uploadTotal : '') + '</h2><span class="spacer"></span>' +
+      (left ? '<button class="btn small" id="skipUpload">Skip this file</button>' : '') +
+      '<button class="btn small" id="cancelUpload">' + (left ? 'Cancel all' : 'Cancel') + '</button></div>' +
       '<p class="muted">File: <b>' + esc(u.fileName) + '</b> — ' + plural(u.rows.length, 'row') + ' found. ' +
       'For each item below, choose the matching column from your file. We guessed them for you — just check.</p>';
+    var same = (S.data.lists || []).filter(function (l) { return l.file_name.toLowerCase() === String(u.fileName).trim().toLowerCase(); })[0];
+    if (same) {
+      html += '<div class="notice info"><b>A file with this name was uploaded before</b> (' + esc(fmt(same.updated_at)) + ', ' + plural(same.people, 'person') + ').' +
+        '<label class="check"><input type="radio" name="sameMode" value="replace"' + (u.asNew ? '' : ' checked') + '><span>Update it: “' + esc(same.name) + '” becomes the people in this file</span></label>' +
+        '<label class="check"><input type="radio" name="sameMode" value="new"' + (u.asNew ? ' checked' : '') + '><span>Keep both: save this as a new file in the history</span></label></div>';
+    }
     if (u.sheets.length > 1) {
       html += '<label class="field"><span>Sheet in the file</span><select id="sheetSel">' +
         u.sheets.map(function (n) { return '<option' + (n === u.sheetName ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') +
@@ -617,7 +753,11 @@
 
   function bindMapping() {
     var u = S.upload;
-    $('cancelUpload').addEventListener('click', function () { S.upload = null; viewContacts(); });
+    $('cancelUpload').addEventListener('click', function () { S.upload = null; S.uploadQueue = []; S.uploadTotal = 0; viewContacts(); });
+    if ($('skipUpload')) $('skipUpload').addEventListener('click', function () { hideBanner(); nextQueued(); });
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="sameMode"]'), function (r) {
+      r.addEventListener('change', function () { u.asNew = r.value === 'new'; });
+    });
     if ($('sheetSel')) $('sheetSel').addEventListener('change', function () { chooseSheet(this.value); viewContacts(); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-map]'), function (sel) {
       sel.addEventListener('change', function () { u.mapping[sel.getAttribute('data-map')] = Number(sel.value); viewContacts(); });
@@ -637,17 +777,22 @@
     if (mappingProblems().length) return;
     var rows = mappedRows();
     var u = S.upload;
-    var chunk = 400, total = { added: 0, updated: 0, unchanged: 0, rejected: 0, problems: [] };
-    var i = 0;
+    var chunk = 400, prev = S.importResult && S.uploadDone ? S.importResult : null;
+    var total = prev || { added: 0, updated: 0, unchanged: 0, rejected: 0, problems: [], files: [] };
+    var i = 0, listId = '', label = S.uploadTotal > 1 ? ' (file ' + (S.uploadDone + 1) + ' of ' + S.uploadTotal + ')' : '';
     busy('Importing…');
     function next() {
       if (i >= rows.length) return Promise.resolve();
       var part = rows.slice(i, i + chunk);
       var firstRowNumber = u.headerIndex + 2 + i;
-      $('busyText').textContent = 'Importing… ' + Math.min(i + chunk, rows.length) + ' of ' + rows.length;
-      return call('importContacts', S.shopId, part, { fileName: u.fileName, firstRowNumber: firstRowNumber }).then(function (r) {
+      $('busyText').textContent = 'Importing' + label + '… ' + Math.min(i + chunk, rows.length) + ' of ' + rows.length;
+      var meta = { fileName: u.fileName, firstRowNumber: firstRowNumber };
+      if (listId) meta.listId = listId; else { meta.first = true; meta.asNew = !!u.asNew; }
+      return call('importContacts', S.shopId, part, meta).then(function (r) {
+        listId = r.listId || listId;
+        if (i === 0) total.files.push(r.listName || u.fileName);
         total.added += r.added; total.updated += r.updated; total.unchanged += r.unchanged; total.rejected += r.rejected;
-        total.problems = total.problems.concat(r.problems).slice(0, 100);
+        total.problems = total.problems.concat(r.problems.map(function (p) { return S.uploadTotal > 1 ? u.fileName + ': ' + p : p; })).slice(0, 100);
         i += chunk;
         return next();
       });
@@ -658,7 +803,8 @@
       done();
       S.upload = null;
       S.importResult = total;
-      showBanner('success', 'Import finished: ' + total.added + ' new, ' + total.updated + ' updated.');
+      if (nextQueued()) { showBanner('success', '“' + u.fileName + '” imported. Now check the next file.'); return; }
+      showBanner('success', 'Import finished' + (total.files.length > 1 ? ' (' + total.files.length + ' files)' : '') + ': ' + total.added + ' new, ' + total.updated + ' updated.');
       viewContacts();
     }, function (err) {
       done();
@@ -667,16 +813,18 @@
   }
 
   function importResultHtml(r) {
-    var html = '<div class="card"><h3>Last import</h3><p>' + badge('ok', r.added + ' new') + ' ' + badge('pending', r.updated + ' updated') +
+    var html = '<div class="card"><h3>Last import' + (r.files && r.files.length ? ': ' + esc(r.files.join(', ')) : '') + '</h3><p>' + badge('ok', r.added + ' new') + ' ' + badge('pending', r.updated + ' updated') +
       ' ' + badge('skipped', r.unchanged + ' unchanged') + (r.rejected ? ' ' + badge('failed', r.rejected + ' not imported') : '') + '</p>';
     if (r.problems.length) html += '<details><summary>' + plural(r.problems.length, 'row') + ' to check</summary><ul class="small">' +
       r.problems.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul></details>';
-    html += '<p class="small muted" style="margin-top:8px">Next step: open <b>2 Send emails</b>.</p></div>';
+    html += '<p class="small muted" style="margin-top:8px">Next step: click <b>✉ Send email</b> or <b>WhatsApp</b> next to the file in the Upload history, or open <b>2 Send emails</b>.</p></div>';
     return html;
   }
 
   function contactsListHtml() {
-    var list = S.data.contacts;
+    var inList = S.contactList ? listById(S.contactList) : null;
+    if (S.contactList && !inList) S.contactList = '';
+    var list = inList ? S.data.contacts.filter(function (c) { return String(c.lists || '').split(',').indexOf(inList.list_id) !== -1; }) : S.data.contacts;
     var counts = { all: list.length, can: 0, cannot: 0, optedout: 0 };
     list.forEach(function (c) {
       if (c.emailCheck.ok) counts.can++; else counts.cannot++;
@@ -690,7 +838,8 @@
       if (!q) return true;
       return [c.full_name, c.first_name, c.email, c.phone].join(' ').toLowerCase().indexOf(q) !== -1;
     });
-    var html = '<div class="card"><h2>Contacts for this shop (' + list.length + ')</h2>';
+    var html = '<div class="card" id="contactsCard"><h2>' + (inList ? 'People in “' + esc(inList.name) + '” (' + list.length + ')' : 'Contacts for this shop (' + list.length + ')') + '</h2>';
+    if (inList) html += '<div class="row" style="margin-bottom:8px"><button class="btn small" id="cListAll">← Show all contacts</button></div>';
     if (!list.length) return html + '<p class="muted">No contacts yet. Upload the Excel file above.</p></div>';
     html += '<div class="row"><input type="search" id="cSearch" placeholder="Search name, email or phone" value="' + esc(S.contactSearch) + '" style="max-width:340px"></div>';
     html += '<div class="chips">' + [['all', 'All'], ['can', 'Can receive emails'], ['cannot', 'Will be skipped'], ['optedout', 'Opted out']].map(function (f) {
@@ -713,6 +862,7 @@
   }
 
   function bindContactsList() {
+    if ($('cListAll')) $('cListAll').addEventListener('click', function () { S.contactList = ''; viewContacts(); });
     var s = $('cSearch');
     if (s) s.addEventListener('input', function () {
       S.contactSearch = s.value;
@@ -918,7 +1068,7 @@
       '<div id="sSpam" style="margin-top:12px"></div></div></div></div>';
 
     if (!st.sched) st.sched = defaultSchedule();
-    html += '<div class="card"><h2>2. Sending options</h2><div class="grid2"><div>' +
+    html += '<div class="card"><h2>2. Sending options</h2>' + audienceHtml('se') + '<div class="grid2"><div>' +
       scheduleHtml('es', st.sched, { word: 'emails', note: 'Emails also respect the safe-sending limits in Settings (most per day and sending hours).' }) +
       '</div><div>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="sName" placeholder="Example: November follow-up" value="' + esc(st.name) + '"></label>' +
@@ -941,7 +1091,7 @@
       $('sSpam').innerHTML = tips.length
         ? '<div class="notice warn"><b>To avoid the spam folder:</b><ul style="margin:6px 0 0;padding-left:18px">' + tips.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul></div>'
         : (st.subject && st.body.trim() ? '<div class="notice ok">✓ Spam check: this email looks like a normal personal message.</div>' : '');
-      var people = S.data.contacts.filter(function (x) { return x.emailCheck.ok; }).slice(0, 4);
+      var people = audienceContacts().filter(function (x) { return x.emailCheck.ok; }).slice(0, 4);
       if (!people.length) people = [c];
       $('sGreets').innerHTML = people.map(function (x) {
         var first = renderText(st.body, fieldsFor(x, S.data.shop)).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '';
@@ -970,6 +1120,7 @@
     $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; });
     $('sName').addEventListener('input', function () { st.name = this.value; });
     $('sReview').addEventListener('click', loadReview);
+    bindAudience('se', function () { st.review = null; viewSend(); });
     live();
     if (st.review) renderReview();
   }
@@ -998,13 +1149,13 @@
   function sendParams() {
     var st = S.send;
     return { shopId: S.shopId, subject: st.subject, body: st.body, delayMinutes: Number(st.sched.minutes), randomExtra: !!st.sched.random,
-      startAt: startAtIso(st.sched), ignoreHours: !!st.sched.ignoreHours, skipPrevious: st.skipPrevious, name: st.name };
+      startAt: startAtIso(st.sched), ignoreHours: !!st.sched.ignoreHours, skipPrevious: st.skipPrevious, name: st.name, listIds: audienceIds() };
   }
 
   function loadReview() {
     var st = S.send;
     var box = $('reviewBox');
-    var prob = scheduleProblem(st.sched);
+    var prob = audienceProblem() || scheduleProblem(st.sched);
     if (prob) { if (box) box.innerHTML = '<div class="notice bad">' + esc(prob) + '</div>'; return; }
     if (box) box.innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Checking contacts…</p></div>';
     call('getCampaignPreview', sendParams())
@@ -1018,6 +1169,7 @@
     if (!box || !r) return;
     var p = r.preview;
     var html = '<div class="card"><h2>3. Review before sending</h2>';
+    if (r.audience && r.audience.length) html += '<p class="muted small">Only people from: <b>' + esc(r.audience.join(', ')) + '</b></p>';
     html += '<div class="stats">' +
       '<div class="stat"><div class="n">' + r.willSend + '</div><div class="l">will get the email</div></div>' +
       '<div class="stat"><div class="n">' + r.willSkip + '</div><div class="l">will be skipped</div></div>' +
@@ -1209,12 +1361,13 @@
     return '<div class="card"><h2 style="margin-top:0">Send WhatsApp messages automatically</h2><div class="modes">' +
       '<button class="mode' + (m === 'mac' ? ' active' : '') + '" data-wamode="mac"><b>From a Mac</b><span>Free · your normal WhatsApp · the Mac must be on</span></button>' +
       '<button class="mode' + (m === 'api' ? ' active' : '') + '" data-wamode="api"><b>WhatsApp Business API</b><span>Paid to Meta per message · works with every laptop off</span></button>' +
-      '</div></div>';
+      '</div>' + audienceHtml('wh') + '</div>';
   }
   function bindWaMode() {
     Array.prototype.forEach.call(document.querySelectorAll('[data-wamode]'), function (b) {
       b.addEventListener('click', function () { setWaMode(b.getAttribute('data-wamode')); hideBanner(); viewWhatsApp(); });
     });
+    bindAudience('wh', function () { if (S.wa.api) S.wa.api.review = null; viewWhatsApp(); });
   }
 
   function viewWhatsApp() {
@@ -1229,7 +1382,7 @@
     }
     var tpl = tpls.filter(function (t) { return t.template_id === w.templateId; })[0] || tpls[0];
     w.templateId = tpl.template_id;
-    var contacts = S.data.contacts;
+    var contacts = audienceContacts();
     var ok = contacts.filter(function (c) { return c.waCheck.ok; });
     var notOk = contacts.filter(function (c) { return !c.waCheck.ok; });
     var q = w.search.toLowerCase();
@@ -1381,7 +1534,7 @@
     var a = S.wa.auto;
     function live() {
       a.body = $('waBody').value;
-      var people = S.data.contacts.filter(function (x) { return x.waCheck.ok; }).slice(0, 4);
+      var people = audienceContacts().filter(function (x) { return x.waCheck.ok; }).slice(0, 4);
       $('waGreets').innerHTML = people.length ? people.map(function (x) {
         var first = renderText(a.body, fieldsFor(x, S.data.shop)).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '';
         return '<div style="padding:4px 0;border-bottom:1px solid var(--line)"><b>' + esc(x.full_name || x.first_name || x.phone) + ':</b> ' + esc(first) + '</div>';
@@ -1401,12 +1554,12 @@
       ta.value = ta.value.slice(0, s0) + ins + ta.value.slice(e0); ta.focus(); ta.setSelectionRange(s0 + ins.length, s0 + ins.length); live(); waCfg.onNote();
     });
     $('waJob').addEventListener('click', function () {
-      var prob = scheduleProblem(a.sched, { limits: true });
+      var prob = audienceProblem() || scheduleProblem(a.sched, { limits: true });
       if (prob) { showBanner('error', prob); return; }
       var sc = a.sched;
       withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious,
         delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc),
-        ignoreHours: !!sc.ignoreHours })).then(function (job) {
+        ignoreHours: !!sc.ignoreHours, listIds: audienceIds() })).then(function (job) {
         var name = 'whatsapp-job-' + String(job.shop_name || job.shop_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() + '-' + job.created_at.slice(0, 16).replace(/[:T]/g, '-') + '.json';
         var blob = new Blob([JSON.stringify(job, null, 1)], { type: 'application/json' });
         var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name;
@@ -1420,14 +1573,15 @@
       });
     });
     $('waStart').addEventListener('click', function () {
-      var prob = scheduleProblem(a.sched, { limits: true });
+      var prob = audienceProblem() || scheduleProblem(a.sched, { limits: true });
       if (prob) { showBanner('error', prob); return; }
       var sc = a.sched;
       var p = { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random,
-        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours };
+        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours, listIds: audienceIds() };
       var st0 = sc.when === 'at' && sc.at ? new Date(sc.at) : new Date();
       var waits = !sc.ignoreHours && !(st0.getHours() >= sc.h1 && st0.getHours() < sc.h2);
-      if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' +
+      var files = audienceIds().map(function (id) { return listById(id).name; });
+      if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' + (files.length ? 'To people from: ' + files.join(', ') + '\n' : '') +
         (waits ? 'First message: ' + sc.h1 + ':00 (outside the sending hours now).\n' : (sc.when === 'at' ? 'Starts: ' + sc.at.replace('T', ' ') + '\n' : 'Starts now.\n')) +
         (sc.random ? sc.minutes + '–' + Math.round(sc.minutes * 1.4) : 'Exactly ' + sc.minutes) + ' minutes between messages, at most ' + sc.cap + ' per day' +
         (sc.ignoreHours ? ', day and night.' : ', ' + sc.h1 + ':00–' + sc.h2 + ':00.'))) return;
@@ -1570,7 +1724,7 @@
 
     function render(text, map, c) { return renderTplText(text, map, fieldsFor(c, S.data.shop)); }
     function live() {
-      var people = S.data.contacts.filter(function (x) { return x.waCheck.ok; }).slice(0, 3);
+      var people = audienceContacts().filter(function (x) { return x.waCheck.ok; }).slice(0, 3);
       $('apiGreets').innerHTML = people.length ? people.map(function (c) {
         return '<div class="wa-bubble" style="margin-bottom:6px">' + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
           '<div class="muted small" style="margin-top:4px">→ ' + esc(c.full_name || c.first_name || c.phone) + '</div></div>';
@@ -1613,17 +1767,17 @@
     var a = apiState(), t = apiTemplate(), sc = a.sched;
     return { shopId: S.shopId, template: t.name, language: t.language, mapping: a.mapping, headerMapping: a.headerMapping, skipPrevious: a.skipPrevious,
       name: a.name, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2),
-      startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours };
+      startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours, listIds: audienceIds() };
   }
 
   function apiPreview() {
-    var a = apiState(), prob = scheduleProblem(a.sched, { limits: true });
+    var a = apiState(), prob = audienceProblem() || scheduleProblem(a.sched, { limits: true });
     if (prob) { showBanner('error', prob); return Promise.reject(prob); }
     return withBusy('Checking…', call('getWhatsAppApiPreview', apiParams())).then(function (r) {
       a.review = r;
       var R = r.rules;
       $('apiReview').innerHTML = '<div class="notice ' + (r.willSend ? 'ok' : 'warn') + '" style="margin-top:12px"><b>' + plural(r.willSend, 'person') + ' will get it</b>' +
-        (r.willSkip ? ', ' + r.willSkip + ' skipped' : '') + '. From ' + esc(r.from) + ', ' + (R.randomExtra ? R.delayMinutes + '–' + Math.round(R.delayMinutes * 1.4) : 'exactly ' + R.delayMinutes) +
+        (r.willSkip ? ', ' + r.willSkip + ' skipped' : '') + (r.audience && r.audience.length ? ' (people from ' + esc(r.audience.join(', ')) + ')' : '') + '. From ' + esc(r.from) + ', ' + (R.randomExtra ? R.delayMinutes + '–' + Math.round(R.delayMinutes * 1.4) : 'exactly ' + R.delayMinutes) +
         ' minutes apart, at most ' + R.dailyCap + ' per day' + (R.startHour === 0 && R.endHour === 24 ? ', day and night' : ', ' + R.startHour + ':00–' + R.endHour + ':00') +
         (r.waitsForHoursLabel ? '. The first one goes out at ' + esc(r.waitsForHoursLabel) : '') + (r.estimatedDays > 1 ? '. About ' + r.estimatedDays + ' days in total' : '') + '.' +
         (r.skipReasons.length ? '<details class="small"><summary>Why people are skipped</summary><ul>' + r.skipReasons.map(function (x) { return '<li>' + esc(x.reason) + ': <b>' + x.count + '</b></li>'; }).join('') + '</ul></details>' : '') + '</div>';

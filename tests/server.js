@@ -103,7 +103,7 @@ http.createServer((req, res) => {
     const q = new URL('http://x' + req.url).searchParams;
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(E.tab(q.get('name'), E.sheetOf(q.get('owner'))))); return;
   }
-  if (req.url === '/state') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.sent, log: E.tab('Send Log'), contacts: E.tab('Contacts') })); return; }
+  if (req.url === '/state') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.sent, log: E.tab('Send Log'), contacts: E.tab('Contacts'), campaigns: E.tab('Campaigns'), lists: E.tab('Lists'), media: E.tab('Media') })); return; }
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.end(renderIndex(req.url.split('?')[1] || ''));
 }).listen(8765, () => console.log('listening 8765'));

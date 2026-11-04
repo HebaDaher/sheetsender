@@ -61,7 +61,7 @@ t('owner runs setup: creates the database Sheet, tabs, example, one trigger', ()
   const msg = C.setup();
   E.lastSetupMsg = C.setup();
   assert(/SHEET123/.test(msg));
-  assert.deepStrictEqual(arr(E.ss.getSheets().map(s => s.name)), ['Shops', 'Contacts', 'Templates', 'Campaigns', 'Send Log']);
+  assert.deepStrictEqual(arr(E.ss.getSheets().map(s => s.name)), ['Shops', 'Contacts', 'Templates', 'Campaigns', 'Send Log', 'Lists']);
   assert.strictEqual(E.triggers.length, 1);
   assert.strictEqual(E.triggers[0].owner, 'owner@gmail.com');
   assert.strictEqual(E.tab('Shops')[0].sender_email, '');

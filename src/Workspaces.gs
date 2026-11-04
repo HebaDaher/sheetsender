@@ -155,7 +155,8 @@ function apiActions_() {
     testGmailAccount: testGmailAccount, disconnectGmailAccount: disconnectGmailAccount, assignShopSender: assignShopSender,
     saveSendingRules: saveSendingRules, restartEngine: restartEngine,
     saveWhatsAppApi: saveWhatsAppApi, refreshWhatsAppTemplates: refreshWhatsAppTemplates, disconnectWhatsAppApi: disconnectWhatsAppApi,
-    getWhatsAppApiTemplates: getWhatsAppApiTemplates, getWhatsAppApiPreview: getWhatsAppApiPreview, startWhatsAppApiCampaign: startWhatsAppApiCampaign
+    getWhatsAppApiTemplates: getWhatsAppApiTemplates, getWhatsAppApiPreview: getWhatsAppApiPreview, startWhatsAppApiCampaign: startWhatsAppApiCampaign,
+    renameList: renameList, removeList: removeList
   };
 }
 

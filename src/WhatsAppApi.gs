@@ -276,7 +276,10 @@ function waApiPlan_(ss, p) {
     });
   }
   const seen = {}, reasons = {};
-  const plan = readTable_(ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }).map(function (c) {
+  const audience = cleanListChoice_(ss, shop.shop_id, p.listIds);
+  const chosen = filterByLists_(readTable_(ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }), audience);
+  if (!chosen.length && audience.ids.length) throw new Error('The chosen files have nobody in them any more.');
+  const plan = chosen.map(function (c) {
     const check = eligibility_(c, 'whatsapp');
     let reason = check.ok ? '' : check.reason;
     if (!reason && seen[c.phone]) reason = 'Same phone number appears twice';
@@ -289,7 +292,9 @@ function waApiPlan_(ss, p) {
   const f = templateFields_(sample, shop);
   return {
     shop: shop, cfg: cfg, tpl: tpl, mapping: mapping, headerMapping: headerMapping, templateId: templateId, plan: plan,
+    audience: audience,
     summary: {
+      audience: audience.names,
       totalContacts: plan.length, willSend: pending.length, willSkip: plan.length - pending.length,
       skipReasons: Object.keys(reasons).map(function (r) { return { reason: r, count: reasons[r] }; }).sort(function (a, b) { return b.count - a.count; }),
       from: cfg.display_phone, fromName: cfg.verified_name,
@@ -334,6 +339,7 @@ function startWhatsAppApiCampaign(params) {
       next_send_at: startMs ? new Date(startMs).toISOString() : now, finished_at: '',
       total: String(p.plan.length), sent: '0', skipped: String(p.summary.willSkip), failed: '0', pending: String(p.summary.willSend),
       random_extra: rules.randomExtra ? 'yes' : 'no', ignore_hours: rules.startHour === 0 && rules.endHour === 24 ? 'yes' : 'no',
+      list_ids: p.audience.ids.join(','),
       channel: 'whatsapp_api', daily_cap: String(rules.dailyCap), start_hour: String(rules.startHour), end_hour: String(rules.endHour),
       wa_template: JSON.stringify({ name: p.tpl.name, language: p.tpl.language, named: p.tpl.named, params: p.tpl.params,
         header_params: p.tpl.header_params, mapping: p.mapping, header_mapping: p.headerMapping, body: p.tpl.body, header: p.tpl.header })

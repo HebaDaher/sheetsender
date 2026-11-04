@@ -256,7 +256,7 @@ function makeEnv(srcDir) {
   };
   const services = Object.assign({}, ctx);
   function compile(dir) {
-    const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].filter(f => fs.existsSync(path.join(dir, f)));
+    const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs', 'Lists.gs', 'Media.gs'].filter(f => fs.existsSync(path.join(dir, f)));
     return files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n') +
       (fs.existsSync(path.join(dir, 'Workspaces.gs')) ? "\nconst APP_URL = 'https://script.google.com/macros/s/DEPLOY123/exec';\n" : '') +
       (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +

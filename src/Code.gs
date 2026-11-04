@@ -39,23 +39,29 @@ const TABS = {
   TEMPLATES: 'Templates',
   CAMPAIGNS: 'Campaigns',
   LOG: 'Send Log',
+  LISTS: 'Lists',
+  MEDIA: 'Media',
   WA_TEMPLATES: 'WhatsApp API templates'
 };
-const CORE_TABS = ['Shops', 'Contacts', 'Templates', 'Campaigns', 'Send Log'];
+const CORE_TABS = ['Shops', 'Contacts', 'Templates', 'Campaigns', 'Send Log', 'Lists'];
 
 const HEADERS = {
   Shops: ['shop_id', 'shop_name', 'sender_email', 'sender_name', 'reply_to', 'country_code', 'active', 'notes'],
   Contacts: ['contact_id', 'shop_id', 'full_name', 'first_name', 'email', 'phone',
     'consent_status', 'consent_source', 'consent_date', 'opted_out', 'opt_out_date', 'opt_out_reason',
-    'created_at', 'updated_at', 'source_file'],
+    'created_at', 'updated_at', 'source_file', 'lists'],
   Templates: ['template_id', 'shop_id', 'template_name', 'channel', 'subject', 'body', 'active', 'updated_at'],
   Campaigns: ['campaign_id', 'shop_id', 'campaign_name', 'template_id', 'sender_email', 'delay_minutes',
     'skip_previous_recipients', 'status', 'status_reason', 'created_by', 'created_at', 'started_at',
     'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending', 'random_extra', 'ignore_hours',
-    'channel', 'wa_template', 'daily_cap', 'start_hour', 'end_hour'],
+    'channel', 'wa_template', 'daily_cap', 'start_hour', 'end_hour', 'list_ids', 'media_id'],
   'Send Log': ['log_id', 'campaign_id', 'shop_id', 'contact_id', 'contact_name', 'email', 'phone', 'template_id',
     'channel', 'sender_email', 'status', 'reason', 'queued_at', 'sent_at', 'attempts', 'done_by'],
-  'WhatsApp API templates': ['name', 'language', 'category', 'status', 'details', 'updated_at']
+  'WhatsApp API templates': ['name', 'language', 'category', 'status', 'details', 'updated_at'],
+  // Every uploaded Excel file is kept as a list (its history), so it can be used again for another message.
+  Lists: ['list_id', 'shop_id', 'name', 'file_name', 'created_at', 'created_by', 'updated_at', 'rows', 'status'],
+  // Photos and videos for WhatsApp (the file itself is in the administrator's Google Drive).
+  Media: ['media_id', 'shop_id', 'name', 'mime', 'size', 'kind', 'created_at', 'created_by', 'meta_id', 'meta_uploaded_at', 'status']
 };
 
 /**
@@ -275,6 +281,19 @@ function appendRows_(table, objs) {
 /** Rewrites many existing rows in one call (rows must be sorted by _row within one block for speed). */
 function updateRows_(table, objs) {
   objs.forEach(function (o) { updateRow_(table, o); });
+}
+
+/** Saves changed rows: a few one by one, many by rewriting the whole tab in one go (much faster). */
+function saveRows_(table, changed) {
+  if (!changed.length) return;
+  const first = table.rows.length ? table.rows[0]._row : 2;
+  const contiguous = table.rows.every(function (o, i) { return o._row === first + i; });
+  if (changed.length > 5 && contiguous && table.rows.length) {
+    table.sheet.getRange(first, 1, table.rows.length, table.headers.length)
+      .setValues(table.rows.map(function (o) { return toArray_(table, o); }));
+  } else {
+    updateRows_(table, changed);
+  }
 }
 
 function str_(v) {
@@ -515,6 +534,9 @@ function engineStatus_() {
 function getShopData(shopId) {
   const ctx = requireUser_();
   const shop = findShop_(ctx.ss, shopId);
+  if (needsBackfill_(ctx.ss, shopId)) {
+    withLock_(function () { if (needsBackfill_(ctx.ss, shopId)) backfillLists_(ctx.ss, shopId); });
+  }
   const templates = readTable_(ctx.ss, TABS.TEMPLATES).rows
     .filter(function (t) { return t.shop_id === shopId && !isDeletedTemplate_(t); })
     .map(stripRow_);
@@ -524,7 +546,8 @@ function getShopData(shopId) {
     if (l.status === 'sent' && l.channel === 'email') lastEmail[l.contact_id] = l.sent_at;
     if (l.channel === 'whatsapp') lastWa[l.contact_id] = l.sent_at;
   });
-  const contacts = readTable_(ctx.ss, TABS.CONTACTS).rows
+  const contactRows = readTable_(ctx.ss, TABS.CONTACTS).rows;
+  const contacts = contactRows
     .filter(function (c) { return c.shop_id === shopId; })
     .map(function (c) {
       const out = stripRow_(c);
@@ -539,7 +562,7 @@ function getShopData(shopId) {
     .map(stripRow_)
     .sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
   return { shop: publicShop_(shop), templates: templates, contacts: contacts, campaigns: campaigns, engine: engineStatus_(),
-    waApi: waApiPublic_(false) };
+    waApi: waApiPublic_(false), lists: listSummaries_(ctx.ss, shopId, contactRows, campaigns) };
 }
 
 /**
@@ -565,6 +588,12 @@ function importContacts(shopId, rows, meta) {
     const now = nowIso_();
     const result = { added: 0, updated: 0, unchanged: 0, rejected: 0, problems: [] };
     const toAdd = [], toUpdate = [];
+    // Upload history: this file becomes (or refreshes) a list that can be used again later.
+    const list = listForImport_(ctx.ss, shopId, meta, ctx.email, table, toUpdate);
+    result.listId = list.list_id;
+    result.listName = list.name || list.file_name;
+    result.reuploaded = !!list._reuploaded;
+    let inFile = 0;
 
     rows.forEach(function (raw, i) {
       const rowNo = (meta.firstRowNumber || 2) + i;
@@ -593,7 +622,9 @@ function importContacts(shopId, rows, meta) {
         result.problems.push('Row ' + rowNo + ': phone "' + raw.phone + '" looks invalid (saved, but WhatsApp will skip it).');
       }
       const existing = (email && byEmail[email]) || (phone && byPhone[phone]);
+      inFile++;
       if (existing) {
+        const joined = addToList_(existing, list.list_id);
         let changed = false;
         ['full_name', 'first_name', 'email', 'phone', 'consent_status', 'consent_source', 'consent_date'].forEach(function (k) {
           if (c[k] && c[k] !== existing[k]) { existing[k] = c[k]; changed = true; }
@@ -611,6 +642,7 @@ function importContacts(shopId, rows, meta) {
           if (toUpdate.indexOf(existing) === -1) toUpdate.push(existing);
           result.updated++;
         } else {
+          if (joined && toUpdate.indexOf(existing) === -1) toUpdate.push(existing); // only joined this file's list
           result.unchanged++;
         }
         if (existing.email) byEmail[existing.email] = existing;
@@ -622,7 +654,7 @@ function importContacts(shopId, rows, meta) {
         full_name: c.full_name, first_name: c.first_name, email: email, phone: phone,
         consent_status: c.consent_status, consent_source: c.consent_source, consent_date: c.consent_date,
         opted_out: c.opted_out, opt_out_date: c.opted_out ? now : '', opt_out_reason: c.opted_out ? 'Marked in imported file' : '',
-        created_at: now, updated_at: now, source_file: meta.fileName || ''
+        created_at: now, updated_at: now, source_file: meta.fileName || '', lists: list.list_id
       };
       toAdd.push(created);
       if (email) byEmail[email] = created;
@@ -631,17 +663,9 @@ function importContacts(shopId, rows, meta) {
     });
 
     // Updates: rewrite the whole data block once (fast), then append new rows.
-    if (toUpdate.length) {
-      const data = table.rows.map(function (o) { return toArray_(table, o); });
-      const first = table.rows.length ? table.rows[0]._row : 2;
-      const contiguous = table.rows.every(function (o, i) { return o._row === first + i; });
-      if (contiguous && data.length) {
-        table.sheet.getRange(first, 1, data.length, table.headers.length).setValues(data);
-      } else {
-        updateRows_(table, toUpdate);
-      }
-    }
+    saveRows_(table, toUpdate);
     appendRows_(table, toAdd);
+    finishListImport_(list, inFile);
     return result;
   });
 }
@@ -785,7 +809,9 @@ function planCampaign_(ss, params) {
   const unknown = unknownPlaceholders_(template.subject + ' ' + template.body);
   if (unknown.length) throw new Error('The template uses unknown fields: ' + unknown.join(', ') + '. Fix it in Templates.');
 
-  const contacts = readTable_(ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; });
+  const audience = cleanListChoice_(ss, shop.shop_id, params.listIds);
+  const contacts = filterByLists_(readTable_(ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }), audience);
+  if (!contacts.length && audience.ids.length) throw new Error('The chosen files have nobody in them any more.');
   const skipPrevious = params.skipPrevious !== false;
   const previous = {};
   if (skipPrevious) {
@@ -812,9 +838,10 @@ function planCampaign_(ss, params) {
   const reasons = {};
   plan.forEach(function (p) { if (p.status === 'skipped') reasons[p.reason] = (reasons[p.reason] || 0) + 1; });
   return {
-    shop: shop, template: template, plan: plan, skipPrevious: skipPrevious,
+    shop: shop, template: template, plan: plan, skipPrevious: skipPrevious, audience: audience,
     summary: {
       totalContacts: contacts.length,
+      audience: audience.names,
       willSend: plan.filter(function (p) { return p.status === 'pending'; }).length,
       willSkip: plan.filter(function (p) { return p.status === 'skipped'; }).length,
       skipReasons: Object.keys(reasons).map(function (r) { return { reason: r, count: reasons[r] }; })
@@ -898,7 +925,7 @@ function startCampaign(params) {
       next_send_at: startMs ? new Date(startMs).toISOString() : now, finished_at: '',
       total: String(p.plan.length), sent: '0', skipped: String(p.summary.willSkip), failed: '0',
       pending: String(p.summary.willSend), random_extra: params.randomExtra === false ? 'no' : 'yes',
-      ignore_hours: params.ignoreHours === true ? 'yes' : 'no'
+      ignore_hours: params.ignoreHours === true ? 'yes' : 'no', list_ids: p.audience.ids.join(',')
     };
     const logRows = p.plan.map(function (item) {
       const c = item.contact;
@@ -1087,7 +1114,8 @@ function buildWhatsAppJob_(ss, params, rules, actor) {
     }
     const items = [], skipped = {};
     const seen = {};
-    readTable_(ctx.ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }).forEach(function (c) {
+    const audience = cleanListChoice_(ctx.ss, shop.shop_id, params.listIds);
+    filterByLists_(readTable_(ctx.ss, TABS.CONTACTS).rows.filter(function (c) { return c.shop_id === shop.shop_id; }), audience).forEach(function (c) {
       const check = eligibility_(c, 'whatsapp');
       let reason = check.ok ? '' : check.reason;
       if (!reason && seen[c.phone]) reason = 'Same phone number appears twice';
@@ -1103,7 +1131,7 @@ function buildWhatsAppJob_(ss, params, rules, actor) {
     return {
       kind: 'shop-followups-whatsapp-job', version: 1,
       job_id: newId_('W'), shop_id: shop.shop_id, shop_name: shop.shop_name, template_id: template.template_id,
-      created_at: nowIso_(), created_by: ctx.email, rules: rules,
+      created_at: nowIso_(), created_by: ctx.email, rules: rules, list_names: audience.names,
       items: items,
       skipped: Object.keys(skipped).map(function (r) { return { reason: r, count: skipped[r] }; })
     };
