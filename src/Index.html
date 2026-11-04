@@ -16,6 +16,7 @@
 
   <div id="busy" class="busy hidden"><div class="busy-box"><div class="spinner"></div><p id="busyText">Working…</p></div></div>
 
+  <script>window.SF_FIRST = <?!= JSON.stringify(first || '') ?>;</script>
   <?!= include('SheetJS'); ?>
   <?!= include('App'); ?>
 </body>

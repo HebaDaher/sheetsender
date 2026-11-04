@@ -59,14 +59,18 @@ t('app refuses before setup', () => { E.as('dad@gmail.com'); throwsMsg(() => C.g
 t('owner runs setup: creates the database Sheet, tabs, example, one trigger', () => {
   E.as('owner@gmail.com');
   const msg = C.setup();
-  C.setup();
+  E.lastSetupMsg = C.setup();
   assert(/SHEET123/.test(msg));
   assert.deepStrictEqual(arr(E.ss.getSheets().map(s => s.name)), ['Shops', 'Contacts', 'Templates', 'Campaigns', 'Send Log']);
   assert.strictEqual(E.triggers.length, 1);
   assert.strictEqual(E.triggers[0].owner, 'owner@gmail.com');
   assert.strictEqual(E.tab('Shops')[0].sender_email, '');
 });
-t('nobody else can re-run setup', () => { E.as('dad@gmail.com'); throwsMsg(() => C.setup(), /already done by owner@gmail.com/); });
+t('nobody else can run setup (not from the web page, not as another account)', () => {
+  E.as('dad@gmail.com'); throwsMsg(() => C.setup(), /must be run by the app administrator in the Apps Script editor/);
+  E.users.active = E.users.effective = 'dad@gmail.com'; throwsMsg(() => C.setup(), /already done by owner@gmail.com/);
+  E.as('owner@gmail.com'); C.addMember('dad@gmail.com'); // Dad helps in the owner's workspace
+});
 t('a stranger or a view-only person sees nobody else\'s data: they are offered their own workspace', () => {
   ['stranger@gmail.com', 'viewer@gmail.com'].forEach(who => {
     E.as(who);
@@ -113,11 +117,56 @@ t('client ID is validated; secret is kept server-side only (never in a page or a
 });
 t('a secret saved by the older version (admin\'s private store) moves to the server store by itself', () => {
   E.as('owner@gmail.com');
-  delete E.scriptProps.OAUTH_CLIENT_SECRET;
+  delete E.scriptProps.OAUTH_CLIENT_SECRET; E.dropCache();
   E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET = G.client.secret;
   assert.strictEqual(C.getSettings().clientSecretSaved, true);
   assert.strictEqual(E.scriptProps.OAUTH_CLIENT_SECRET, G.client.secret);
   assert.strictEqual(E.userProps['owner@gmail.com'].OAUTH_CLIENT_SECRET, undefined);
+});
+
+console.log('Sign in with Google (no warning screen: only the email is asked)');
+t('right after setup, the administrator signs in with a one-time link (before the sign-in client exists)', () => {
+  const tok = (E.lastSetupMsg.match(/\?first=([0-9a-f]{64})/) || [])[1];
+  assert(tok, E.lastSetupMsg);
+  assert.strictEqual(E.real.finishFirstLogin(tok).email, 'owner@gmail.com');
+  throwsMsg(() => E.real.finishFirstLogin(tok), /already used or has expired/);
+  throwsMsg(() => E.real.finishFirstLogin('0'.repeat(64)), /already used or has expired/);
+});
+t('"Sign in with Google" asks Google only for the email address', () => {
+  const url = new URL(E.real.startLogin());
+  const q = Object.fromEntries(url.searchParams);
+  assert.strictEqual(q.scope, 'openid email', 'no Gmail, Drive or Sheets permission');
+  assert.strictEqual(q.redirect_uri, G.redirect);
+  assert.strictEqual(q.prompt, 'select_account', 'the person chooses the account (works with several in one browser)');
+  assert.strictEqual(q.access_type, 'online');
+});
+t('signing in gives a session for exactly that Google account', () => {
+  const r = E.login('sara.login@gmail.com');
+  assert.strictEqual(r.result.email, 'sara.login@gmail.com');
+  assert.strictEqual(C.getBootstrap().user, 'sara.login@gmail.com');
+  assert(G.revoked.length > 0, 'the access token is not kept');
+  throwsMsg(() => E.real.finishLogin(G.consent('x@gmail.com'), r.query.state, ''), /expired or was already used/);
+  throwsMsg(() => E.real.finishLogin(G.consent('x@gmail.com'), 'forged', ''), /expired or was already used/);
+  const u = new URL(E.real.startLogin()); throwsMsg(() => E.real.finishLogin('', u.searchParams.get('state'), 'access_denied'), /cancelled/);
+});
+t('a forged, changed or expired session is refused; the page cannot pick who it is', () => {
+  const good = E.sessionFor('dad@gmail.com');
+  const [a, b] = good.split('.');
+  const forged = Buffer.from('owner@gmail.com').toString('base64url') + '.' + b + '.' + good.split('.')[2];
+  [forged, a + '.' + (Number(b) + 1) + '.' + good.split('.')[2], 'x.y.z', '', null].forEach(tok => {
+    throwsMsg(() => E.real.api(tok, 'getBootstrap', []), /SIGNED_OUT/);
+  });
+  const soon = E.real.makeSession_('dad@gmail.com'); E.advance(31 * 24 * 60);
+  throwsMsg(() => E.real.api(soon, 'getBootstrap', []), /SIGNED_OUT/);
+  E.advance(-31 * 24 * 60);
+});
+t('page actions only through the sign-in door; server-only functions cannot be called', () => {
+  throwsMsg(() => E.real.getBootstrap(), /SIGNED_OUT/);         // a direct call has no session
+  throwsMsg(() => E.real.getSettings(), /SIGNED_OUT/);
+  const tok = E.sessionFor('owner@gmail.com');
+  ['getAccessToken_', 'sendGmail_', 'setup', 'processQueue', 'makeSession_', 'api', 'ownerSecrets_'].forEach(fn => {
+    throwsMsg(() => E.real.api(tok, fn, []), /Unknown action/);
+  });
 });
 
 console.log('Connecting Gmail accounts (OAuth)');
@@ -147,11 +196,9 @@ t('a used or unknown state is refused (no replay)', () => {
   E.as('owner@gmail.com');
   const url = new URL(C.startGmailConnect(''));
   const state = url.searchParams.get('state');
-  const code1 = G.consent('replay@gmail.com');
-  assert(/Connected/.test(C.doGet({ parameter: { state, code: code1 } }).html));
-  const code2 = G.consent('replay@gmail.com');
-  assert(/expired or was already used/.test(C.doGet({ parameter: { state, code: code2 } }).html));
-  assert(/expired or was already used/.test(C.doGet({ parameter: { state: 'forged', code: G.consent('x@gmail.com') } }).html));
+  assert.strictEqual(C.finishGmailConnect(G.consent('replay@gmail.com'), state, ''), 'replay@gmail.com');
+  throwsMsg(() => C.finishGmailConnect(G.consent('replay@gmail.com'), state, ''), /expired or was already used/);
+  throwsMsg(() => C.finishGmailConnect(G.consent('x@gmail.com'), 'forged', ''), /expired or was already used/);
   C.disconnectGmailAccount('replay@gmail.com');
 });
 t('Cancel on Google\'s page is explained', () => {
@@ -548,7 +595,7 @@ t('the app never uses GmailApp', () => {
 console.log('Safe sending (spam / account protection) — fresh simulation');
 {
 const E = makeEnv(SRC); const C = E.ctx; const G = E.google;
-E.as('owner@gmail.com'); C.setup(); C.saveOAuthClient(G.client.id, G.client.secret);
+E.as('owner@gmail.com'); C.setup(); C.saveOAuthClient(G.client.id, G.client.secret); C.addMember('dad@gmail.com');
 E.connect('shop1@gmail.com'); C.assignShopSender('SHOP1', 'shop1@gmail.com');
 E.ss.getSheetByName('Shops').grid[1][4] = 'dad@gmail.com'; // reply_to for SHOP1
 C.testGmailAccount('shop1@gmail.com');

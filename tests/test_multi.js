@@ -100,7 +100,7 @@ console.log('Update from the single-owner version (data, Gmail, Dad, running sen
 console.log('Anyone can use the link: their own private workspace');
 const E = makeEnv(SRC); const C = E.ctx; const G = E.google; const M = E.meta;
 E.as('owner@gmail.com'); C.setup(); C.saveOAuthClient(G.client.id, G.client.secret);
-E.connect('shop1@gmail.com'); C.assignShopSender('SHOP1', 'shop1@gmail.com');
+E.connect('shop1@gmail.com'); C.assignShopSender('SHOP1', 'shop1@gmail.com'); C.addMember('dad@gmail.com');
 E.as('dad@gmail.com');
 C.importContacts('SHOP1', [{ full_name: 'Owner Customer', email: 'oc@ex.com', phone: '0501110000', consent_status: 'yes' }], {});
 
@@ -110,13 +110,14 @@ t('a new person sees "create your workspace" (no data of anybody)', () => {
   assert.strictEqual(b.needsWorkspace, true);
   assert.strictEqual(b.user, 'sara@gmail.com');
 });
-t('creating it makes a new Google Sheet in THEIR Drive, with their first shop', () => {
+t('creating it makes a new Google Sheet for them (shared with them), with their first shop', () => {
   E.as('sara@gmail.com');
   throwsMsg(() => C.createMyWorkspace('Sara Shops', ''), /first shop/);
   C.createMyWorkspace('Sara Shops', 'Sara Bakery');
   const book = E.sheetOf('sara@gmail.com');
   assert(book && book.id !== 'SHEET123');
-  assert.deepStrictEqual(Array.from(book.editors), ['sara@gmail.com']);
+  assert(book.editors.includes('sara@gmail.com'), 'they can open their own Sheet');
+  assert(!book.editors.includes('dad@gmail.com'), 'nobody else');
   const b = C.getBootstrap();
   assert.strictEqual(b.isOwner, true); assert.strictEqual(b.isAdmin, false);
   assert.strictEqual(b.workspace.name, 'Sara Shops');
@@ -146,21 +147,21 @@ t('Settings: their own Gmail accounts, shops and people; the Google sign-in clie
   throwsMsg(() => C.saveOAuthClient(G.client.id, 'GOCSPX-other_secret_1'), /Only the app administrator/);
   throwsMsg(() => C.assignShopSender('SHOP1', 'shop1@gmail.com'), /not a connected Gmail account/);
 });
-t('they connect their own Gmail: token in THEIR private store, status only in their workspace', () => {
+t('they connect their own Gmail: token kept server-side under their workspace only; status only in their workspace', () => {
   E.as('sara@gmail.com');
   const r = E.connect('sara.shop@gmail.com');
   assert(/Connected: sara.shop@gmail.com/.test(r.html), r.html);
-  assert(E.userProps['sara@gmail.com']['GMAIL_TOKEN_sara.shop@gmail.com']);
-  assert(!E.userProps['owner@gmail.com']['GMAIL_TOKEN_sara.shop@gmail.com']);
   const sws = wsOf(E, 'sara@gmail.com'), ows = wsOf(E, 'owner@gmail.com');
+  assert(E.userProps['owner@gmail.com']['GMAIL_TOKEN_' + sws + '_sara.shop@gmail.com'], 'in the private server store, under Sara\'s workspace');
+  assert(!E.userProps['owner@gmail.com']['GMAIL_TOKEN_sara.shop@gmail.com'], 'not usable by the administrator\'s workspace');
   assert(JSON.parse(E.scriptProps['ACCOUNTS@' + sws])['sara.shop@gmail.com']);
   assert(!JSON.parse(E.scriptProps['ACCOUNTS@' + ows])['sara.shop@gmail.com']);
-  assert.strictEqual(E.triggers.filter(t => t.owner === 'sara@gmail.com').length, 1, 'their own every-minute trigger');
+  assert.strictEqual(E.triggers.length, 1, 'one sender for everyone (no new trigger)');
   C.assignShopSender('SHOP1', 'sara.shop@gmail.com');
   E.as('owner@gmail.com');
   throwsMsg(() => C.assignShopSender('SHOP1', 'sara.shop@gmail.com'), /not a connected Gmail account/);
 });
-t('their emails go out from their Gmail by their own trigger; each trigger only touches its own workspace', () => {
+t('their emails go out from their own Gmail; nobody\'s emails use another workspace\'s Gmail', () => {
   E.as('sara@gmail.com');
   C.startCampaign({ shopId: 'SHOP1', subject: 'Hi {first_name}', body: 'Hello {first_name}, fresh bread today at the bakery.', delayMinutes: 3, randomExtra: false });
   E.as('dad@gmail.com');
@@ -171,14 +172,13 @@ t('their emails go out from their Gmail by their own trigger; each trigger only 
   assert.deepStrictEqual(sara, ['sc2@ex.com', 'sc@ex.com']);
   assert.deepStrictEqual(own, ['oc@ex.com']);
   const sends = E.fetchLog.filter(f => /gmail\/v1/.test(f.url));
-  assert(sends.length >= 3 && sends.every(f => ['sara@gmail.com', 'owner@gmail.com'].indexOf(f.as) !== -1), 'only owners\' triggers send');
+  assert(sends.length >= 3 && sends.every(f => f.as === 'owner@gmail.com'), 'only the app\'s sender (trigger) sends');
   E.as('sara@gmail.com');
   assert.strictEqual(C.getBootstrap().engine.healthy, true);
 });
 t('adding a person (like Dad) to a workspace; they can use it but not change settings', () => {
   E.as('sara@gmail.com');
   throwsMsg(() => C.addMember('not-an-email'), /Google \(Gmail\) address/);
-  throwsMsg(() => C.addMember('someone@nogoogle.com'), /must be a Google account/);
   assert.deepStrictEqual(Array.from(C.addMember('Ali@Gmail.com')), ['ali@gmail.com']);
   E.as('ali@gmail.com');
   const b = C.getBootstrap();
@@ -199,13 +199,14 @@ t('someone in two workspaces can switch between them', () => {
   throwsMsg(() => C.switchWorkspace('W_NOPE'), /do not have access/);
   C.switchWorkspace(b.workspaces.find(w => w.name === 'My shops').id);
 });
-t('family added the old way (Sheet editor) keep the family workspace first, even if someone else adds them before their first visit', () => {
+t('only People added in Settings get in (editing rights on a Sheet alone give no access)', () => {
   E.ss.editors.push('mom@gmail.com');
+  E.as('mom@gmail.com');
+  assert.strictEqual(C.getBootstrap().needsWorkspace, true);
   E.as('sara@gmail.com'); C.addMember('mom@gmail.com');
   E.as('mom@gmail.com');
   const b = C.getBootstrap();
-  assert.deepStrictEqual(Array.from(b.workspaces.map(w => w.owner)), ['owner@gmail.com', 'sara@gmail.com']);
-  assert.strictEqual(b.workspace.name, 'My shops');
+  assert.deepStrictEqual(Array.from(b.workspaces.map(w => w.owner)), ['sara@gmail.com']);
   assert.strictEqual(b.ownsWorkspace, false);
 });
 t('removing a person takes their access away', () => {
@@ -236,9 +237,29 @@ t('renaming a workspace; owners only', () => {
 t('a workspace whose Sheet was deleted explains what to do', () => {
   E.as('tom@gmail.com'); C.createMyWorkspace('Tom', 'Tom Shop');
   E.sheetOf('tom@gmail.com').trashed = true;
-  throwsMsg(() => C.getBootstrap(), /trash of your Google Drive/);
+  throwsMsg(() => C.getBootstrap(), /was deleted.*restore it from the trash/);
   E.sheetOf('tom@gmail.com').trashed = false;
   assert.strictEqual(C.getBootstrap().workspace.name, 'Tom');
+});
+
+t('a workspace made with the old sign-in (Sheet in the person\'s own Drive) is made again simply; their old trigger does nothing', () => {
+  // as the previous version left it: a Sheet the app (administrator) cannot open, and a trigger owned by that person
+  E.users.effective = 'old@gmail.com';
+  const book = E.real.SpreadsheetApp.create('old');
+  E.users.effective = 'owner@gmail.com';
+  E.scriptProps['W_WOLD'] = JSON.stringify({ id: 'WOLD', owner: 'old@gmail.com', sheet_id: book.id, name: 'Old shops' });
+  E.scriptProps[E.real.userKey_('old@gmail.com')] = JSON.stringify({ own: 'WOLD', member: [], current: 'WOLD', checked: true });
+  E.scriptProps.WS_VERSION = '2'; E.dropCache();
+  E.triggers.push({ fn: 'processQueue', owner: 'old@gmail.com', getHandlerFunction: () => 'processQueue' });
+  E.as('old@gmail.com');
+  const b = C.getBootstrap();
+  assert.strictEqual(b.needsWorkspace, true); assert.strictEqual(b.remade, true);
+  C.createMyWorkspace('Old shops', 'Old Shop');
+  assert.strictEqual(C.getBootstrap().workspace.name, 'Old shops');
+  const n = E.fetchLog.length;
+  E.runTrigger(2);
+  assert(!E.fetchLog.slice(n).some(f => f.as === 'old@gmail.com'), 'the old per-person trigger sends nothing');
+  E.triggers.pop();
 });
 
 /* ======================================================================= */
@@ -278,15 +299,12 @@ t('Start → the Mac fetches the ready list → results come back into Sara\'s S
   const res = { kind: 'shop-followups-whatsapp-results', job_id: job.job_id, shop_id: job.shop_id, template_id: job.template_id, created_at: job.created_at,
     items: job.items.map(i => ({ contact_id: i.contact_id, phone: i.phone, status: 'sent', at: '2026-11-02T12:00:00' })) };
   const out = E.bridge({ action: 'results', results: res }, SARA_TOKEN);
-  assert(out.ok && out.saved.relayed);
-  assert(Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')), 'waiting in the relay');
-  E.runTrigger(1); // Sara's trigger saves them
-  assert(!Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')));
+  assert(out.ok && out.saved.sent === 2, JSON.stringify(out)); // written straight into Sara's Sheet
+  assert(!Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')), 'nothing waits in shared settings');
   const log = E.tab('Send Log', E.sheetOf('sara@gmail.com')).filter(l => l.channel === 'whatsapp' && l.status === 'sent');
   assert.strictEqual(log.length, 2);
   assert(!E.tab('Send Log').some(l => /Sara/.test(l.contact_name)), 'nothing in the owner\'s Sheet');
-  E.bridge({ action: 'results', results: res }, SARA_TOKEN);
-  E.as('sara@gmail.com'); C.getWhatsAppHelper(); // the page also saves waiting results
+  assert.strictEqual(E.bridge({ action: 'results', results: res }, SARA_TOKEN).saved.already, 2);
   assert.strictEqual(E.tab('Send Log', E.sheetOf('sara@gmail.com')).filter(l => l.channel === 'whatsapp' && l.status === 'sent').length, 2, 'not counted twice');
 });
 t('setting up a new Mac disconnects the old one', () => {
@@ -294,7 +312,7 @@ t('setting up a new Mac disconnects the old one', () => {
   C.createMacLink();
   assert.strictEqual(E.bridge({ action: 'poll', status: {} }, SARA_TOKEN).error, 'not allowed');
 });
-t('a big results batch is split safely and saved in full', () => {
+t('a big results batch is saved in full', () => {
   E.as('sara@gmail.com');
   const tok = C.createMacLink().command.match(/'([0-9a-f]{64})'$/)[1];
   const bulk = C.saveShop({ shop_name: 'Bulk Shop' });
@@ -304,9 +322,6 @@ t('a big results batch is split safely and saved in full', () => {
   const res = { kind: 'shop-followups-whatsapp-results', job_id: job.job_id, shop_id: job.shop_id, template_id: job.template_id, created_at: job.created_at,
     items: job.items.map(i => ({ contact_id: i.contact_id, phone: i.phone, status: 'failed', reason: 'x'.repeat(150), at: '2026-11-02T12:00:00' })) };
   assert(E.bridge({ action: 'results', results: res }, tok).ok);
-  const keys = Object.keys(E.scriptProps).filter(k => k.startsWith('WAR@'));
-  assert(keys.length > 1 && keys.every(k => E.scriptProps[k].length < 9000));
-  C.getWhatsAppHelper();
   assert.strictEqual(E.tab('Send Log', E.sheetOf('sara@gmail.com')).filter(l => l.reason === 'x'.repeat(150)).length, job.items.length);
 });
 
@@ -333,17 +348,19 @@ t('a Mac\'s regular check-in does not use Google\'s daily settings quota', () =>
   for (let i = 0; i < 5; i++) E.bridge({ action: 'poll', status: { wa: 'connected' } }, SARA_TOKEN2);
   assert.strictEqual(JSON.stringify(E.scriptProps), before);
 });
-t('one huge results upload cannot fill the app\'s shared storage', () => {
+t('one huge results upload cannot fill the app\'s shared storage (it goes to that workspace\'s Sheet only)', () => {
+  const before = JSON.stringify(E.scriptProps).length;
   const items = []; for (let i = 0; i < 2000; i++) items.push({ contact_id: 'C' + i, phone: '9715' + i, status: 'failed', reason: 'ي'.repeat(200) });
   const r = E.bridge({ action: 'results', results: { kind: 'shop-followups-whatsapp-results', job_id: 'J', shop_id: 'SHOP1', created_at: 'x'.repeat(5000), items } }, SARA_TOKEN2);
-  assert.strictEqual(r.ok, false); assert(/busy/.test(r.error));
-  assert(!Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')), 'nothing stored');
+  assert(r.ok, JSON.stringify(r));
+  assert(JSON.stringify(E.scriptProps).length - before < 2000, 'shared settings did not grow');
+  assert(!Object.keys(E.scriptProps).some(k => k.startsWith('WAR@')));
 });
 t('a short Google hiccup does not remove anyone from a workspace', () => {
   E.as('dad@gmail.com'); const sw = C.getBootstrap().workspaces.find(w => w.owner === 'sara@gmail.com');
   C.switchWorkspace(sw.id);
   E.sheetOf('sara@gmail.com').failOnce = true;
-  throwsMsg(() => C.getBootstrap(), /could not open the workspace right now/);
+  throwsMsg(() => C.getBootstrap(), /could not open the workspace .* right now/);
   assert.strictEqual(C.getBootstrap().workspace.id, sw.id, 'still a member');
   C.switchWorkspace(C.getBootstrap().workspaces.find(w => w.owner === 'owner@gmail.com').id);
 });
@@ -376,7 +393,7 @@ t('only the workspace owner connects it; wrong details are explained; token neve
   throwsMsg(() => C.saveWhatsAppApi({ phoneNumberId: M.pnid, wabaId: '999999', token: M.token }), /Business Account ID/);
   const api = C.saveWhatsAppApi({ phoneNumberId: M.pnid, wabaId: M.waba, token: M.token });
   assert.strictEqual(api.status, 'connected'); assert.strictEqual(api.display_phone, '+971 50 000 0000'); assert.strictEqual(api.tokenSaved, true);
-  assert.strictEqual(E.userProps['sara@gmail.com']['WA_API_TOKEN_' + wsOf(E, 'sara@gmail.com')], M.token);
+  assert.strictEqual(E.userProps['owner@gmail.com']['WA_API_TOKEN_' + wsOf(E, 'sara@gmail.com')], M.token);
   assert(!JSON.stringify(E.scriptProps).includes(M.token), 'not in shared settings');
   assert(!JSON.stringify(E.sheetOf('sara@gmail.com').sheets.map(s => s.grid)).includes(M.token), 'not in the Sheet');
   assert(!JSON.stringify(C.getSettings()).includes(M.token), 'not sent to the page');
@@ -419,7 +436,7 @@ t('a member starts it; the OWNER\'s trigger sends through Meta — one at a time
   E.runTrigger(1);
   assert.strictEqual(M.sent.length - before, 1);
   const first = M.sent[M.sent.length - 1];
-  assert.strictEqual(first.as, 'sara@gmail.com', 'sent by the owner\'s trigger (dad\'s session never holds the token)');
+  assert.strictEqual(first.as, 'owner@gmail.com', 'sent by the app\'s sender (the trigger), never from Dad\'s page');
   assert.strictEqual(first.body.type, 'template');
   assert.strictEqual(first.body.template.name, 'shop_followup'); assert.strictEqual(first.body.template.language.code, 'en_US');
   const params = first.body.template.components[0].parameters;
@@ -507,7 +524,7 @@ t('disconnect forgets the token and pauses running WhatsApp API sends', () => {
   const k = C.startWhatsAppApiCampaign({ shopId: 'SHOP1', template: 'shop_followup', language: 'en_US', mapping: okMap, startAt: new Date(E.now() + 3600e3).toISOString(), startHour: 0, endHour: 24 });
   const r = C.disconnectWhatsAppApi();
   assert.strictEqual(r.paused, 1);
-  assert.strictEqual(E.userProps['sara@gmail.com']['WA_API_TOKEN_' + wsOf(E, 'sara@gmail.com')], undefined);
+  assert.strictEqual(E.userProps['owner@gmail.com']['WA_API_TOKEN_' + wsOf(E, 'sara@gmail.com')], undefined);
   assert.strictEqual(E.tab('Campaigns', E.sheetOf('sara@gmail.com')).find(c => c.campaign_id === k.campaign_id).status, 'paused');
   throwsMsg(() => C.getWhatsAppApiPreview({ shopId: 'SHOP1', template: 'shop_followup', language: 'en_US', mapping: okMap }), /needs attention/);
 });

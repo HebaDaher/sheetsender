@@ -36,11 +36,22 @@ const OAUTH_CALLBACK_URL = 'https://hebadaher.github.io/sheetsender/callback.htm
 /* Storage helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-/** The workspace owner's private store. Throws unless the code is running as the owner of the open workspace. */
+/**
+ * The private server store (the administrator's UserProperties: only this app's server code can read it).
+ * From a page, only the OWNER of the open workspace may use it; the sending trigger and the Mac bridge (no person
+ * signed in) use it for the workspace they are working on.
+ */
 function ownerSecrets_() {
-  const me = norm_(Session.getEffectiveUser().getEmail());
-  if (!WS || !WS.owner || me !== WS.owner) throw new Error('Only the workspace owner account can use these connections.');
+  if (!WS || !WS.owner) throw new Error('Only the workspace owner account can use these connections.');
+  if (CURRENT_EMAIL && CURRENT_EMAIL !== WS.owner) throw new Error('Only the workspace owner account can use these connections.');
+  if (norm_(Session.getEffectiveUser().getEmail()) !== adminEmail_()) throw new Error('Only the workspace owner account can use these connections.');
   return PropertiesService.getUserProperties();
+}
+
+/** Each workspace's Gmail tokens have their own names (the administrator's original workspace keeps its old ones). */
+function gmailTokenKey_(email) {
+  const legacy = WS.owner === adminEmail_() && WS.id === userRec_(adminEmail_()).own;
+  return SECRET.TOKEN_PREFIX + (legacy ? '' : WS.id + '_') + norm_(email);
 }
 
 function accountStatus_() { return wsJson_('ACCOUNTS', {}) || {}; }
@@ -69,7 +80,7 @@ function redirectUri_() {
  * administrator's code runs) to server-only script properties so every workspace owner's trigger can use it.
  */
 function clientSecret_() {
-  const props = PropertiesService.getScriptProperties();
+  const props = sp_();
   let secret = props.getProperty(PROP.OAUTH_CLIENT_SECRET) || '';
   if (!secret && norm_(Session.getEffectiveUser().getEmail()) === adminEmail_()) {
     const mine = PropertiesService.getUserProperties();
@@ -80,7 +91,7 @@ function clientSecret_() {
 }
 
 function oauthClient_() {
-  const id = PropertiesService.getScriptProperties().getProperty(PROP.OAUTH_CLIENT_ID) || '';
+  const id = sp_().getProperty(PROP.OAUTH_CLIENT_ID) || '';
   const secret = clientSecret_();
   if (!id || !secret) {
     throw new Error('Google sign-in is not configured yet. The app administrator (' + adminEmail_() +
@@ -104,7 +115,7 @@ function parseJson_(text) { try { return JSON.parse(text); } catch (e) { return 
 function getSettings() {
   const ctx = requireOwner_();
   if (ctx.ws.engine_on) ensureTrigger_();
-  const props = PropertiesService.getScriptProperties();
+  const props = sp_();
   const shops = readTable_(ctx.ss, TABS.SHOPS).rows.filter(function (s) { return s.shop_id; });
   const accounts = accountStatus_();
   const list = Object.keys(accounts).sort().map(function (k) {
@@ -156,7 +167,7 @@ function saveOAuthClient(clientId, clientSecret) {
   }
   if (!secret && !clientSecret_()) throw new Error('Paste the Client secret too.');
   if (secret && !/^[A-Za-z0-9_\-]{10,}$/.test(secret)) throw new Error('That does not look like a Google Client secret.');
-  const props = PropertiesService.getScriptProperties();
+  const props = sp_();
   props.setProperty(PROP.OAUTH_CLIENT_ID, id);
   if (secret) props.setProperty(PROP.OAUTH_CLIENT_SECRET, secret);
   return { clientId: id, clientSecretSaved: true };
@@ -167,7 +178,7 @@ function startGmailConnect(loginHint) {
   requireOwner_();
   const client = oauthClient_();
   const state = Utilities.getUuid();
-  CacheService.getUserCache().put('oauth_state_' + state, JSON.stringify({ hint: norm_(loginHint), at: nowIso_() }), 900);
+  CacheService.getScriptCache().put('oauth_state_' + state, JSON.stringify({ hint: norm_(loginHint), by: CURRENT_EMAIL, ws: WS.id, at: nowIso_() }), 900);
   const q = {
     client_id: client.id,
     redirect_uri: redirectUri_(),
@@ -222,10 +233,13 @@ function completeConnect_(p) {
     throw new Error('Finish the connection in the app tab where you clicked Connect, signed in as the owner of the workspace. ' +
       'Open the app with that account, go to Settings and click Connect again. (' + e.message + ')');
   }
-  const cache = CacheService.getUserCache();
+  const cache = CacheService.getScriptCache();
   const key = 'oauth_state_' + String(p.state || '');
-  const saved = cache.get(key);
-  if (!saved) throw new Error('This connection link has expired or was already used. In the app, click Connect again.');
+  const saved = parseJson_(cache.get(key) || '');
+  if (!saved.ws) throw new Error('This connection link has expired or was already used. In the app, click Connect again.');
+  if (saved.by !== ctx.email || saved.ws !== ctx.ws.id) {
+    throw new Error('This connection was started by another account or workspace. In the app, click Connect again.');
+  }
   cache.remove(key);
   if (p.error) {
     throw new Error(p.error === 'access_denied'
@@ -256,9 +270,9 @@ function completeConnect_(p) {
 
   return withLock_(function () {
     const store = ownerSecrets_();
-    const old = parseJson_(store.getProperty(SECRET.TOKEN_PREFIX + email) || '{}');
+    const old = parseJson_(store.getProperty(gmailTokenKey_(email)) || '{}');
     if (old.refresh_token && old.refresh_token !== body.refresh_token) revoke_(old.refresh_token);
-    store.setProperty(SECRET.TOKEN_PREFIX + email, JSON.stringify({
+    store.setProperty(gmailTokenKey_(email), JSON.stringify({
       refresh_token: body.refresh_token,
       access_token: body.access_token,
       expires_at: Date.now() + (Number(body.expires_in || 3600) * 1000)
@@ -307,9 +321,9 @@ function disconnectGmailAccount(email) {
   const addr = norm_(email);
   return withLock_(function () {
     const store = ownerSecrets_();
-    const tok = parseJson_(store.getProperty(SECRET.TOKEN_PREFIX + addr) || '{}');
+    const tok = parseJson_(store.getProperty(gmailTokenKey_(addr)) || '{}');
     revoke_(tok.refresh_token);
-    store.deleteProperty(SECRET.TOKEN_PREFIX + addr);
+    store.deleteProperty(gmailTokenKey_(addr));
     markAccount_(addr, 'disconnected', 'Disconnected by ' + ctx.email);
     const table = readTable_(ctx.ss, TABS.CAMPAIGNS);
     let paused = 0;
@@ -371,7 +385,7 @@ function restartEngine() {
 function getAccessToken_(email, forceRefresh) {
   const addr = norm_(email);
   const store = ownerSecrets_();
-  const tok = parseJson_(store.getProperty(SECRET.TOKEN_PREFIX + addr) || '{}');
+  const tok = parseJson_(store.getProperty(gmailTokenKey_(addr)) || '{}');
   if (!tok.refresh_token) {
     throw senderError_('AUTH', 'The Gmail account ' + addr + ' is not connected.');
   }
@@ -385,11 +399,11 @@ function getAccessToken_(email, forceRefresh) {
   if (res.getResponseCode() === 200 && body.access_token) {
     tok.access_token = body.access_token;
     tok.expires_at = Date.now() + Number(body.expires_in || 3600) * 1000;
-    store.setProperty(SECRET.TOKEN_PREFIX + addr, JSON.stringify(tok));
+    store.setProperty(gmailTokenKey_(addr), JSON.stringify(tok));
     return tok.access_token;
   }
   if (body.error === 'invalid_grant' || body.error === 'unauthorized_client' || res.getResponseCode() === 401) {
-    store.deleteProperty(SECRET.TOKEN_PREFIX + addr);
+    store.deleteProperty(gmailTokenKey_(addr));
     markAccount_(addr, 'needs_reconnect', 'Google says the permission expired or was removed');
     throw senderError_('AUTH', 'The permission for ' + addr + ' expired or was removed.');
   }

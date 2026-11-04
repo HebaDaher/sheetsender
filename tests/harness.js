@@ -93,7 +93,7 @@ function makeEnv(srcDir) {
           delete google.codes[p.code];
           const rt = 'rt_' + (++google.n);
           google.refresh[rt] = c.email;
-          const id = 'h.' + b64url(JSON.stringify({ email: c.email, email_verified: true })) + '.sig';
+          const id = 'h.' + b64url(JSON.stringify({ email: c.email, email_verified: true, aud: google.client.id, iss: 'https://accounts.google.com' })) + '.sig';
           return resp(200, { access_token: newAccess(c.email), expires_in: 3599, refresh_token: rt, scope: c.scopes.join(' '), id_token: id, token_type: 'Bearer' });
         }
         if (p.grant_type === 'refresh_token') {
@@ -228,7 +228,8 @@ function makeEnv(srcDir) {
       formatDate: (d) => new RealDate(d.getTime()).toISOString().slice(0, 16),
       Charset: { UTF_8: 'UTF-8' },
       base64Encode: (s) => Buffer.from(String(s), 'utf8').toString('base64'),
-      base64EncodeWebSafe: (s) => Buffer.from(String(s), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
+      base64EncodeWebSafe: (s) => (Array.isArray(s) ? Buffer.from(s.map(b => b & 0xff)) : Buffer.from(String(s), 'utf8')).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
+      computeHmacSha256Signature: (v, k) => Array.from(require('crypto').createHmac('sha256', String(k)).update(String(v), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
       base64DecodeWebSafe: (s) => Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
       newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
       DigestAlgorithm: { SHA_256: 'sha256' },
@@ -263,36 +264,76 @@ function makeEnv(srcDir) {
   vm.runInContext(code, ctx, { filename: 'project.js' });
   void compile;
 
+  // Pages talk to the app only through api(session, name, args), running as the administrator. `env.ctx` behaves like
+  // the old direct calls: page actions go through api() with the current person's session; the rest are called as is.
+  let real = ctx;
+  let session = '';
+  const ADMIN = 'owner@gmail.com';
+  const isNew = () => typeof real.api === 'function';
+  const proxy = new Proxy({}, {
+    get(_, name) {
+      if (isNew() && typeof name === 'string' && Object.prototype.hasOwnProperty.call(real.apiActions_(), name)) {
+        return (...args) => real.api(session, name, args);
+      }
+      return real[name];
+    },
+    set(_, name, v) { real[name] = v; return true; }
+  });
   const env = {
+    get ctx() { return proxy; },
+    get real() { return real; },
+    get session() { return session; },
     /** Same Google account data (Sheets, properties, triggers…), different code: like publishing an update. */
     loadCode(dir) {
       const c2 = Object.assign({}, services);
       vm.createContext(c2);
       vm.runInContext(compile(dir), c2, { filename: 'project-' + path.basename(dir) + '.js' });
-      env.ctx = c2;
-      return c2;
+      real = c2;
+      env.as(users.active || ADMIN);
+      return proxy;
     },
-    ctx, google, meta, scriptProps, userProps, userCache, scriptCache, triggers, sent, fetchLog, users, sheetsById,
+    google, meta, scriptProps, userProps, userCache, scriptCache, triggers, sent, fetchLog, users, sheetsById,
     get ss() { return ss; },
-    sheetOf(email) { return Object.values(sheetsById).filter(b => b.owner === email).pop(); },
-    as(email) { users.active = email; users.effective = email; },
+    sheetOf(email) {
+      const k = Object.keys(scriptProps).filter(k => k.startsWith('W_') && JSON.parse(scriptProps[k]).owner === email && !JSON.parse(scriptProps[k]).broken).pop();
+      return k ? sheetsById[JSON.parse(scriptProps[k]).sheet_id] : Object.values(sheetsById).filter(b => b.owner === email).pop();
+    },
+    sessionFor(email) { return real.makeSession_(email); },
+    /** After changing script properties directly in a test (the app reads them through the script cache). */
+    dropCache() { Object.keys(scriptCache).forEach(k => { if (k.startsWith('P|')) delete scriptCache[k]; }); },
+    /** Who is using the page. New version: a signed-in session (the app itself runs as the administrator). */
+    as(email) {
+      if (isNew()) {
+        users.effective = ADMIN; users.active = email === ADMIN ? ADMIN : '';
+        session = email ? real.makeSession_(email) : '';
+      } else { users.active = email; users.effective = email; }
+      env.who = email;
+    },
     advance(min) { clock += min * 60000; },
     /** Helper on the Mac calling the bridge deployment (runs as the owner, nobody signed in). */
     bridge(body, token) {
       if (token) body = Object.assign({}, body, { token });
       const a = users.active, e = users.effective;
-      users.effective = 'owner@gmail.com'; users.active = '';
-      try { return JSON.parse(env.ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent()); }
+      users.effective = ADMIN; users.active = '';
+      try { return JSON.parse(real.doPost({ postData: { contents: JSON.stringify(body) } }).getContent()); }
       finally { users.active = a; users.effective = e; }
     },
     realClock() { clock = RealDate.now(); setInterval(() => { clock = RealDate.now(); }, 200).unref(); },
     setClock(iso) { clock = Date.parse(iso); },
+    /** Full "Sign in with Google": the page asks for the link, Google sends back a code, the page finishes. */
+    login(email) {
+      const url = new URL(real.startLogin());
+      const q = Object.fromEntries(url.searchParams);
+      const r = real.finishLogin(google.consent(email), q.state, '');
+      session = r.session; users.effective = ADMIN; users.active = ''; env.who = email;
+      return { query: q, result: r };
+    },
     now() { return clock; },
     runTrigger(minutes) {
       const a = users.active, e = users.effective;
       for (let i = 0; i < minutes; i++) {
         clock += 60000;
-        triggers.slice().forEach(t => { users.effective = users.active = t.owner; env.ctx.processQueue(); });
+        triggers.slice().forEach(t => { users.effective = users.active = t.owner; real.processQueue(); });
       }
       users.active = a; users.effective = e;
     },
@@ -301,14 +342,14 @@ function makeEnv(srcDir) {
       const url = new URL(env.ctx.startGmailConnect(opts.hint || ''));
       const q = Object.fromEntries(url.searchParams);
       const code = opts.cancel ? null : google.consent(email, opts);
-      const cbUser = opts.callbackAs || users.active;
-      const a = users.active, e = users.effective; users.active = users.effective = cbUser;
+      const before = env.who;
+      if (opts.callbackAs) env.as(opts.callbackAs);
       let html;
       try {
         const email = opts.cancel ? env.ctx.finishGmailConnect('', q.state, 'access_denied') : env.ctx.finishGmailConnect(code, opts.state || q.state, '');
         html = 'Connected: ' + email;
       } catch (err) { html = err.message; }
-      users.active = a; users.effective = e;
+      if (opts.callbackAs) env.as(before);
       return { query: q, html };
     },
     tab(name, book) {

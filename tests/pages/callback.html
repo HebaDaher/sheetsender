@@ -14,7 +14,7 @@
 <h1 id="title">Connecting…</h1>
 <p id="msg" class="muted">One moment.</p>
 <div id="fallback" hidden>
-  <p>If the app's Settings page did not say <b>Connected</b>, copy this connection code and paste it there under <b>Connection code</b>, then click <b>Finish connecting</b>:</p>
+  <p>If the app did not continue by itself, copy this code and paste it in the app where it asks for it:</p>
   <div class="code"><input id="code" readonly><button id="copy" type="button">Copy</button></div>
 </div>
 </div></main>
@@ -26,16 +26,16 @@
   // Remove the code from the address bar and history.
   try { history.replaceState(null, '', location.pathname); } catch (e) {}
   if (!data.state) {
-    title.textContent = 'Nothing to connect';
-    msg.textContent = 'Open the Shop Follow-ups app, go to Settings and click "Connect a Gmail account".';
+    title.textContent = 'Nothing to do here';
+    msg.textContent = 'Open the Shop Follow-ups app and click "Sign in with Google" (or, in Settings, "Connect a Gmail account").';
     return;
   }
   if (data.error) {
     title.textContent = 'Not connected';
     title.className = 'bad';
     msg.textContent = data.error === 'access_denied'
-      ? 'Permission was not given. Go back to the app and click Connect again, then click Continue.'
-      : 'Google returned: ' + data.error + '. Go back to the app and click Connect again.';
+      ? 'It was cancelled. Go back to the app and try again, then click Continue on Google\'s page.'
+      : 'Google returned: ' + data.error + '. Go back to the app and try again.';
   }
   var code = btoa(JSON.stringify({ code: data.code, state: data.state, error: data.error })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   document.getElementById('code').value = code;
@@ -50,10 +50,11 @@
     if (sent) {
       title.textContent = 'Almost done';
       title.className = 'ok';
-      msg.textContent = 'Go back to the Shop Follow-ups tab. It finishes the connection by itself. You can close this tab.';
+      msg.textContent = 'Go back to the Shop Follow-ups tab: it continues by itself. This window closes now.';
+      setTimeout(function () { try { window.close(); } catch (e) {} }, 1200);
     } else {
       title.textContent = 'One more step';
-      msg.textContent = 'Go back to the Shop Follow-ups Settings tab and paste the connection code below.';
+      msg.textContent = 'Go back to the Shop Follow-ups tab and paste the code below where it asks for it.';
     }
   }
   document.getElementById('fallback').hidden = !!data.error && !data.code;

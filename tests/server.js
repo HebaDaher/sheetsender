@@ -13,6 +13,11 @@ if (!process.env.FRESH) {
   E.connect('shop1@gmail.com');
   E.ctx.assignShopSender('SHOP1', 'shop1@gmail.com');
 }
+const FIRST = '';
+// The page signs in like a real visitor would. Older tests start already signed in as WEBUSER (the server puts that
+// person's session in the page); LOGIN_FLOW=1 starts signed out so a test can click "Sign in with Google".
+if (!process.env.FRESH) { E.as('owner@gmail.com'); E.ctx.addMember('dad@gmail.com'); }
+let forced = process.env.LOGIN_FLOW ? '' : (process.env.WEBUSER || 'dad@gmail.com');
 E.as(process.env.WEBUSER || 'dad@gmail.com');
 if (process.env.REAL_CLOCK) E.realClock();
 
@@ -36,8 +41,11 @@ function makeRunner() {
 function renderIndex() {
   let html = fs.readFileSync(path.join(SRC, 'Index.html'), 'utf8');
   html = html.replace(/<\?!=\s*include\('(\w+)'\);?\s*\?>/g, (m, n) => fs.readFileSync(path.join(SRC, n + '.html'), 'utf8'));
+  html = html.replace(/<\?!=\s*JSON\.stringify\(first \|\| ''\)\s*\?>/, JSON.stringify(FIRST || ''));
   if (/<\?/.test(html.replace(/<script>[\s\S]*?<\/script>/g, ''))) throw new Error('unresolved template tag');
-  return html.replace('<head>', '<head>' + shim);
+  const inject = forced ? '<script>try{localStorage.setItem("sf_session",' + JSON.stringify(E.sessionFor(forced)) + ')}catch(e){}</script>' : '';
+  forced = forced && process.env.LOGIN_FLOW ? '' : forced;
+  return html.replace('<head>', '<head>' + shim + inject);
 }
 
 http.createServer((req, res) => {
@@ -61,7 +69,7 @@ http.createServer((req, res) => {
     req.on('end', () => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(E.bridge(JSON.parse(body)))); });
     return;
   }
-  if (req.url.startsWith('/as/')) { E.as(decodeURIComponent(req.url.slice(4))); res.end('"ok"'); return; }
+  if (req.url.startsWith('/as/')) { forced = decodeURIComponent(req.url.slice(4)); E.as(forced); res.end('"ok"'); return; }
   if (req.url.startsWith('/consent?')) { // fake Google: returns a one-time code for that account
     const q = new URL('http://x' + req.url).searchParams;
     res.end(JSON.stringify(E.google.consent(q.get('email')))); return;

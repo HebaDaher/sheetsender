@@ -1,7 +1,7 @@
 # Shop Follow-ups
 
 A free web app for following up with interested buyers of several shops.
-Anyone opens the link with their Google account and gets their **own private workspace** (a Google Sheet in their own Drive): they add their shops, connect as many Gmail accounts as they need, upload Excel files, and press **Start sending**. Emails then go out automatically, one every few minutes, **from the Gmail account connected for that shop**, and every result is recorded. A workspace owner can add helpers (e.g. Dad) who can send but not change settings.
+Anyone opens the link, clicks **Sign in with Google** (Google asks only for their email address — no warning screen) and gets their **own private workspace**: they add their shops, connect as many Gmail accounts as they need, upload Excel files, and press **Start sending**. Emails then go out automatically, one every few minutes, **from the Gmail account connected for that shop**, and every result is recorded. A workspace owner can add helpers (e.g. Dad) who can send but not change settings.
 
 - **Backend + hosting:** Google Apps Script (JavaScript, V8), standalone project
 - **Interface:** HTML / CSS / browser JavaScript served by HTML Service
@@ -23,8 +23,9 @@ The full setup guide for the administrator is in the shared document that came w
 | Secret | Stored in | Who can read it |
 |---|---|---|
 | OAuth client secret (one for the app, made by the administrator) | Script properties (`OAUTH_CLIENT_SECRET`) | Server code only; never returned to a page |
-| Each Gmail account's refresh/access token | The workspace owner's `UserProperties` | Only code running as that owner (their session, their trigger) |
-| WhatsApp Business API access token | The workspace owner's `UserProperties` | Only code running as that owner |
+| Session signing key | Script properties (`SESSION_KEY`) | Server code only |
+| Each Gmail account's refresh/access token | Administrator's `UserProperties`, key per workspace | Server code only; from a page only the workspace owner can use it |
+| WhatsApp Business API access token | Administrator's `UserProperties`, key per workspace | Same |
 | Mac helper secret | On that Mac (`~/.shop-followups/bridge.json`, mode 600); the app keeps only its SHA-256 | That Mac |
 | Connected addresses + status | Script properties, per workspace | Non-secret; shown in the app |
 
@@ -32,9 +33,13 @@ No token or secret is ever sent to the web page or written to a Google Sheet. Th
 
 ## Many people, one app (workspaces)
 
-`src/Workspaces.gs`. Each person who opens the link creates their own workspace; the app never shows one workspace's data to another. Owners add or remove people in ⚙ Settings → People (they become editors of that workspace's Sheet). Each owner has their own every-minute trigger (created when they connect Gmail or the WhatsApp API), which only works on their workspace. The person who ran `setup` is the **administrator**: only they set the Google sign-in client. Updating from the single-owner version is automatic: the existing Sheet becomes the administrator's workspace, its settings move into it, and the Sheet's editors (e.g. Dad) keep access.
+`src/Workspaces.gs`. The web app runs as the **administrator** (the person who ran `setup`): *Execute as: Me*, *Anyone*. Visitors authorize nothing in Apps Script, so they see no permission or warning screen. They click **Sign in with Google**; Google is asked only for `openid email` (non-sensitive), the server checks Google's answer and gives the page a signed session (HMAC, 30 days). Every page call goes through `api(session, action, args)`; only the listed actions can be called, and the signed-in email always comes from the session.
 
-While the Google Cloud OAuth app is unverified, Google allows at most **100 users ever** and shows a warning screen.
+Each workspace is a Google Sheet in the administrator's Drive, shared with its owner. Owners add helpers in ⚙ Settings → People (app access only). Gmail and WhatsApp Business API tokens are kept in the administrator's private server store under each workspace's own keys and are only usable for that workspace (from a page: only by its owner). One every-minute trigger sends for all workspaces that have something due (`DUE_INDEX`). Settings are read through the script cache to stay inside Google's daily limits.
+
+Updating from earlier versions is automatic: the original Sheet stays the administrator's workspace and its editors (e.g. Dad) become its members. A workspace made with the previous sign-in (Sheet in the person's own Drive) is simply made again by its owner.
+
+Limits to know: the Gmail connection screen still shows Google's "unverified app" warning (the `gmail.send` scope is sensitive), and Google allows at most 100 Gmail connections while the app is unverified. Everything runs on the administrator's Apps Script quotas (e.g. 90 minutes of trigger time and about 20,000 outside requests a day for a free Gmail account), which is plenty for a few dozen active users.
 
 ## Folder layout
 

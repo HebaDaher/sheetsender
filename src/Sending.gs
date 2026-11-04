@@ -1,8 +1,8 @@
 /**
  * The sending engine.
  *
- * Each workspace owner has their own time-based trigger that calls processQueue() every minute, running as them.
- * It works only on the workspace that person owns (it can read only that owner's Gmail/WhatsApp permissions).
+ * One time-based trigger (the administrator's; the app runs as them) calls processQueue() every minute and works on
+ * every workspace that has a send due (DUE_INDEX says which, in one small setting).
  * It does NOT sleep. Each run it sends at most ONE message per running campaign whose next_send_at is due,
  * then sets next_send_at = now + delay_minutes (+ a small random extra, so the timing does not look robotic).
  * When nothing is due it exits in milliseconds.
@@ -14,27 +14,34 @@
  */
 
 function processQueue() {
-  migrate_();
+  SP_ = null; CURRENT_EMAIL = '';
   const me = norm_(Session.getEffectiveUser().getEmail());
-  const ws = getWs_(userRec_(me).own);
-  if (!ws || ws.owner !== me) return; // only a workspace owner's own trigger sends, and only for that workspace
-  WS = ws;
-  wsSet_('LAST_RUN', nowIso_());
-
-  let ss = null;
-  const open = function () { if (!ss) ss = SpreadsheetApp.openById(ws.sheet_id); return ss; };
-  if (sp_().getKeys().some(function (k) { return k.indexOf(relayPrefix_()) === 0; })) {
-    try { importRelayResults_(open()); } catch (e) { /* next minute */ }
-  }
-
-  const nextDue = Number(wsGet_('NEXT_DUE') || 0);
-  if (!nextDue || Date.now() < nextDue) return; // nothing to do yet
+  if (!me || me !== adminEmail_()) return; // triggers left by the earlier version (one per person) do nothing now
+  migrate_();
+  sp_().setProperty('LAST_RUN', nowIso_());
+  const now = Date.now();
+  const idx = (function () { try { return JSON.parse(sp_().getProperty('DUE_INDEX') || '{}'); } catch (e) { return {}; } })();
+  const due = Object.keys(idx).filter(function (id) { return Number(idx[id]) <= now; });
+  if (!due.length) return; // nothing to do yet (the usual case: exits in milliseconds)
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return; // someone is importing/starting; try next minute
+  IN_LOCK = true;
   try {
-    runDueCampaigns_(open(), Date.now());
+    due.forEach(function (id) {
+      const ws = getWs_(id);
+      if (!ws || ws.broken) { setDue_(id, 0); return; }
+      WS = ws;
+      try {
+        const ss = SpreadsheetApp.openById(ws.sheet_id);
+        importRelayResults_(ss); // results kept by the earlier version, if any
+        runDueCampaigns_(ss, Date.now());
+      } catch (e) {
+        setDue_(id, Date.now() + 10 * 60000); // try this workspace again in 10 minutes
+      }
+    });
   } finally {
+    IN_LOCK = false; WS = null;
     lock.releaseLock();
   }
 }
@@ -189,8 +196,8 @@ function indexBy_(rows, key) {
 }
 
 function setNextDue_(ms) {
-  const current = Number(wsGet_('NEXT_DUE') || 0);
-  if (!current || ms < current) wsSet_('NEXT_DUE', String(ms));
+  const current = Number(dueIndex_()[WS.id] || 0);
+  if (!current || ms < current) setDue_(WS.id, ms);
 }
 
 /** NEXT_DUE_AT = earliest next_send_at of running campaigns (lets the trigger exit instantly when idle). */
@@ -201,8 +208,7 @@ function recomputeNextDue_(campaignRows) {
     const t = c.next_send_at ? new Date(c.next_send_at).getTime() : Date.now();
     if (!min || t < min) min = t;
   });
-  if (min) wsSet_('NEXT_DUE', String(min));
-  else wsDel_('NEXT_DUE');
+  setDue_(WS.id, min);
 }
 
 /* ------------------------------------------------------------------ */

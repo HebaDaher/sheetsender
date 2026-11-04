@@ -1,11 +1,11 @@
 # Browser test of the multi-user features: a new person's own workspace, Settings (shops, people, WhatsApp
 # Business API), WhatsApp tab (API mode and "Set up a Mac"), and switching workspaces.
-import subprocess, time, json, urllib.request, os
+import subprocess, time, json, urllib.request, urllib.parse, os
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(__file__)
 SHOTS = os.path.join(HERE, 'screenshots'); os.makedirs(SHOTS, exist_ok=True)
-env = dict(os.environ, WEBUSER='sara@gmail.com', TICK='3')
+env = dict(os.environ, WEBUSER='sara@gmail.com', TICK='3', LOGIN_FLOW='1')
 srv = subprocess.Popen(['node', os.path.join(HERE, 'server.js')], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
 time.sleep(1.2)
 errors = []
@@ -22,21 +22,39 @@ META = {'pnid': '1112223334445', 'waba': '5556667778889', 'token': 'EAAGtest_tok
 try:
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'])
-        page = b.new_page(viewport={'width': 1200, 'height': 900})
+        ctx = b.new_context(viewport={'width': 1200, 'height': 900})
+        GOOGLE = {'asked': None}
+        def fake_google(route):  # Google's sign-in page: the person picks sara@gmail.com; Google sends a code back
+            u = urllib.parse.urlparse(route.request.url); q = dict(urllib.parse.parse_qsl(u.query))
+            GOOGLE['asked'] = q
+            code = get('/consent?email=sara%40gmail.com')
+            route.fulfill(status=302, headers={'location': 'http://127.0.0.1:8765/pages/callback.html?' + urllib.parse.urlencode({'code': code, 'state': q['state']})})
+        ctx.route('https://accounts.google.com/**', fake_google)
+        page = ctx.new_page()
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         page.on('dialog', lambda d: d.accept())
 
-        # 1. A new person opens the link
+        # 0. Sign in with Google (no warning, only the email is asked)
         page.goto('http://127.0.0.1:8765/')
-        page.wait_for_selector('#wCreate')
+        page.wait_for_selector('#loginBtn')
+        check('Sign in with Google' in page.inner_text('main'), 'link opens straight to "Sign in with Google" (nothing to install or allow)')
+        page.screenshot(path=SHOTS + '/m0-login.png')
+        with page.expect_popup() as pop:
+            page.click('#loginBtn')
+        popup = pop.value
+        page.wait_for_selector('#wCreate', timeout=15000)
+        check(GOOGLE['asked'] and GOOGLE['asked'].get('scope') == 'openid email', 'Google is asked only for the email: ' + str(GOOGLE['asked'] and GOOGLE['asked'].get('scope')))
+        if not popup.is_closed():
+            try: popup.wait_for_event('close', timeout=10000)
+            except Exception: pass
+        check(popup.is_closed(), 'the Google window closes by itself')
+
+        # 1. A new person opens the link
         check('Create my workspace' in page.inner_text('main'), 'new person: welcome with "Create my workspace"')
         check('Example Shop' not in page.inner_text('body'), 'sees nothing of the owner\'s shops')
         page.screenshot(path=SHOTS + '/m1-welcome.png')
-        page.click('#notYou'); page.wait_for_selector('#acctHelp')
-        check('first Google account' in page.inner_text('#acctHelp') and 'sara@gmail.com' in page.inner_text('#acctHelp'), '"Not you?" explains how to use another account')
-        page.screenshot(path=SHOTS + '/m0-not-you.png')
-        page.click('#acctHelpClose')
+        check('sara@gmail.com' in page.inner_text('main') and page.query_selector('#signOut'), 'shows who is signed in, with Sign out')
         page.click('#wCreate')
         page.wait_for_selector('.banner.error')
         check('first shop' in page.inner_text('#banner'), 'shop name is required')
@@ -137,6 +155,10 @@ try:
         check('Example Shop' not in page.inner_text('main'), 'switched to Sara\'s shops')
         page.reload(); page.wait_for_selector('.shop-card')
         check('Sara Bakery' in page.inner_text('main'), 'the choice is remembered')
+
+        # signed in stays signed in; Sign out works
+        page.reload(); page.wait_for_selector('.shop-card')
+        check(page.query_selector('#loginBtn') is None, 'stays signed in after reloading')
 
         # 7. Phone size
         page.set_viewport_size({'width': 375, 'height': 800})

@@ -83,7 +83,9 @@ const OPTOUT_WORDS = ['yes', 'y', 'true', '1', 'opted out', 'opted-out', 'opt ou
 function doGet(e) {
   const p = (e && e.parameter) || {};
   if (p.state && (p.code || p.error)) return oauthCallbackPage_(p); // Google sends people back here after "Allow"
-  return HtmlService.createTemplateFromFile('Index')
+  const page = HtmlService.createTemplateFromFile('Index');
+  page.first = /^[0-9a-f]{64}$/.test(String(p.first || '')) ? String(p.first) : '';
+  return page
     .evaluate()
     .setTitle(APP_NAME)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -104,9 +106,13 @@ function include(name) {
  * Creates the administrator's workspace (or repairs it) and installs the sending trigger. Safe to run again.
  */
 function setup() {
-  migrate_();
-  const props = PropertiesService.getScriptProperties();
+  SP_ = null;
+  const props = sp_();
   const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  if (CURRENT_EMAIL || norm_(Session.getActiveUser().getEmail()) !== me) {
+    throw new Error('setup must be run by the app administrator in the Apps Script editor.');
+  }
+  migrate_();
   const existingOwner = String(props.getProperty(PROP.OWNER_EMAIL) || '').toLowerCase();
   if (!me) throw new Error('Could not read your Google account email. Please try again.');
   if (existingOwner && existingOwner !== me) {
@@ -119,7 +125,7 @@ function setup() {
     ss = SpreadsheetApp.openById(ws.sheet_id);
   } else {
     ss = SpreadsheetApp.create(APP_NAME + ' — Database');
-    ws = { id: newId_('W'), owner: me, sheet_id: ss.getId(), name: 'My shops', created_at: nowIso_(), shared_by_sheet: true };
+    ws = { id: newId_('W'), owner: me, sheet_id: ss.getId(), name: 'My shops', created_at: nowIso_(), members: [] };
     saveWs_(ws);
     rec.own = ws.id; rec.current = ws.id; rec.checked = true;
     saveUserRec_(rec);
@@ -128,8 +134,13 @@ function setup() {
   prepareSheet_(ss, 'Example Shop');
   installTrigger_();
 
+  // A one-time link signs the administrator in before the Google sign-in client exists (valid 24 hours).
+  const first = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+  props.setProperty('FIRST_LOGIN', sha256Hex_(first) + '|' + (Date.now() + 24 * 3600000));
+  const url = String(ScriptApp.getService().getUrl() || '');
   const msg = 'Setup finished.\nAdministrator: ' + me + '\nYour workspace Sheet: ' + ss.getUrl() +
-    '\nNext: open the app link, go to Settings, save the Google sign-in client and connect Gmail accounts.';
+    '\nNext: open this link ONCE to sign in (valid 24 hours): ' + (/\/exec$/.test(url) ? url : '<the App link>') + '?first=' + first +
+    '\nThen go to Settings, save the Google sign-in client and connect Gmail accounts.';
   Logger.log(msg);
   return msg;
 }
@@ -192,9 +203,11 @@ function seedExamples_(ss, shopName) {
 /* ------------------------------------------------------------------ */
 
 function withLock_(fn) {
+  if (IN_LOCK) return fn(); // already inside
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('The app is busy (another action is running). Please try again in a few seconds.');
-  try { return fn(); } finally { lock.releaseLock(); }
+  IN_LOCK = true;
+  try { return fn(); } finally { IN_LOCK = false; lock.releaseLock(); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -433,9 +446,9 @@ function getBootstrap() {
   } catch (e) {
     if (!e.noWorkspace) throw e;
     // First visit: nothing yet. The page offers "Create my workspace".
-    return { needsWorkspace: true, user: signedInEmail_(), admin: adminEmail_(), appName: APP_NAME };
+    return { needsWorkspace: true, remade: !!e.remade, user: signedInEmail_(), admin: adminEmail_(), appName: APP_NAME };
   }
-  const props = PropertiesService.getScriptProperties();
+  const props = sp_();
   const shops = readTable_(ctx.ss, TABS.SHOPS).rows
     .filter(function (s) { return s.shop_id && isActive_(s.active); })
     .map(publicShop_);
@@ -456,7 +469,7 @@ function getBootstrap() {
         : 'Gmail sending is not available yet: the app administrator (' + adminEmail_() + ') still has to finish the Google sign-in setup.';
     } else if (!connected.length) settingsNeeded = 'connect at least one Gmail account.';
     else if (shops.some(function (s) { return !s.senderOk; })) settingsNeeded = 'some shops have no connected Gmail account chosen.';
-    if (ctx.ws.engine_on) ensureTrigger_(); // puts the sender back if it was removed
+    ensureTrigger_(); // puts the sender back if it was removed
   }
   const rec = userRec_(ctx.email);
   return {
@@ -480,18 +493,14 @@ function getBootstrap() {
 }
 
 function engineStatus_() {
-  const last = WS ? wsGet_('LAST_RUN') : '';
+  const last = sp_().getProperty('LAST_RUN') || '';
   const minutes = last ? Math.round((Date.now() - new Date(last).getTime()) / 60000) : null;
-  // A new workspace has no trigger until its owner connects something: nothing to warn about yet.
-  if (!last && !(WS && WS.engine_on)) return { lastRun: '', minutesAgo: null, healthy: true, notStarted: true };
-  // Just switched on: its first run comes within a minute or two.
-  if (!last && WS.engine_on_at && Date.now() - new Date(WS.engine_on_at).getTime() < 5 * 60000) return { lastRun: '', minutesAgo: null, healthy: true };
-  return { lastRun: last || '', minutesAgo: minutes, healthy: minutes !== null && minutes <= 10 };
+  if (!last) return { lastRun: '', minutesAgo: null, healthy: true, notStarted: true }; // first run comes within a minute
+  return { lastRun: last, minutesAgo: minutes, healthy: minutes <= 10 };
 }
 
 function getShopData(shopId) {
   const ctx = requireUser_();
-  importRelayResults_(ctx.ss); // WhatsApp results the Mac sent while nobody had the app open
   const shop = findShop_(ctx.ss, shopId);
   const templates = readTable_(ctx.ss, TABS.TEMPLATES).rows
     .filter(function (t) { return t.shop_id === shopId && !isDeletedTemplate_(t); })
@@ -1224,7 +1233,6 @@ function revokeMac_(ws) {
 /** For the WhatsApp tab: is the helper running, is WhatsApp connected, how is the current send going. */
 function getWhatsAppHelper() {
   const ctx = requireUser_();
-  importRelayResults_(ctx.ss);
   const st = helperStatus_();
   st.pending = waCommands_().map(function (c) { return { type: c.type, at: c.at }; });
   st.installed = macLinked_();
@@ -1347,6 +1355,11 @@ function importRelayResults_(ss) {
   if (!WS) return 0;
   const props = sp_();
   const prefix = relayPrefix_();
+  if (!sp_().getProperty('RELAY_SEEN') && !props.getKeys().some(function (k) { return k.indexOf('WAR@') === 0; })) {
+    sp_().setProperty('RELAY_SEEN', 'empty'); // the earlier version's relay is empty: never look again
+    return 0;
+  }
+  if (sp_().getProperty('RELAY_SEEN') === 'empty') return 0;
   const keys = props.getKeys().filter(function (k) { return k.indexOf(prefix) === 0; }).sort();
   if (!keys.length) return 0;
   return withLock_(function () {
@@ -1392,6 +1405,7 @@ function workspaceForToken_(token) {
 
 /** The bridge. Only Mac helpers with a valid token; each sees only its own workspace. */
 function doPost(e) {
+  SP_ = null;
   let req = {};
   try { req = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return jsonOut_({ ok: false, error: 'bad request' }); }
   try {
@@ -1401,7 +1415,6 @@ function doPost(e) {
   const ws = workspaceForToken_(req.token);
   if (!ws) return jsonOut_({ ok: false, error: 'not allowed' });
   WS = ws;
-  const me = norm_(Session.getEffectiveUser().getEmail());
   try {
     if (req.action === 'poll') {
       const status = cleanHelperStatus_(req.status);
@@ -1418,7 +1431,7 @@ function doPost(e) {
       const cmd = waCommands_().filter(function (c) { return c.id === req.command_id && c.type === 'start'; })[0];
       if (!cmd) return jsonOut_({ ok: false, error: 'no such command' });
       let job = getJob_(cmd.id);
-      if (!job && ws.owner === me) { // older command (before this update): build it here
+      if (!job) { // older command (before this update): build it here
         const ss = SpreadsheetApp.openById(ws.sheet_id);
         job = withLock_(function () { return buildWhatsAppJob_(ss, cmd.params, whatsAppRules_(cmd.params), cmd.by); });
       }
@@ -1426,13 +1439,9 @@ function doPost(e) {
       return jsonOut_({ ok: true, job: job });
     }
     if (req.action === 'results') {
-      if (ws.owner === me) {
-        const ss = SpreadsheetApp.openById(ws.sheet_id);
-        const n = withLock_(function () { return recordWhatsAppResults_(ss, req.results, 'WhatsApp Sender (Mac)'); });
-        return jsonOut_({ ok: true, saved: n });
-      }
-      withLock_(function () { relayAdd_(req.results); });
-      return jsonOut_({ ok: true, saved: { relayed: true } });
+      const ss = SpreadsheetApp.openById(ws.sheet_id); // the app runs as the administrator: it can open every workspace
+      const n = withLock_(function () { return recordWhatsAppResults_(ss, req.results, 'WhatsApp Sender (Mac)'); });
+      return jsonOut_({ ok: true, saved: n });
     }
     return jsonOut_({ ok: false, error: 'unknown action' });
   } catch (err) {

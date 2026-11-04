@@ -1,23 +1,33 @@
 /**
- * Workspaces — every person who opens the app gets their own private space.
+ * Workspaces and sign-in — every person who opens the link gets their own private space.
  *
- *  - A workspace = one Google Sheet (in its owner's own Google Drive) + its own settings: Gmail accounts, safe-sending
- *    rules, WhatsApp (Mac helper or WhatsApp Business API). Nobody can see another workspace's data.
- *  - The person who creates a workspace is its OWNER. The owner can add PEOPLE (e.g. Dad) in ⚙ Settings > People:
- *    they are given Editor access to the workspace's Sheet and can use it from the app, but cannot change settings.
- *  - Each owner's emails are sent by their OWN every-minute trigger, running as them, so their Gmail permissions
- *    (tokens) stay in their own private store (UserProperties) and are never shared with anyone.
- *  - The ADMIN is the person who installed the app (ran setup). Only the admin manages the Google sign-in client
- *    (Client ID/secret) that everyone uses to connect Gmail accounts. The admin's workspace is the original one.
+ * HOW SIGN-IN WORKS (no "unverified app" screen to get in)
+ *  - The web app runs as the app ADMINISTRATOR (the person who installed it): "Execute as: Me", "Anyone".
+ *    Visitors authorize nothing in Apps Script, so Google shows them no permission or warning screen.
+ *  - A visitor clicks "Sign in with Google": Google's own page asks only to share their email address
+ *    (scopes openid + email, which Google does not treat as sensitive). The server checks Google's answer and gives
+ *    the page a signed session (HMAC, 30 days). Every call from the page goes through api(session, fn, args); the
+ *    session decides who the person is. Nothing else in the code trusts the browser about identity.
+ *  - Works with several Google accounts in one browser: the person chooses the account on Google's page.
  *
- * Storage (script properties — shared, non-secret):
- *   U_<hash of email>  {own, member[], current, checked}        which workspaces a person can open
- *   W_<id>             {id, owner, sheet_id, name, ...}         one workspace
- *   <NAME>@<id>        a workspace setting (ACCOUNTS, SEND_RULES, NEXT_DUE, LAST_RUN, WA_*, …)
+ * WORKSPACES
+ *  - A workspace = one Google Sheet + its own settings: Gmail accounts, safe-sending rules, WhatsApp. Its Sheet is
+ *    kept in the administrator's Google Drive and shared (Editor) with its owner, so the owner can open it in Sheets.
+ *  - The person who creates a workspace is its OWNER. Owners add PEOPLE (e.g. Dad) in ⚙ Settings > People; people use
+ *    the workspace through the app only, and cannot change settings.
+ *  - Gmail / WhatsApp Business API tokens of every workspace stay in the administrator's private server store
+ *    (UserProperties), under that workspace's own keys. They are never sent to a page or written to a Sheet.
+ *  - ONE every-minute trigger (the administrator's) sends for all workspaces.
+ *
+ * Storage (script properties — shared, non-secret; read through a cache to stay inside Google's daily limits):
+ *   U_<hash of email>  {own, member[], current}           which workspaces a person can open
+ *   W_<id>             {id, owner, sheet_id, name, members[], ...}
+ *   <NAME>@<id>        a workspace setting (ACCOUNTS, SEND_RULES, NEXT_DUE, WA_*, …)
  *   T_<sha256 token>   workspace id of a paired Mac helper (the token itself stays on that Mac)
  */
 
-const WS_VERSION = '2';
+const WS_VERSION = '3';
+
 let WS = null; // the workspace of the current request / trigger run
 
 /** The original single-workspace settings and where they move to (one time, automatically). */
@@ -26,8 +36,159 @@ const LEGACY_KEYS = {
   NEXT_DUE_AT: 'NEXT_DUE', LAST_ENGINE_RUN: 'LAST_RUN'
 };
 
-function sp_() { return PropertiesService.getScriptProperties(); }
+/*
+ * Script properties, read through the script cache. Google allows about 50,000 property reads/writes a day for the
+ * whole app (it all runs as the administrator now), and the pages and Macs ask often, so repeated reads come from
+ * the cache. Every write goes to both. A value read after a cache miss is cached only briefly.
+ */
+let SP_ = null;
+let IN_LOCK = false;
+function sp_() {
+  if (SP_) return SP_;
+  const props = PropertiesService.getScriptProperties();
+  const cache = CacheService.getScriptCache();
+  const NONE = '\u0000none';
+  const memo = {};
+  const ck = function (k) { return 'P|' + k; };
+  const put = function (k, v, ttl) { try { cache.put(ck(k), v, ttl); } catch (e) { /* too big for the cache: fine */ } };
+  SP_ = {
+    getProperty: function (k) {
+      if (IN_LOCK) { const f = props.getProperty(k); memo[k] = f; put(k, f === null ? NONE : f, 21600); return f; } // exact inside a lock
+      if (Object.prototype.hasOwnProperty.call(memo, k)) return memo[k];
+      let v = cache.get(ck(k));
+      if (v === null || v === undefined) { v = props.getProperty(k); put(k, v === null ? NONE : v, 30); }
+      else if (v === NONE) v = null;
+      memo[k] = v;
+      return v;
+    },
+    setProperty: function (k, v) { v = String(v); props.setProperty(k, v); memo[k] = v; put(k, v, 21600); return SP_; },
+    deleteProperty: function (k) { props.deleteProperty(k); memo[k] = null; put(k, NONE, 21600); return SP_; },
+    /** Fresh value straight from the store (inside a lock, before changing it). */
+    fresh: function (k) { const v = props.getProperty(k); memo[k] = v; return v; },
+    getKeys: function () { return props.getKeys(); }
+  };
+  return SP_;
+}
 function adminEmail_() { return norm_(sp_().getProperty(PROP.OWNER_EMAIL)); }
+
+/* ---------------- sign-in sessions ---------------- */
+
+const SESSION_DAYS = 30;
+let CURRENT_EMAIL = ''; // set only by api() from a valid session
+
+function sessionKey_() {
+  let k = sp_().getProperty('SESSION_KEY');
+  if (!k) { k = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); sp_().setProperty('SESSION_KEY', k); }
+  return k;
+}
+function b64u_(text) { return Utilities.base64EncodeWebSafe(String(text), Utilities.Charset.UTF_8).replace(/=+$/, ''); }
+function sign_(text) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(String(text), sessionKey_())).replace(/=+$/, '');
+}
+/** A signed note "this browser is <email> until <date>". Nothing else is kept on the server. */
+function makeSession_(email) {
+  const body = b64u_(norm_(email)) + '.' + (Date.now() + SESSION_DAYS * 86400000);
+  return body + '.' + sign_(body);
+}
+function readSession_(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3 || parts[2].length < 20) return '';
+  const body = parts[0] + '.' + parts[1];
+  if (sign_(body) !== parts[2]) return '';
+  if (!(Number(parts[1]) > Date.now())) return '';
+  try {
+    const p = parts[0] + '==='.slice((parts[0].length + 3) % 4);
+    return norm_(Utilities.newBlob(Utilities.base64DecodeWebSafe(p)).getDataAsString());
+  } catch (e) { return ''; }
+}
+
+/**
+ * The ONE door from the page: api(session, name, args). Only the actions listed here can be called, and only with a
+ * valid session; the signed-in email comes from the session, never from the browser.
+ */
+function api(session, name, args) {
+  SP_ = null;
+  const email = readSession_(session);
+  if (!email) throw new Error('SIGNED_OUT: Please sign in again.');
+  const actions = apiActions_();
+  if (!Object.prototype.hasOwnProperty.call(actions, name)) throw new Error('Unknown action.');
+  CURRENT_EMAIL = email;
+  try {
+    return actions[name].apply(null, Array.isArray(args) ? args : []);
+  } finally {
+    CURRENT_EMAIL = ''; WS = null;
+  }
+}
+
+/** What the page may ask for (everything else is server-only). */
+function apiActions_() {
+  return {
+    getBootstrap: getBootstrap, createMyWorkspace: createMyWorkspace, switchWorkspace: switchWorkspace, renameWorkspace: renameWorkspace,
+    addMember: addMember, removeMember: removeMember, saveShop: saveShop,
+    getShopData: getShopData, importContacts: importContacts, markOptedOut: markOptedOut, saveTemplate: saveTemplate, deleteTemplate: deleteTemplate,
+    getCampaignPreview: getCampaignPreview, startCampaign: startCampaign, pauseCampaign: pauseCampaign, resumeCampaign: resumeCampaign,
+    stopCampaign: stopCampaign, getCampaignDetail: getCampaignDetail, logWhatsAppOpened: logWhatsAppOpened,
+    getWhatsAppJob: getWhatsAppJob, importWhatsAppResults: importWhatsAppResults, getWhatsAppHelper: getWhatsAppHelper,
+    startWhatsAppAuto: startWhatsAppAuto, stopWhatsAppAuto: stopWhatsAppAuto, openWhatsAppOnMac: openWhatsAppOnMac, createMacLink: createMacLink,
+    getSettings: getSettings, saveOAuthClient: saveOAuthClient, startGmailConnect: startGmailConnect, finishGmailConnect: finishGmailConnect,
+    testGmailAccount: testGmailAccount, disconnectGmailAccount: disconnectGmailAccount, assignShopSender: assignShopSender,
+    saveSendingRules: saveSendingRules, restartEngine: restartEngine,
+    saveWhatsAppApi: saveWhatsAppApi, refreshWhatsAppTemplates: refreshWhatsAppTemplates, disconnectWhatsAppApi: disconnectWhatsAppApi,
+    getWhatsAppApiTemplates: getWhatsAppApiTemplates, getWhatsAppApiPreview: getWhatsAppApiPreview, startWhatsAppApiCampaign: startWhatsAppApiCampaign
+  };
+}
+
+/** "Sign in with Google": Google's page asks only to share the email address (no warning screen). */
+function startLogin() {
+  SP_ = null;
+  migrate_();
+  const client = oauthClient_();
+  const state = Utilities.getUuid();
+  CacheService.getScriptCache().put('LOGIN_' + state, '1', 900);
+  const q = { client_id: client.id, redirect_uri: redirectUri_(), response_type: 'code', scope: 'openid email',
+    prompt: 'select_account', access_type: 'online', state: state };
+  return OAUTH.AUTH_URL + '?' + Object.keys(q).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(q[k]); }).join('&');
+}
+
+/** The administrator's one-time first sign-in link (made by setup). */
+function finishFirstLogin(token) {
+  SP_ = null;
+  return withLock_(function () {
+    const saved = String(sp_().getProperty('FIRST_LOGIN') || '').split('|');
+    if (!saved[0] || saved[0] !== sha256Hex_(String(token || '')) || !(Number(saved[1]) > Date.now())) {
+      throw new Error('This first sign-in link was already used or has expired. Click "Sign in with Google".');
+    }
+    sp_().deleteProperty('FIRST_LOGIN');
+    return { session: makeSession_(adminEmail_()), email: adminEmail_() };
+  });
+}
+
+/** Google sends the person back with a one-time code; the server asks Google who it is and returns a session. */
+function finishLogin(code, state, error) {
+  SP_ = null;
+  const cache = CacheService.getScriptCache();
+  const key = 'LOGIN_' + String(state || '');
+  if (!cache.get(key)) throw new Error('This sign-in link expired or was already used. Click "Sign in with Google" again.');
+  cache.remove(key);
+  if (error) throw new Error(error === 'access_denied' ? 'Sign-in was cancelled. Click "Sign in with Google" again.' : 'Google returned an error: ' + error);
+  const client = oauthClient_();
+  const res = UrlFetchApp.fetch(OAUTH.TOKEN_URL, {
+    method: 'post', muteHttpExceptions: true,
+    payload: { code: code, client_id: client.id, client_secret: client.secret, redirect_uri: redirectUri_(), grant_type: 'authorization_code' }
+  });
+  const body = parseJson_(res.getContentText());
+  if (res.getResponseCode() !== 200 || !body.id_token) {
+    throw new Error('Google did not finish the sign-in (' + (body.error_description || body.error || res.getResponseCode()) + '). Try again.');
+  }
+  const id = decodeJwtPayload_(body.id_token);
+  const email = norm_(id.email);
+  if (!email || id.email_verified === false || String(id.aud) !== client.id ||
+      ['accounts.google.com', 'https://accounts.google.com'].indexOf(String(id.iss)) === -1) {
+    throw new Error('Google did not confirm the email address of that account.');
+  }
+  revoke_(body.access_token); // only the email was needed
+  return { session: makeSession_(email), email: email };
+}
 
 function readJsonProp_(key, fallback) {
   try { const v = sp_().getProperty(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
@@ -83,11 +244,14 @@ function wsJson_(name, fallback) {
   try { const v = wsGet_(name); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; }
 }
 
-/** Workspaces this person can open, own first. Missing ones are dropped. */
+function canUseWs_(ws, email) {
+  return !!(ws && !ws.broken && (ws.owner === email || (ws.members || []).indexOf(email) !== -1));
+}
+/** Workspaces this person can open, own first. */
 function workspaceIds_(rec) {
   const ids = [];
-  if (rec.own && getWs_(rec.own)) ids.push(rec.own);
-  rec.member.forEach(function (id) { if (ids.indexOf(id) === -1 && getWs_(id)) ids.push(id); });
+  if (rec.own && canUseWs_(getWs_(rec.own), rec.email)) ids.push(rec.own);
+  rec.member.forEach(function (id) { if (ids.indexOf(id) === -1 && canUseWs_(getWs_(id), rec.email)) ids.push(id); });
   return ids;
 }
 
@@ -131,37 +295,47 @@ function migrate_() {
       });
       props.deleteProperty(PROP.SHEET_ID);
     }
+    if (props.getProperty('WS_VERSION') !== WS_VERSION) migrateToAdminRun_(props);
     props.setProperty('WS_VERSION', WS_VERSION);
+    try { CacheService.getScriptCache().remove('P|WS_VERSION'); } catch (e) { /* fine */ }
   } finally {
     lock.releaseLock();
   }
 }
 
 /**
- * People given Editor access to the admin's original Sheet (the way Dad was added before workspaces existed) are
- * found automatically the first time they open the app.
+ * Version 3: the app now runs as the administrator. People who were Editors of a workspace's Sheet become its
+ * members (Dad keeps access). A workspace whose Sheet is in someone else's Drive (made with the previous sign-in)
+ * cannot be opened by the app any more: it is marked, and its owner simply creates a new one.
  */
-function discoverMembership_(rec) {
-  if (rec.checked && (rec.own || rec.member.length)) return rec;
-  const adminWs = getWs_(userRec_(adminEmail_()).own);
-  if (adminWs && adminWs.shared_by_sheet && adminWs.owner !== rec.email && rec.member.indexOf(adminWs.id) === -1) {
-    try {
-      const ss = SpreadsheetApp.openById(adminWs.sheet_id);
-      if (editorsOf_(ss).indexOf(rec.email) !== -1) {
-        rec.member.unshift(adminWs.id); // the family's original workspace comes first
-        if (!rec.current) rec.current = adminWs.id;
-      }
-    } catch (e) { /* no access: not a member */ }
-  }
-  rec.checked = true;
-  saveUserRec_(rec);
-  return rec;
+function migrateToAdminRun_(props) {
+  const admin = norm_(props.getProperty(PROP.OWNER_EMAIL));
+  const due = {};
+  props.getKeys().forEach(function (k) {
+    if (k.indexOf('NEXT_DUE@') === 0) { const v = Number(props.getProperty(k)); if (v) due[k.slice(9)] = v; props.deleteProperty(k); }
+  });
+  props.setProperty('DUE_INDEX', JSON.stringify(due));
+  props.getKeys().filter(function (k) { return k.indexOf('W_') === 0; }).forEach(function (k) {
+    let ws; try { ws = JSON.parse(props.getProperty(k)); } catch (e) { return; }
+    if (!ws || ws.members) return;
+    let ss = null;
+    try { ss = SpreadsheetApp.openById(ws.sheet_id); } catch (e) { ss = null; }
+    if (!ss) { ws.broken = true; ws.members = []; props.setProperty(k, JSON.stringify(ws)); return; }
+    ws.members = editorsOf_(ss).filter(function (e) { return e && e !== ws.owner && e !== admin; });
+    props.setProperty(k, JSON.stringify(ws));
+    ws.members.forEach(function (m) {
+      const key = userKey_(m);
+      let r = {}; try { r = JSON.parse(props.getProperty(key) || '{}'); } catch (e) { r = {}; }
+      r.member = Array.isArray(r.member) ? r.member : [];
+      if (r.member.indexOf(ws.id) === -1) r.member.unshift(ws.id);
+      props.setProperty(key, JSON.stringify({ own: r.own || '', member: r.member, current: r.current || ws.id, checked: true }));
+    });
+  });
 }
 
 function signedInEmail_() {
-  const email = norm_(Session.getActiveUser().getEmail());
-  if (!email) throw new Error('Please sign in to your Google account and reload this page.');
-  return email;
+  if (!CURRENT_EMAIL) throw new Error('SIGNED_OUT: Please sign in again.');
+  return CURRENT_EMAIL;
 }
 
 function noWorkspaceError_() {
@@ -175,27 +349,25 @@ function requireUser_() {
   migrate_();
   if (!adminEmail_()) throw new Error('The app is not set up yet. The owner must run "setup" once in the Apps Script editor.');
   const email = signedInEmail_();
-  const rec = discoverMembership_(userRec_(email));
+  const rec = userRec_(email);
   const ids = workspaceIds_(rec);
   const id = ids.indexOf(rec.current) !== -1 ? rec.current : ids[0];
-  if (!id) throw noWorkspaceError_();
+  if (!id) {
+    if (rec.own && getWs_(rec.own) && getWs_(rec.own).broken) {
+      const e = new Error('Your workspace was made with the earlier sign-in and must be made again: click "Create my workspace".');
+      e.noWorkspace = true; e.remade = true; throw e;
+    }
+    throw noWorkspaceError_();
+  }
   const ws = getWs_(id);
-  let ss = null, openError = '';
-  try { ss = SpreadsheetApp.openById(ws.sheet_id); } catch (e) { ss = null; openError = String(e && e.message || e); }
-  const ok = ss && (email === ws.owner || editorsOf_(ss).indexOf(email) !== -1);
-  if (!ok) {
-    if (email === ws.owner) {
-      throw new Error('The Google Sheet of your workspace "' + ws.name + '" cannot be opened. It may be in the trash of your Google Drive: ' +
-        'restore it there, then reload this page.');
+  let ss;
+  try { ss = SpreadsheetApp.openById(ws.sheet_id); } catch (e) {
+    const m = String(e && e.message || e);
+    if (/not found|does not exist|deleted|missing/i.test(m)) {
+      throw new Error('The Google Sheet of the workspace "' + ws.name + '" was deleted. ' + adminEmail_() +
+        ' (the app administrator) can restore it from the trash of their Google Drive; then reload this page.');
     }
-    if (!ss && !/permission|not found|missing|deleted|does not exist|don't have|denied/i.test(openError)) {
-      throw new Error('Google could not open the workspace right now (' + openError + '). Wait a minute and reload the page.');
-    }
-    rec.member = rec.member.filter(function (x) { return x !== id; });
-    if (rec.current === id) rec.current = '';
-    saveUserRec_(rec);
-    throw new Error('You no longer have access to "' + ws.name + '". Its owner (' + ws.owner + ') removed you, or gave you view-only access. ' +
-      'Reload the page' + (rec.own || rec.member.length ? ' to open your other workspace.' : ' to create your own workspace.'));
+    throw new Error('Google could not open the workspace "' + ws.name + '" right now (' + m + '). Wait a minute and reload the page.');
   }
   if (rec.current !== id) { rec.current = id; saveUserRec_(rec); }
   WS = ws;
@@ -229,7 +401,7 @@ function prepareSheet_(ss, firstShopName) {
 
 /* ---------------- API used by the web page ---------------- */
 
-/** First visit: makes this person's own workspace (a new Google Sheet in THEIR Drive) with their first shop. */
+/** First visit: makes this person's own workspace (a new Google Sheet, shared with them) with their first shop. */
 function createMyWorkspace(name, firstShopName) {
   migrate_();
   if (!adminEmail_()) throw new Error('The app is not set up yet.');
@@ -239,10 +411,12 @@ function createMyWorkspace(name, firstShopName) {
   if (!shopName) throw new Error('Write the name of your first shop (you can add more later).');
   return withLock_(function () {
     const rec = userRec_(email);
-    if (rec.own && getWs_(rec.own)) throw new Error('You already have your own workspace. Reload the page.');
-    const ss = SpreadsheetApp.create(APP_NAME + ' — ' + wsName);
+    const old = rec.own ? getWs_(rec.own) : null;
+    if (old && !old.broken) throw new Error('You already have your own workspace. Reload the page.');
+    const ss = SpreadsheetApp.create(APP_NAME + ' — ' + wsName + ' (' + email + ')');
     prepareSheet_(ss, shopName);
-    const ws = { id: newId_('W'), owner: email, sheet_id: ss.getId(), name: wsName, created_at: nowIso_() };
+    try { ss.addEditor(email); } catch (e) { /* they can still use everything in the app */ }
+    const ws = { id: newId_('W'), owner: email, sheet_id: ss.getId(), name: wsName, created_at: nowIso_(), members: [] };
     saveWs_(ws);
     rec.own = ws.id; rec.current = ws.id; rec.checked = true;
     saveUserRec_(rec);
@@ -269,22 +443,24 @@ function renameWorkspace(name) {
 }
 
 function membersOf_(ctx) {
-  return editorsOf_(ctx.ss).filter(function (e) { return e && e !== ctx.ws.owner; }).sort();
+  return (getWs_(ctx.ws.id).members || []).slice().sort();
 }
 
-/** Owner: lets another Google account use this workspace (gives them Editor access to its Sheet). */
+/** Owner: lets another Google account use this workspace through the app (not by editing the Sheet). */
 function addMember(email) {
   const ctx = requireOwner_();
   const addr = norm_(email);
   if (!isValidEmail_(addr)) throw new Error('Write the person\'s Google (Gmail) address.');
   if (addr === ctx.email) throw new Error('That is you — you already own this workspace.');
   return withLock_(function () {
-    try { ctx.ss.addEditor(addr); } catch (e) {
-      throw new Error('Google could not share the workspace with ' + addr + '. It must be a Google account (Gmail or Google Workspace). (' + e.message + ')');
-    }
+    const ws = getWs_(ctx.ws.id);
+    const members = ws.members || [];
+    if (members.indexOf(addr) === -1) members.push(addr);
+    if (members.length > 30) throw new Error('A workspace can have at most 30 people.');
+    patchWs_(ws.id, { members: members });
     const rec = userRec_(addr);
     if (rec.member.indexOf(ctx.ws.id) === -1) rec.member.push(ctx.ws.id);
-    saveUserRec_(rec); // "checked" is left as it is: their first visit still finds the family's original workspace
+    saveUserRec_(rec);
     return membersOf_(ctx);
   });
 }
@@ -295,7 +471,8 @@ function removeMember(email) {
   const addr = norm_(email);
   if (addr === ctx.ws.owner) throw new Error('The owner cannot be removed.');
   return withLock_(function () {
-    try { ctx.ss.removeEditor(addr); } catch (e) { /* already removed */ }
+    patchWs_(ctx.ws.id, { members: (getWs_(ctx.ws.id).members || []).filter(function (m) { return m !== addr; }) });
+    try { ctx.ss.removeEditor(addr); } catch (e) { /* was not an editor */ }
     const rec = userRec_(addr);
     if (!rec.isNew) {
       rec.member = rec.member.filter(function (x) { return x !== ctx.ws.id; });
@@ -338,28 +515,33 @@ function saveShop(s) {
   });
 }
 
-/* ---------------- the every-minute trigger of each workspace owner ---------------- */
+/* ---------------- the one every-minute trigger (the administrator's) ---------------- */
 
-/** (Re)installs the every-minute sending trigger of the person running this code. */
+/** (Re)installs the every-minute sending trigger. The app runs as the administrator, so it is theirs. */
 function installTrigger_() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'processQueue') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('processQueue').timeBased().everyMinutes(1).create();
-  if (WS && norm_(Session.getEffectiveUser().getEmail()) === WS.owner && !WS.engine_on) {
-    patchWs_(WS.id, { engine_on: true, engine_on_at: nowIso_() });
-  }
-  try { CacheService.getUserCache().put('trigger_ok', '1', 21600); } catch (e) { /* best effort */ }
+  try { CacheService.getScriptCache().put('TRIGGER_OK', '1', 21600); } catch (e) { /* best effort */ }
 }
 
-/** Makes sure the workspace owner's trigger exists (only possible in the owner's own session). */
+/** Puts the sender back if it was removed (checked at most every 6 hours). */
 function ensureTrigger_() {
-  if (!WS || norm_(Session.getEffectiveUser().getEmail()) !== WS.owner) return false;
-  const cache = CacheService.getUserCache();
-  if (cache.get('trigger_ok') && WS.engine_on) return true;
+  const cache = CacheService.getScriptCache();
+  if (cache.get('TRIGGER_OK')) return true;
+  if (norm_(Session.getEffectiveUser().getEmail()) !== adminEmail_()) return false;
   const has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'processQueue'; });
   if (!has) installTrigger_();
-  else if (!WS.engine_on) patchWs_(WS.id, { engine_on: true, engine_on_at: nowIso_() });
-  cache.put('trigger_ok', '1', 21600);
+  cache.put('TRIGGER_OK', '1', 21600);
   return true;
+}
+
+/* ---------------- which workspaces have sends due (one setting, read every minute) ---------------- */
+
+function dueIndex_() { try { return JSON.parse(sp_().fresh('DUE_INDEX') || '{}'); } catch (e) { return {}; } }
+function setDue_(wsId, ms) {
+  const idx = dueIndex_();
+  if (ms) idx[wsId] = ms; else delete idx[wsId];
+  sp_().setProperty('DUE_INDEX', JSON.stringify(idx));
 }

@@ -53,12 +53,25 @@
   function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text || status) + '</span>'; }
   function plural(n, word) { return n + ' ' + (n === 1 ? word : (word === 'person' ? 'people' : word + 's')); }
 
-  function call(fn) {
-    var args = Array.prototype.slice.call(arguments, 1);
+  /* ---------- Sign-in session (kept in this browser; signed by the server) ---------- */
+  var SESSION_KEY = 'sf_session';
+  var memSession = '';
+  function getSession() { try { return localStorage.getItem(SESSION_KEY) || memSession; } catch (e) { return memSession; } }
+  function setSession(v) { memSession = v || ''; try { if (v) localStorage.setItem(SESSION_KEY, v); else localStorage.removeItem(SESSION_KEY); } catch (e) { /* kept in memory */ } }
+
+  function rawCall(fn, args) {
     return new Promise(function (resolve, reject) {
       google.script.run
         .withSuccessHandler(resolve)
         .withFailureHandler(function (err) { reject(err); })[fn].apply(null, args);
+    });
+  }
+  /** Every action goes through api(session, name, args); the server checks who is signed in. */
+  function call(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return rawCall('api', [getSession(), fn, args]).catch(function (err) {
+      if (/SIGNED_OUT/.test(err && err.message ? err.message : String(err))) { setSession(''); renderLogin(); return new Promise(function () {}); }
+      throw err;
     });
   }
   function errText(err) {
@@ -110,10 +123,59 @@
 
   /* ---------------- Boot ---------------- */
   function start() {
+    if (window.SF_FIRST && !getSession()) {
+      var first = window.SF_FIRST; window.SF_FIRST = '';
+      withBusy('Signing you in…', rawCall('finishFirstLogin', [first])).then(function (r) { setSession(r.session); start(); });
+      return;
+    }
+    if (!getSession()) { renderLogin(); return; }
     call('getBootstrap').then(useBoot, function (err) {
       $('app').innerHTML = '<div class="card"><h2>Cannot open the app</h2><p>' + esc(errText(err)) + '</p>' +
         '<p class="muted small">If this keeps happening, send this message to the person who set up the app.</p></div>';
     });
+  }
+
+  /* ---------- Sign in with Google (only the email address is shared) ---------- */
+  var pendingLogin = null;
+  function renderLogin(message) {
+    stopAutoRefresh();
+    $('who').innerHTML = '';
+    $('app').innerHTML = '<div class="card login-card"><div class="logo-big">✉</div><h1>Shop Follow-ups</h1>' +
+      '<p class="muted">Follow up with the people interested in your shops — by email and WhatsApp.</p>' +
+      (message ? '<div class="notice warn">' + esc(message) + '</div>' : '') +
+      '<button class="btn primary big gbtn" id="loginBtn"><span class="g">G</span> Sign in with Google</button>' +
+      '<p class="small muted" style="margin-top:12px">Google asks only to share your email address with the app. Several Google accounts in this browser? Just choose the one you want.</p>' +
+      '<div id="loginPaste" class="hidden" style="margin-top:14px;text-align:left"><label class="field"><span>Sign-in code (only if this page did not continue by itself)</span>' +
+      '<div class="row"><input type="text" id="loginCode" placeholder="Paste the code from the Google tab"><button class="btn small" id="loginCodeGo">Continue</button></div></label></div>' +
+      '<p class="small muted" style="margin-top:18px"><a href="https://hebadaher.github.io/sheetsender/start.html" target="_blank" rel="noopener">How it works</a> · ' +
+      '<a href="https://hebadaher.github.io/sheetsender/privacy.html" target="_blank" rel="noopener">Privacy</a></p></div>';
+    $('loginBtn').addEventListener('click', login);
+    $('loginCodeGo').addEventListener('click', function () {
+      var d = null;
+      try { d = JSON.parse(atob(($('loginCode').value || '').trim().replace(/-/g, '+').replace(/_/g, '/'))); } catch (e) { d = null; }
+      if (!d || !d.state || (!d.code && !d.error)) { showBanner('error', 'That is not a valid code. Copy the whole code from the Google tab.'); return; }
+      finishLogin(d.code, d.state, d.error);
+    });
+  }
+  function login() {
+    var win = window.open('', '_blank', 'width=520,height=680');
+    rawCall('startLogin', []).then(function (url) {
+      var st = (url.match(/[?&]state=([^&]+)/) || [])[1];
+      pendingLogin = { state: st ? decodeURIComponent(st) : '' };
+      if (win) win.location.href = url; else { window.open(url, '_blank'); }
+      $('loginPaste').classList.remove('hidden');
+    }, function (e) { if (win) win.close(); showBanner('error', errText(e)); });
+  }
+  function finishLogin(code, state, error) {
+    if (pendingLogin && pendingLogin.state && state !== pendingLogin.state) return;
+    pendingLogin = null;
+    withBusy('Signing in…', rawCall('finishLogin', [code || '', state || '', error || ''])).then(function (r) {
+      setSession(r.session); hideBanner(); start();
+    });
+  }
+  function signOut() {
+    if (!confirm('Sign out of Shop Follow-ups on this browser?')) return;
+    setSession(''); S.boot = null; renderLogin();
   }
 
   function useBoot(boot) {
@@ -133,10 +195,10 @@
     } else if (b.workspace) {
       html += '<span class="ws-name">' + esc(b.workspace.name) + '</span> · ';
     }
-    html += '<span class="small">' + esc(b.user) + '</span> <button class="link small" id="notYou">Not you?</button>';
+    html += '<span class="small">' + esc(b.user) + '</span> <button class="link small" id="signOut">Sign out</button>';
     if (b.isOwner) html += ' <button class="btn small" id="openSettings" style="margin-left:8px">⚙ Settings</button>';
     $('who').innerHTML = html;
-    $('notYou').addEventListener('click', showAccountHelp);
+    $('signOut').addEventListener('click', signOut);
     if ($('openSettings')) $('openSettings').addEventListener('click', function () { hideBanner(); renderSettings(); });
     if ($('wsSel')) $('wsSel').addEventListener('change', function () {
       var v = this.value;
@@ -146,34 +208,14 @@
     });
   }
 
-  /**
-   * Google runs this app as the FIRST Google account signed in to the browser, whatever account is picked later.
-   * So two people on one browser always land in the same account. Each person needs their own browser window
-   * signed in only to their account.
-   */
-  function showAccountHelp() {
-    var old = $('acctHelp'); if (old) { old.remove(); return; }
-    var box = document.createElement('div');
-    box.id = 'acctHelp'; box.className = 'notice info';
-    box.innerHTML = '<b>You are using the app as ' + esc(S.boot.user) + '.</b> Google always opens this app with the <b>first</b> Google account signed in to this browser, ' +
-      'even if you switch accounts. To use it as a different person:<ol style="margin:8px 0 0;padding-left:20px;line-height:1.6">' +
-      '<li>Copy the app link from the address bar.</li>' +
-      '<li>Open a private window: in Chrome press <b>⌘ + Shift + N</b> (Windows: Ctrl + Shift + N); in Safari <b>⌘ + Shift + N</b>.</li>' +
-      '<li>Paste the link, press Enter, and sign in with <b>only</b> the other Google account.</li></ol>' +
-      '<p class="small" style="margin:8px 0 0">Each person who uses the app every day should use their own computer, or their own Chrome profile (Chrome → profile picture at the top right → Add), so they always open their own workspace.</p>' +
-      '<button class="link small" id="acctHelpClose">Close</button>';
-    $('app').insertBefore(box, $('app').firstChild);
-    $('acctHelpClose').addEventListener('click', function () { box.remove(); });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
   /** First visit (or "Create my own workspace"): one short form. */
   function renderWelcome(extra) {
     stopAutoRefresh();
     var b = S.boot;
     var html = '<div class="card" style="max-width:640px;margin:0 auto"><h1 style="margin-top:0">Welcome' + (extra ? '' : ' to ' + esc(b.appName || 'Shop Follow-ups')) + '</h1>' +
-      '<p>Signed in as <b>' + esc(b.user) + '</b>. Not you? <button class="link" id="wNotYou">How to use another account</button></p>' +
-      '<p>Create your own private workspace. It is a Google Sheet in <b>your</b> Google Drive that keeps your shops, your customers and your sending history. Nobody else can see it unless you add them.</p>' +
+      '<p>Signed in as <b>' + esc(b.user) + '</b>. Not you? <button class="link" id="wNotYou">Sign out</button></p>' +
+      (b.remade ? '<div class="notice warn small">Your earlier workspace was made with the old sign-in, so the app can no longer open it. Create it again here (your old Google Sheet stays in your Drive).</div>' : '') +
+      '<p>Create your own private workspace. It keeps your shops, your customers and your sending history in a Google Sheet that is shared with you (you find it in Google Drive under “Shared with me”). Nobody else can see it unless you add them.</p>' +
       '<label class="field"><span>Workspace name</span><input type="text" id="wName" maxlength="60" value="My shops"></label>' +
       '<label class="field"><span>Your first shop’s name</span><input type="text" id="wShop" maxlength="80" placeholder="e.g. Al Barsha Shop"><span class="muted small" style="font-weight:400">You can add more shops later in ⚙ Settings.</span></label>' +
       '<div class="row"><button class="btn primary big" id="wCreate">Create my workspace</button>' + (extra ? '<button class="btn" id="wCancel">Cancel</button>' : '') + '</div>' +
@@ -188,7 +230,7 @@
         .then(function (b2) { useBoot(b2); showBanner('success', 'Your workspace is ready. Next: open ⚙ Settings and connect the Gmail account that sends for this shop.', true); });
     });
     if ($('wCancel')) $('wCancel').addEventListener('click', function () { useBoot(S.boot); });
-    $('wNotYou').addEventListener('click', showAccountHelp);
+    $('wNotYou').addEventListener('click', signOut);
   }
 
   function engineNotice() {
@@ -1704,7 +1746,7 @@
         '<div class="row"><button class="btn primary" id="saveClient">Save</button>' +
         (st.clientReady ? badge('ok', '✓ Saved') : badge('warn', 'Not set yet')) + '</div>' +
         '<p class="muted small" style="margin-top:8px">The secret is kept on the server only. It is never shown again, never sent to any page and never written to a Sheet. ' +
-        'While the app is not verified by Google, at most 100 Google accounts can ever use it, and everyone sees a “Google hasn’t verified this app” warning first.</p></div>';
+        'Signing in to the app shows no warning (only the email is asked). Connecting a Gmail account to send shows Google’s “unverified app” warning, and at most 100 Gmail accounts can be connected while the app is not verified by Google.</p></div>';
     } else if (!st.clientReady) {
       html += '<div class="notice warn"><b>Gmail sending is not available yet.</b> The app administrator (' + esc(st.admin) + ') still has to finish the Google sign-in setup.</div>';
     }
@@ -1764,7 +1806,7 @@
       ? '<div class="table-wrap"><table>' + st.members.map(function (m) { return '<tr><td>' + esc(m) + '</td><td style="text-align:right"><button class="btn small danger" data-mremove="' + esc(m) + '">Remove</button></td></tr>'; }).join('') + '</table></div>'
       : '<p class="muted">Only you so far.</p>';
     html += '<div class="row" style="margin-top:10px"><input type="email" id="mEmail" placeholder="their Gmail address" style="max-width:320px"><button class="btn primary small" id="mAdd">Add</button></div>' +
-      '<p class="muted small">They get Editor access to your workspace’s Google Sheet (that is how Google lets them use it).</p></div>';
+      '<p class="muted small">They use your workspace through the app only (they do not get your Google Sheet).</p></div>';
 
     // WhatsApp Business API
     html += waApiSettingsHtml(st.waApi);
@@ -1941,7 +1983,9 @@
   var pendingConnect = null;
   window.addEventListener('message', function (ev) {
     var d = ev.data;
-    if (!d || d.type !== 'sf-oauth' || !pendingConnect) return;
+    if (!d || d.type !== 'sf-oauth') return;
+    if (pendingLogin && d.state === pendingLogin.state) return finishLogin(d.code, d.state, d.error);
+    if (!pendingConnect) return;
     finishConnect(d.code, d.state, d.error);
   });
 
