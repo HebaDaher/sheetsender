@@ -1,5 +1,6 @@
 // Home page, settings, opt-out list, password and account deletion.
-import { html, csrfField, fmtDate, badge } from '../html.js';
+import { html, csrfField, fmtDate, badge, showAddress, countryOptions } from '../html.js';
+import { COUNT_COLUMNS, addOptOut } from '../campaigns.js';
 import { q, one, rows } from '../db.js';
 import { config } from '../config.js';
 import { str } from './util.js';
@@ -14,10 +15,7 @@ export default function register(r) {
     const u = ctx.user;
     const shops = await one('SELECT count(*)::int AS n, count(current_upload_id)::int AS ready FROM shops WHERE user_id=$1', [u.id]);
     const senders = await one("SELECT count(*) FILTER (WHERE status='verified')::int AS ok, count(*)::int AS n FROM senders WHERE user_id=$1", [u.id]);
-    const running = await rows(`SELECT c.id, c.name, c.status, c.channel, s.name AS shop,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('queued','sending'))::int AS queued,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('sent','delivered','read'))::int AS sent,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status='failed')::int AS failed
+    const running = await rows(`SELECT c.id, c.name, c.status, c.channel, s.name AS shop, ${COUNT_COLUMNS}
       FROM campaigns c JOIN shops s ON s.id=c.shop_id WHERE c.user_id=$1 AND c.status IN ('active','paused') ORDER BY c.activated_at DESC`, [u.id]);
     const step = (done, n, title, text, href, label) => html`<li class="${done ? 'done' : ''}"><div><b>${n}. ${title}</b><p>${text}</p></div><a class="button ${done ? '' : 'primary'}" href="${href}">${label}</a></li>`;
     ctx.page('Home', html`
@@ -41,12 +39,12 @@ export default function register(r) {
         <label>Your name<input name="name" value="${u.name}" maxlength="100" required></label>
         <label>Time zone<select name="timezone">${ZONES.map((z) => html`<option ${u.timezone === z ? 'selected' : ''}>${z}</option>`)}</select></label>
         <div class="row"><label>Send only from<select name="send_start">${hours(u.send_start)}</select></label><label>until<select name="send_end">${hours(u.send_end)}</select></label></div>
-        <p class="muted">UAE rules (Cabinet Resolution 56 of 2024) allow marketing calls and marketing messages through phone and social-media apps only between 09:00 and 18:00. Campaigns wait outside these hours and continue automatically.</p>
-        <label>Default country for phone numbers without a country code<select name="country">${Object.entries(COUNTRIES).map(([k, v]) => html`<option value="${k}" ${u.default_country === k ? 'selected' : ''}>${v.name} (+${v.cc})</option>`)}</select></label>
+        <p class="muted">UAE rules allow marketing messages only between 09:00 and 18:00. Outside these hours campaigns wait and continue by themselves.</p>
+        <label>Default country for phone numbers without a country code<select name="country">${countryOptions(COUNTRIES, u.default_country)}</select></label>
         <button class="primary">Save</button>
       </form>
       <section class="card"><h2>Keep campaigns running while nobody has the app open</h2>
-        <p>Free hosting puts the app to sleep after 15 minutes without visitors. A free scheduler wakes it every minute so automatic campaigns keep sending (see SETUP.md, step 5). Use this address in cron-job.org:</p>
+        <p>Paste this address in cron-job.org (every minute) so the free hosting does not fall asleep — see SETUP.md, step 5.</p>
         <p><code class="copy">${config.publicUrl}/cron/tick?key=${config.cronKey}</code></p></section>
       <form method="post" action="/settings/password" class="card stack">${csrfField(ctx.csrf)}
         <h2>Change password</h2>
@@ -89,12 +87,12 @@ export default function register(r) {
     const list = await rows('SELECT * FROM suppressions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 2000', [ctx.user.id]);
     ctx.page('Opt-outs', html`
       <h1>Opt-outs</h1>
-      <p class="lead">People here are never messaged again on that channel — even if they appear in a new file with "Yes" for consent. Email unsubscribes and WhatsApp STOP replies are added automatically.</p>
+      <p class="lead">People here are never messaged again on that channel, even if a new file says "Yes". Unsubscribes and STOP replies are added automatically.</p>
       <form method="post" action="/optouts" class="card row">${csrfField(ctx.csrf)}
         <select name="channel"><option value="email">Email</option><option value="whatsapp">WhatsApp</option></select>
         <input name="address" placeholder="Email address or phone number" required><button>Add opt-out</button></form>
       <div class="tablewrap"><table><thead><tr><th>Channel</th><th>Address</th><th>Why</th><th>When</th><th></th></tr></thead><tbody>
-        ${list.map((s) => html`<tr><td>${s.channel}</td><td>${s.channel === 'whatsapp' ? '+' + s.address : s.address}</td><td>${s.reason}</td><td>${fmtDate(s.created_at, ctx.user.timezone)}</td>
+        ${list.map((s) => html`<tr><td>${s.channel}</td><td>${showAddress(s.channel, s.address)}</td><td>${s.reason}</td><td>${fmtDate(s.created_at, ctx.user.timezone)}</td>
           <td><form method="post" action="/optouts/remove" data-confirm="Only remove this if the person clearly asked to receive your messages again. Remove?">${csrfField(ctx.csrf)}
             <input type="hidden" name="channel" value="${s.channel}"><input type="hidden" name="address" value="${s.address}"><button class="link">Remove</button></form></td></tr>`)}
       </tbody></table></div>`, { active: '/optouts' });
@@ -104,8 +102,7 @@ export default function register(r) {
     const channel = ctx.body.channel === 'whatsapp' ? 'whatsapp' : 'email';
     const address = channel === 'email' ? normalizeEmail(ctx.body.address) : normalizePhone(ctx.body.address, ctx.user.default_country);
     if (!address) return ctx.go('/optouts', { err: 'That address is not valid.' });
-    await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [ctx.user.id, channel, address, 'Added by you']);
-    await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE user_id=$1 AND channel=$2 AND address=$3 AND status='queued'", [ctx.user.id, channel, address]);
+    await addOptOut(ctx.user.id, channel, address, 'Added by you');
     ctx.go('/optouts', { ok: 'Added.' });
   });
 

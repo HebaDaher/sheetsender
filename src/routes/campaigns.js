@@ -1,18 +1,20 @@
 // Campaigns: choose shop + sender, write the message, preview, activate, track, pause/cancel.
-import { html, csrfField, fmtDate, badge, plural } from '../html.js';
+import { html, csrfField, fmtDate, badge, plural, channelName, showAddress, waLimitText } from '../html.js';
 import { HttpError } from '../http.js';
 import { q, one, rows } from '../db.js';
 import { owned, str, list } from './util.js';
-import { randomToken, decryptJson } from '../crypto.js';
+import { randomToken, senderCreds } from '../crypto.js';
 import { checkMedia } from './media.js';
 import { senderLine } from './senders.js';
 import * as wa from '../providers/whatsapp.js';
 import * as email from '../providers/email.js';
 import { buildEmail } from '../mime.js';
-import { computeRecipients, summarize, activateCampaign, campaignCounts, emailVars, waValues, renderWaPreview, fillPlaceholders, emailHtml, emailText, SOURCES } from '../campaigns.js';
+import { normalizePhone } from '../contacts.js';
+import { varKey, COUNT_COLUMNS, computeRecipients, summarize, activateCampaign, campaignCounts, emailVars, waValues, renderWaPreview, fillPlaceholders, emailHtml, emailText, SOURCES } from '../campaigns.js';
 import { processCampaign, withSendLock, withinHours, unsubscribeUrl } from '../worker.js';
 
 const EDITABLE = (c) => c.status === 'draft';
+const ALREADY_ACTIVE = 'This campaign is already active — it was not activated a second time.';
 
 async function loadMediaMeta(ids, userId) {
   if (!ids?.length) return [];
@@ -45,7 +47,7 @@ async function problems(c, user) {
         if (!media.some((m) => m.kind === info.headerFormat.toLowerCase())) out.push(`This template needs ${info.headerFormat === 'IMAGE' ? 'an image (JPG/PNG)' : 'a video (MP4)'} — attach one.`);
       }
       for (const v of info.vars) {
-        const key = v.component === 'button' ? `button:${v.index}:${v.name}` : `${v.component}:${v.name}`;
+        const key = varKey(v);
         const m = c.template.mapping?.[key];
         if (!m || (m.source === 'fixed' && !String(m.value || '').trim())) out.push(`Fill in the template variable {{${v.name}}} (${v.component}).`);
       }
@@ -64,15 +66,12 @@ function progressBar(counts) {
 
 export default function register(r) {
   r.get('/campaigns', async (ctx) => {
-    const list2 = await rows(`SELECT c.*, s.name AS shop_name,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('sent','delivered','read'))::int AS sent,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('queued','sending'))::int AS queued,
-      (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status='failed')::int AS failed
+    const list2 = await rows(`SELECT c.*, s.name AS shop_name, ${COUNT_COLUMNS}
       FROM campaigns c JOIN shops s ON s.id=c.shop_id WHERE c.user_id=$1 ORDER BY c.created_at DESC LIMIT 200`, [ctx.user.id]);
     ctx.page('Campaigns', html`
       <div class="row between"><h1>Campaigns</h1><a class="button primary" href="/campaigns/new">New campaign</a></div>
       ${list2.length ? html`<div class="tablewrap"><table><thead><tr><th>Campaign</th><th>Shop</th><th>Channel</th><th>Status</th><th>Queued</th><th>Sent</th><th>Failed</th><th>Created</th></tr></thead><tbody>
-        ${list2.map((c) => html`<tr><td><a href="/campaigns/${c.id}${EDITABLE(c) ? '/edit' : ''}">${c.name}</a></td><td>${c.shop_name}</td><td>${c.channel === 'email' ? 'Email' : 'WhatsApp'}</td>
+        ${list2.map((c) => html`<tr><td><a href="/campaigns/${c.id}${EDITABLE(c) ? '/edit' : ''}">${c.name}</a></td><td>${c.shop_name}</td><td>${channelName(c.channel)}</td>
           <td>${badge(c.status)}</td><td>${c.queued}</td><td>${c.sent}</td><td>${c.failed}</td><td>${fmtDate(c.created_at, ctx.user.timezone)}</td></tr>`)}</tbody></table></div>`
       : html`<p class="muted">No campaigns yet.</p>`}`, { active: '/campaigns', wide: true });
   });
@@ -87,10 +86,10 @@ export default function register(r) {
       <p class="crumbs"><a href="/campaigns">Campaigns</a> ›</p>
       <h1>New campaign</h1>
       <form method="post" action="/campaigns" class="card stack">${csrfField(ctx.csrf)}
-        <label>Campaign name (only you see it)<input name="name" required maxlength="100" placeholder="November offer"></label>
+        <label>Campaign name (only you see it)<input name="name" required maxlength="100"></label>
         <label>1. Shop (whose customer file to use)<select name="shop_id" required>${ready.map((s) => html`<option value="${s.id}" ${String(ctx.query.shop) === String(s.id) ? 'selected' : ''}>${s.name}</option>`)}</select></label>
-        <label>2. Send from<select name="sender_id" required>${senders.map((s) => html`<option value="${s.id}">${s.channel === 'email' ? 'Email' : 'WhatsApp'} — ${s.label} (${senderLine(s)})</option>`)}</select>
-          <small>The channel (email or WhatsApp) follows the sender you choose.</small></label>
+        <label>2. Send from<select name="sender_id" required>${senders.map((s) => html`<option value="${s.id}">${channelName(s.channel)} — ${s.label} (${senderLine(s)})</option>`)}</select>
+          <small>Email or WhatsApp depends on the sender.</small></label>
         <button class="primary">Continue</button>
       </form>`, { active: '/campaigns' });
   });
@@ -115,7 +114,7 @@ export default function register(r) {
     const selected = new Set((c.selected_ids || []).map(String));
     let templates = []; let tplErr = null;
     if (c.channel === 'whatsapp' && sender) {
-      try { templates = (await wa.listTemplates({ ...sender.info, ...decryptJson(sender.secrets) })).map(wa.analyzeTemplate).filter((t) => t.status === 'APPROVED'); } catch (e) { tplErr = e.message; }
+      try { templates = (await wa.listTemplates(senderCreds(sender))).map(wa.analyzeTemplate).filter((t) => t.status === 'APPROVED'); } catch (e) { tplErr = e.message; }
     }
     const info = c.template?.info;
     const sourceOptions = (cur) => html`${SOURCES.map(([k, l]) => html`<option value="${k}" ${cur === k ? 'selected' : ''}>${l}</option>`)}
@@ -125,14 +124,14 @@ export default function register(r) {
     ctx.page(`Edit ${c.name}`, html`
       <p class="crumbs"><a href="/campaigns">Campaigns</a> ›</p>
       <h1>${c.name}</h1>
-      <p class="lead">${shop.name} · ${c.channel === 'email' ? 'Email' : 'WhatsApp'} from ${sender ? senderLine(sender) : 'no sender'}</p>
+      <p class="lead">${shop.name} · ${channelName(c.channel)} from ${sender ? senderLine(sender) : 'no sender'}</p>
       <ol class="steps"><li class="done">Shop & sender</li><li class="on">Message & recipients</li><li>Preview & activate</li><li>Track</li></ol>
       <form method="post" action="/campaigns/${c.id}/edit" enctype="multipart/form-data" class="stack">${csrfField(ctx.csrf)}
       <section class="card stack"><h2>Message</h2>
       ${c.channel === 'email' ? html`
         <label>Subject<input name="subject" maxlength="200" value="${c.subject}" dir="auto" required></label>
         <label>Text<textarea name="body" rows="10" maxlength="20000" dir="auto" required>${c.body}</textarea></label>
-        <p class="muted">Personalise with <code>{{first_name}}</code>, <code>{{name}}</code>, <code>{{shop}}</code> or any column title in double braces, e.g. ${up.headers.slice(0, 4).map((h) => html`<code>{{${h}}}</code> `)}. An unsubscribe link is added automatically at the bottom.</p>
+        <p class="muted">Write <code>{{first_name}}</code> for the customer's name, or any column title in double braces. An unsubscribe link is added at the bottom.</p>
         <label>Add images (shown in the email) or videos (attached)<input type="file" name="media" multiple accept="image/jpeg,image/png,video/mp4"></label>`
       : html`
         ${tplErr ? html`<p class="flash err">Could not load templates from Meta: ${tplErr}</p>` : ''}
@@ -147,7 +146,7 @@ export default function register(r) {
             ${info.buttons.map((b) => html`<div class="wa-btn">${b.text}</div>`)}</div>
           ${!info.hasOptOut ? html`<p class="flash err">This template has no opt-out button or STOP instruction, so it cannot be used. Pick or create one with a "Stop promotions" button.</p>` : ''}
           ${info.vars.map((v) => {
-            const key = v.component === 'button' ? `button:${v.index}:${v.name}` : `${v.component}:${v.name}`;
+            const key = varKey(v);
             const m = c.template.mapping?.[key] || { source: v.component === 'body' && v.name === '1' ? 'first_name' : 'fixed', value: '' };
             return html`<fieldset class="var"><legend>{{${v.name}}} in the ${v.component}</legend>
               <select name="src:${key}">${v.fixedOnly ? html`<option value="fixed">Fixed text</option>` : sourceOptions(m.source)}</select>
@@ -164,9 +163,9 @@ export default function register(r) {
         <label class="inline"><input type="checkbox" name="skip_already" value="1" ${c.skip_already_received ? 'checked' : ''}> Skip people who already received this exact message (recommended)</label>
         <details ${c.audience === 'selected' ? 'open' : ''}><summary>Choose people (${contacts.length})</summary>
           <p><label class="inline"><input type="checkbox" data-select-all="pick"> Tick all who can receive it</label></p>
-          <div class="tablewrap tall"><table><thead><tr><th></th><th>Row</th><th>Name</th><th>${c.channel === 'email' ? 'Email' : 'WhatsApp'}</th><th>Can receive</th></tr></thead><tbody>
+          <div class="tablewrap tall"><table><thead><tr><th></th><th>Row</th><th>Name</th><th>${channelName(c.channel)}</th><th>Can receive</th></tr></thead><tbody>
           ${contacts.map((x) => html`<tr><td><input type="checkbox" name="pick[]" value="${x.id}" ${selected.has(String(x.id)) ? 'checked' : ''} ${eligibleFor(x) ? 'data-eligible' : ''}></td>
-            <td>${x.row_number}</td><td>${x.name}</td><td>${c.channel === 'email' ? x.email || '—' : (x.phone ? '+' + x.phone : '—')}</td><td>${eligibleFor(x) ? 'yes' : html`<span class="muted">no</span>`}</td></tr>`)}
+            <td>${x.row_number}</td><td>${x.name}</td><td>${(c.channel === 'email' ? x.email : showAddress('whatsapp', x.phone)) || '—'}</td><td>${eligibleFor(x) ? 'yes' : html`<span class="muted">no</span>`}</td></tr>`)}
           </tbody></table></div>
           ${contacts.length >= 2000 ? html`<p class="muted">Only the first 2,000 rows can be ticked here. To send to everyone, choose "Everyone in the file".</p>` : ''}
         </details>
@@ -200,13 +199,13 @@ export default function register(r) {
         const [name, language] = pick.split('|');
         if (!template || template.info.name !== name || template.info.language !== language) {
           const sender = await owned('senders', c.sender_id, ctx.user);
-          const t = (await wa.listTemplates({ ...sender.info, ...decryptJson(sender.secrets) })).find((x) => x.name === name && x.language === language);
+          const t = (await wa.listTemplates(senderCreds(sender))).find((x) => x.name === name && x.language === language);
           template = t ? { info: wa.analyzeTemplate(t), mapping: {} } : null;
           if (!t) error = 'That template was not found any more.';
         } else {
           const mapping = {};
           for (const v of template.info.vars) {
-            const key = v.component === 'button' ? `button:${v.index}:${v.name}` : `${v.component}:${v.name}`;
+            const key = varKey(v);
             const src = str(b[`src:${key}`], 300) || 'fixed';
             mapping[key] = { source: v.fixedOnly ? 'fixed' : src, value: str(b[`val:${key}`], 1000), fallback: src === 'fixed' ? '' : str(b[`val:${key}`], 1000) };
           }
@@ -263,7 +262,7 @@ export default function register(r) {
         <section class="card"><h2>Who receives it</h2>
           <div class="stats"><div><b>${sum.eligible}</b><span>will be sent</span></div>
           ${Object.entries(sum.reasons).map(([k, n]) => html`<div><b>${n}</b><span>skipped: ${k.toLowerCase()}</span></div>`)}</div>
-          <p class="muted">Sending from ${sender ? senderLine(sender) : '—'}. ${c.channel === 'email' ? `Limit: ${sender?.daily_limit || '—'} emails per 24 hours.` : `WhatsApp limit: ${sender?.info?.limit_raw === 'TIER_UNLIMITED' ? 'unlimited' : (sender?.info?.limit ?? 250) + ' different people per 24 hours'}.`}
+          <p class="muted">Sending from ${sender ? senderLine(sender) : '—'}. ${c.channel === 'email' ? `Limit: ${sender?.daily_limit || '—'} emails per 24 hours.` : `WhatsApp limit: ${waLimitText(sender?.info)}.`}
             Allowed hours: ${user.send_start}:00–${user.send_end}:00 (${user.timezone}) — change in Settings. ${withinHours(user) ? '' : 'It is outside those hours now, so sending will start when they begin.'}</p>
         </section>
       </div>
@@ -275,10 +274,9 @@ export default function register(r) {
         <label class="inline"><input type="radio" name="mode" value="manual"> <span><b>Manual</b> — nothing is sent until you press "Send next" on the progress page.</span></label>
         <label class="inline"><input type="checkbox" name="confirm" value="1" required> <span>I confirm these ${sum.eligible} people agreed to receive messages from ${shop.name}${c.channel === 'whatsapp' ? ' on WhatsApp' : ' by email'}.</span></label>
         <button class="primary big">Activate campaign</button>
-        <p class="muted">Activating twice is impossible — each person is queued once per campaign.</p>
       </form>` : ''}
       <section class="card"><h2>Everyone in the file (${recips.length})</h2><div class="tablewrap tall"><table><thead><tr><th>Row</th><th>Name</th><th>Address</th><th>Result</th></tr></thead><tbody>
-        ${recips.slice(0, 1000).map((x) => html`<tr><td>${x.contact.row_number}</td><td>${x.contact.name}</td><td>${x.address ? (c.channel === 'whatsapp' ? '+' + x.address : x.address) : x.rawAddr || '—'}</td><td>${x.reason ? html`<span class="muted">skip: ${x.reason}</span>` : html`<span class="badge green">will send</span>`}</td></tr>`)}
+        ${recips.slice(0, 1000).map((x) => html`<tr><td>${x.contact.row_number}</td><td>${x.contact.name}</td><td>${showAddress(c.channel, x.address) || x.rawAddr || '—'}</td><td>${x.reason ? html`<span class="muted">skip: ${x.reason}</span>` : html`<span class="badge green">will send</span>`}</td></tr>`)}
       </tbody></table></div></section>`, { active: '/campaigns', wide: true });
   });
 
@@ -290,7 +288,7 @@ export default function register(r) {
     const { list: recips } = await computeRecipients(c, { userId: ctx.user.id });
     const first = recips.find((x) => !x.reason) || recips[0];
     if (!first) return ctx.go(back, { err: 'No customer rows to build the test from.' });
-    const creds = { ...sender.info, ...decryptJson(sender.secrets) };
+    const creds = senderCreds(sender);
     try {
       if (c.channel === 'email') {
         const vars = emailVars(first.contact, shop.name);
@@ -304,7 +302,6 @@ export default function register(r) {
         try { await s.send({ to: sender.info.email, data: built.data }); } finally { await s.close(); }
         return ctx.go(back, { ok: `Test email sent to ${sender.info.email} (the "unsubscribe" link in a test only affects your own address).` });
       }
-      const { normalizePhone } = await import('../contacts.js');
       const to = normalizePhone(ctx.body.to, ctx.user.default_country);
       if (!to) return ctx.go(back, { err: 'Enter your WhatsApp number with country code.' });
       let mediaId;
@@ -319,14 +316,14 @@ export default function register(r) {
 
   r.post('/campaigns/:id/activate', async (ctx) => {
     const c = await owned('campaigns', ctx.params.id, ctx.user);
-    if (c.status !== 'draft') return ctx.go(`/campaigns/${c.id}`, { ok: 'This campaign is already active — it was not activated a second time.' });
+    if (c.status !== 'draft') return ctx.go(`/campaigns/${c.id}`, { ok: ALREADY_ACTIVE });
     if (ctx.body.key !== c.activation_key) return ctx.go(`/campaigns/${c.id}/preview`, { err: 'This page was out of date. Check the preview again.' });
     if (ctx.body.confirm !== '1') return ctx.go(`/campaigns/${c.id}/preview`, { err: 'Tick the box to confirm these people agreed to receive your messages.' });
     const { list: probs } = await problems(c, ctx.user);
     if (probs.length) return ctx.go(`/campaigns/${c.id}/preview`, { err: probs[0] });
     try {
       const out = await activateCampaign(ctx.user.id, c.id, ctx.body.mode === 'manual' ? 'manual' : 'auto');
-      if (out.already) return ctx.go(`/campaigns/${c.id}`, { ok: 'This campaign is already active — it was not activated a second time.' });
+      if (out.already) return ctx.go(`/campaigns/${c.id}`, { ok: ALREADY_ACTIVE });
       ctx.go(`/campaigns/${c.id}`, { ok: `Activated. ${plural(out.queued, 'message')} queued.` });
     } catch (e) { ctx.go(`/campaigns/${c.id}/preview`, { err: e.message }); }
   });
@@ -366,7 +363,7 @@ export default function register(r) {
       <p class="crumbs"><a href="/campaigns">Campaigns</a> ›</p>
       <div class="row between"><h1>${c.name} <span data-status>${badge(c.status)}</span></h1>
         <form method="post" action="/campaigns/${c.id}/duplicate">${csrfField(ctx.csrf)}<button class="link">Copy to a new draft</button></form></div>
-      <p class="lead">${shop.name} · ${c.channel === 'email' ? 'Email' : 'WhatsApp'} from ${sender ? senderLine(sender) : '(sender removed)'} · ${c.mode === 'auto' ? 'automatic sending' : 'manual sending'} · activated ${fmtDate(c.activated_at, ctx.user.timezone)}</p>
+      <p class="lead">${shop.name} · ${channelName(c.channel)} from ${sender ? senderLine(sender) : '(sender removed)'} · ${c.mode === 'auto' ? 'automatic sending' : 'manual sending'} · activated ${fmtDate(c.activated_at, ctx.user.timezone)}</p>
       <section class="card" data-poll="/campaigns/${c.id}/status.json" data-poll-status="${c.status}">
         ${progressBar(n)}
         <div class="stats links">${tile('queued', 'queued', n.queued + n.sending)}${tile('sent', 'sent', n.sentTotal)}${c.channel === 'whatsapp' ? [tile('delivered', 'delivered', n.delivered + n.read), tile('read', 'read', n.read)] : ''}
@@ -384,7 +381,7 @@ export default function register(r) {
       </section>
       <section class="card"><h2>${filter ? `Messages: ${filter}` : 'Messages'} ${filter ? html`<a class="small" href="/campaigns/${c.id}">show all</a>` : ''}</h2>
         <div class="tablewrap tall"><table><thead><tr><th>Row</th><th>Name</th><th>To</th><th>Status</th><th>Details</th><th></th></tr></thead><tbody>
-        ${msgs.map((m) => html`<tr><td>${m.row_number}</td><td>${m.recipient_name}</td><td>${c.channel === 'whatsapp' && m.address ? '+' + m.address : m.address}</td><td>${badge(m.status)}</td>
+        ${msgs.map((m) => html`<tr><td>${m.row_number}</td><td>${m.recipient_name}</td><td>${showAddress(c.channel, m.address)}</td><td>${badge(m.status)}</td>
           <td class="small">${m.skip_reason || m.error || (m.sent_at ? fmtDate(m.sent_at, ctx.user.timezone) : '')}</td>
           <td>${['failed', 'unknown'].includes(m.status) && ['active', 'paused'].includes(c.status) ? html`<form method="post" action="/campaigns/${c.id}/retry/${m.id}" data-confirm="${m.status === 'unknown' ? 'This message may already have arrived. Send it again anyway?' : 'Try sending this message again?'}">${csrfField(ctx.csrf)}<button class="link">Retry</button></form>` : ''}</td></tr>`)}
         </tbody></table></div>${msgs.length >= 500 ? html`<p class="muted">Showing 500 messages. Click a number above to filter.</p>` : ''}</section>`, { active: '/campaigns', wide: true });

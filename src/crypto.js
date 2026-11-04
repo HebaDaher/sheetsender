@@ -62,3 +62,6 @@ export function safeEqual(a, b) {
 export const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 export const randomToken = (n = 24) => crypto.randomBytes(n).toString('base64url');
 export const randomCode = () => String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+
+// A sender's public details plus its decrypted secrets (token, password, ...), as the providers expect them.
+export const senderCreds = (s) => ({ ...s.info, ...decryptJson(s.secrets) });

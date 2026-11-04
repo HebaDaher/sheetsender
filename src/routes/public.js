@@ -1,16 +1,17 @@
 // Sign-up / sign-in, unsubscribe pages, WhatsApp webhooks, the scheduler endpoint and health check.
-import { html, layout, csrfField } from '../html.js';
+import { html, layout } from '../html.js';
 import { HttpError, rateLimit, clientIp, sendHtml, sendJson } from '../http.js';
 import { q, one, rows } from '../db.js';
 import { config } from '../config.js';
 import { createUser, login, logout, verifyLogin, passwordProblem } from '../auth.js';
-import { verifySigned, decryptJson, safeEqual, hashPassword } from '../crypto.js';
+import { verifySigned, decryptJson, senderCreds, safeEqual, hashPassword } from '../crypto.js';
+import { addOptOut } from '../campaigns.js';
 import { normalizeEmail } from '../contacts.js';
 import * as wa from '../providers/whatsapp.js';
 import { tick } from '../worker.js';
 
-const authForm = (mode, err, vals = {}) => layout({
-  title: mode === 'login' ? 'Log in' : 'Create account', error: err,
+const authForm = (mode, err, vals = {}, notice = null) => layout({
+  title: mode === 'login' ? 'Log in' : 'Create account', error: err, notice,
   body: html`<section class="card narrow">
   <h1>${mode === 'login' ? 'Log in to SheetSender' : 'Create your account'}</h1>
   <form method="post" action="/${mode}" class="stack">
@@ -77,7 +78,7 @@ export default function register(r) {
     if (!u) return sendHtml(ctx.res, 400, forgotPage(generic));
     await q('UPDATE users SET password_hash=$2, failed_logins=0, locked_until=NULL WHERE id=$1', [u.id, await hashPassword(pw)]);
     await q('DELETE FROM sessions WHERE user_id=$1', [u.id]);
-    sendHtml(ctx.res, 200, authForm('login', null, { email }).replace('<form method="post" action="/login"', '<div class="flash ok">Password changed. Log in with your new password.</div><form method="post" action="/login"'));
+    sendHtml(ctx.res, 200, authForm('login', null, { email }, 'Password changed. Log in with your new password.'));
   });
 
   r.post('/logout', async (ctx) => { await logout(ctx.req, ctx.res); ctx.go('/login'); });
@@ -89,20 +90,20 @@ export default function register(r) {
 
   // ----- Unsubscribe (email) -----
   const unsubPage = (title, body) => layout({ title, body: html`<section class="card narrow">${body}</section>` });
+  const unsubscribedPage = (p) => unsubPage('Unsubscribed', html`<h1>You are unsubscribed</h1><p><b>${p.a}</b> will not receive more messages from ${p.s}.</p>`);
   r.get('/u/:token', async (ctx) => {
     const p = verifySigned(ctx.params.token);
     if (!p) return sendHtml(ctx.res, 400, unsubPage('Unsubscribe', html`<h1>This link is not valid</h1><p>Please use the link from the latest email.</p>`));
     const done = await one('SELECT 1 FROM suppressions WHERE user_id=$1 AND channel=$2 AND address=$3', [p.u, p.c, p.a]);
-    if (done) return sendHtml(ctx.res, 200, unsubPage('Unsubscribed', html`<h1>You are unsubscribed</h1><p><b>${p.a}</b> will not receive more messages from ${p.s}.</p>`));
+    if (done) return sendHtml(ctx.res, 200, unsubscribedPage(p));
     sendHtml(ctx.res, 200, unsubPage('Unsubscribe', html`<h1>Unsubscribe</h1><p>Stop all emails from <b>${p.s}</b> to <b>${p.a}</b>?</p>
       <form method="post" action="/u/${ctx.params.token}"><button class="primary">Yes, unsubscribe me</button></form>`));
   });
   r.post('/u/:token', async (ctx) => {
     const p = verifySigned(ctx.params.token);
     if (!p) throw new HttpError(400, 'This link is not valid.');
-    await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [p.u, p.c, p.a, `Unsubscribed via email link (${p.s})`]);
-    await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE user_id=$1 AND channel=$2 AND address=$3 AND status='queued'", [p.u, p.c, p.a]);
-    sendHtml(ctx.res, 200, unsubPage('Unsubscribed', html`<h1>You are unsubscribed</h1><p><b>${p.a}</b> will not receive more messages from ${p.s}.</p>`));
+    await addOptOut(p.u, p.c, p.a, `Unsubscribed via email link (${p.s})`);
+    sendHtml(ctx.res, 200, unsubscribedPage(p));
   });
 
   // ----- WhatsApp webhooks -----
@@ -146,7 +147,7 @@ export async function handleWebhook(userId, senders, payload) {
         if (st.status === 'failed') {
           const err = st.errors?.[0] || {};
           const k = wa.classifyWaError({ code: err.code, message: err.message || err.title || 'Failed', title: err.title, details: err.error_data?.details });
-          if (k.action === 'opted_out') await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [userId, 'whatsapp', m.address, k.text]);
+          if (k.action === 'opted_out') await addOptOut(userId, 'whatsapp', m.address, k.text);
           if (!['read'].includes(m.status)) await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
           if (Number(err.code) === 131048 && sender) {
             await q("UPDATE senders SET hold_until=now() + interval '24 hours', hold_reason=$2 WHERE id=$1", [sender.id, k.text]);
@@ -162,11 +163,10 @@ export async function handleWebhook(userId, senders, payload) {
         const isStop = wa.STOP_WORDS.test(text) || buttonTexts.some((t) => wa.OPT_OUT_BUTTON.test(t) || /^MARKETING_OPT_OUT$/i.test(t));
         if (!isStop) continue;
         const from = String(msg.from || '').replace(/\D/g, '');
-        await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [userId, 'whatsapp', from, `Replied "${String(text).slice(0, 40)}" on WhatsApp`]);
-        await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE user_id=$1 AND channel='whatsapp' AND address=$2 AND status='queued'", [userId, from]);
+        await addOptOut(userId, 'whatsapp', from, `Replied "${String(text).slice(0, 40)}" on WhatsApp`);
         if (sender) {
           try {
-            const creds = { ...decryptJson(sender.secrets), ...sender.info };
+            const creds = senderCreds(sender);
             await wa.sendText(creds, from, 'You have been unsubscribed and will not receive more promotional messages from us. / تم إلغاء اشتراكك ولن تصلك رسائل ترويجية منا بعد الآن.');
           } catch (e) { console.warn('opt-out confirmation not sent:', e.message); }
         }

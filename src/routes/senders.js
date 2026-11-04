@@ -1,9 +1,9 @@
 // Connecting and verifying the email addresses and WhatsApp Business numbers that messages are sent FROM.
-import { html, csrfField, fmtDate, badge } from '../html.js';
+import { html, csrfField, fmtDate, badge, channelName, waLimitText } from '../html.js';
 import { q, one, rows } from '../db.js';
 import { config } from '../config.js';
 import { owned, str } from './util.js';
-import { encryptJson, decryptJson, randomCode, sha256, randomToken, sign, verifySigned, safeEqual } from '../crypto.js';
+import { encryptJson, decryptJson, senderCreds, randomCode, sha256, randomToken, sign, verifySigned, safeEqual } from '../crypto.js';
 import { setCookie, parseCookies } from '../http.js';
 import * as gmail from '../providers/gmail.js';
 import { normalizeEmail, normalizePhone } from '../contacts.js';
@@ -31,7 +31,7 @@ export default function register(r) {
   r.get('/senders', async (ctx) => {
     const list = await rows('SELECT * FROM senders WHERE user_id=$1 ORDER BY channel, created_at', [ctx.user.id]);
     const card = (s) => html`<a class="card tile" href="/senders/${s.id}"><h2>${s.label} ${badge(s.status)}</h2>
-      <p>${s.channel === 'email' ? 'Email' : 'WhatsApp'} · ${senderLine(s)}</p>
+      <p>${channelName(s.channel)} · ${senderLine(s)}</p>
       ${s.hold_until && new Date(s.hold_until) > new Date() ? html`<p class="warn">Waiting until ${fmtDate(s.hold_until, ctx.user.timezone)}: ${s.hold_reason}</p>` : ''}
       ${s.status === 'error' ? html`<p class="bad">${s.last_error}</p>` : ''}</a>`;
     ctx.page('Senders', html`
@@ -44,17 +44,17 @@ export default function register(r) {
   // ---------- Email ----------
   r.get('/senders/new/email', (ctx) => {
     const smtpForm = html`<form method="post" action="/senders/email" class="card stack">${csrfField(ctx.csrf)}
-        <p class="muted">For email providers other than Gmail. Note: this needs outgoing email ports, which Render's free plan blocks — it only works on a paid or other host.</p>
+        <p class="muted">Needs outgoing email ports, which Render's free plan blocks.</p>
         <label>Name for this sender (only you see it)<input name="label" required maxlength="60"></label>
         <label>Email address to send from<input type="email" name="email" required></label>
         <label>Name customers will see<input name="from_name" maxlength="80"></label>
         <label>Password / app password<input type="password" name="password" required autocomplete="off"></label>
         <label>Reply-to address (optional)<input type="email" name="reply_to"></label>
-        <label>Outgoing mail server (SMTP)<input name="host" placeholder="smtp.example.com" required></label>
+        <label>Outgoing mail server (SMTP)<input name="host" required></label>
         <div class="row"><label>Port<input type="number" name="port" min="1" max="65535" value="465"></label>
         <label>Security<select name="security"><option value="ssl">SSL/TLS (usually port 465)</option><option value="starttls">STARTTLS (usually port 587)</option></select></label></div>
         <label>Sign-in username (if different from the email address)<input name="username"></label>
-        <label>Your provider's daily sending limit<input type="number" name="daily_limit" min="1" max="100000" required placeholder="e.g. 300"></label>
+        <label>Your provider's daily sending limit<input type="number" name="daily_limit" min="1" max="100000" required></label>
         <button>Test and send verification code</button>
       </form>`;
     ctx.page('Connect email', html`
@@ -62,15 +62,14 @@ export default function register(r) {
     <h1>Connect a Gmail address</h1>
     ${gmail.enabled() ? html`
     <form method="get" action="/senders/google/start" class="card stack">
-      <p>You will sign in to the Gmail account on Google's own page and allow SheetSender to <b>send email only</b> (it cannot read your inbox). Repeat this for every Gmail address you want to send from.</p>
-      <label>Name for this sender (only you see it)<input name="label" required maxlength="60" placeholder="GoSkate Gmail"></label>
-      <label>Name customers will see<input name="from_name" maxlength="80" placeholder="GoSkate Dubai"></label>
+      <p>Sign in on Google's page and allow SheetSender to <b>send email only</b> (it cannot read your inbox). Repeat for each Gmail address.</p>
+      <label>Name for this sender (only you see it)<input name="label" required maxlength="60"></label>
+      <label>Name customers will see<input name="from_name" maxlength="80"></label>
       <label>Reply-to address (optional)<input type="email" name="reply_to"></label>
       <button class="primary">Continue with Google</button>
       <p class="muted">If Google shows "Google hasn't verified this app", click <b>Advanced</b> → <b>Go to SheetSender</b>. That appears because this is your own private app.</p>
-      <p class="muted">Google's limit is 500 emails per day for a normal Gmail account and 2,000 per day for Google Workspace. The app stays under it automatically.</p>
     </form>` : html`<section class="card attention"><p>Gmail connection is not switched on yet: the app owner must add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> in the hosting settings (see SETUP.md, "Connect Gmail").</p></section>`}
-    <details><summary>Other email provider (not Gmail)</summary>${smtpForm}</details>`, { active: '/senders' });
+    ${gmail.enabled() ? '' : html`<details><summary>Other email provider (not Gmail)</summary>${smtpForm}</details>`}`, { active: '/senders' });
   });
 
   r.get('/senders/google/start', (ctx) => {
@@ -162,7 +161,7 @@ export default function register(r) {
     <h1>Connect a WhatsApp Business number</h1>
     <section class="card note"><p>This uses Meta's official <b>WhatsApp Business Platform (Cloud API)</b>. Follow the guide <b>"Connect WhatsApp"</b> in the setup instructions (SETUP.md) to get these five values from <b>developers.facebook.com</b>. Messages are charged by Meta to the payment method on your WhatsApp Business account.</p></section>
     <form method="post" action="/senders/whatsapp" class="card stack">${csrfField(ctx.csrf)}
-      <label>Name for this sender (only you see it)<input name="label" required maxlength="60" placeholder="GoSkate WhatsApp"></label>
+      <label>Name for this sender (only you see it)<input name="label" required maxlength="60"></label>
       <label>Phone number ID<input name="phone_number_id" required inputmode="numeric" pattern="[0-9]{5,30}"><small>WhatsApp → API Setup → "Phone number ID"</small></label>
       <label>WhatsApp Business Account ID<input name="waba_id" required inputmode="numeric" pattern="[0-9]{5,30}"><small>WhatsApp → API Setup → "WhatsApp Business Account ID"</small></label>
       <label>App ID<input name="app_id" required inputmode="numeric" pattern="[0-9]{5,30}"><small>App settings → Basic → "App ID"</small></label>
@@ -208,7 +207,7 @@ export default function register(r) {
     if (!to) return ctx.go(`/senders/${s.id}`, { err: 'Enter your own WhatsApp number with country code.' });
     const [name, language] = String(ctx.body.template || 'hello_world|en_US').split('|');
     try {
-      const creds = { ...s.info, ...decryptJson(s.secrets) };
+      const creds = senderCreds(s);
       const tpl = (await wa.listTemplates(creds)).find((t) => t.name === name && t.language === language);
       if (!tpl) return ctx.go(`/senders/${s.id}`, { err: 'Template not found.' });
       const info = wa.analyzeTemplate(tpl);
@@ -225,19 +224,19 @@ export default function register(r) {
     const holding = s.hold_until && new Date(s.hold_until) > new Date();
     let templates = [];
     if (s.channel === 'whatsapp' && s.status !== 'error') {
-      try { templates = (await wa.listTemplates({ ...s.info, ...decryptJson(s.secrets) })).map(wa.analyzeTemplate); } catch (e) { templates = null; }
+      try { templates = (await wa.listTemplates(senderCreds(s))).map(wa.analyzeTemplate); } catch (e) { templates = null; }
     }
     const sentToday = (await one("SELECT count(*)::int AS n FROM messages WHERE sender_id=$1 AND sent_at > now() - interval '24 hours'", [s.id])).n;
     ctx.page(s.label, html`
       <p class="crumbs"><a href="/senders">Senders</a> ›</p>
       <h1>${s.label} ${badge(s.status)}</h1>
-      <p class="lead">${s.channel === 'email' ? 'Email' : 'WhatsApp'} · ${senderLine(s)}</p>
+      <p class="lead">${channelName(s.channel)} · ${senderLine(s)}</p>
       ${holding ? html`<p class="flash warn">Paused by the provider's instructions until ${fmtDate(s.hold_until, ctx.user.timezone)}: ${s.hold_reason}</p>` : ''}
       ${s.status === 'error' ? html`<p class="flash err">${s.last_error}</p>` : ''}
       ${s.channel === 'email' ? html`
         ${s.status === 'unverified' ? html`<section class="card"><h2>Enter the verification code</h2>
           <p>We sent a 6-digit code to <b>${s.info.email}</b>. It proves you own this address.</p>
-          <form method="post" action="/senders/${s.id}/verify" class="row">${csrfField(ctx.csrf)}<input name="code" inputmode="numeric" maxlength="6" required placeholder="123456"><button class="primary">Verify</button></form>
+          <form method="post" action="/senders/${s.id}/verify" class="row">${csrfField(ctx.csrf)}<input name="code" inputmode="numeric" maxlength="6" required placeholder="6-digit code"><button class="primary">Verify</button></form>
           <form method="post" action="/senders/${s.id}/resend">${csrfField(ctx.csrf)}<button class="link">Send a new code</button></form></section>` : ''}
         <section class="card"><h2>Details</h2><dl>
           <dt>Sends as</dt><dd>${senderLine(s)}</dd><dt>Connection</dt><dd>${s.info.provider === 'gmail_api' ? 'Gmail (connected with Google)' : `${s.info.host}:${s.info.port}`}</dd>
@@ -250,7 +249,7 @@ ${s.info.provider === 'gmail_api' ? html`<section class="card"><h2>Reconnect</h2
         <section class="card"><h2>Number</h2><dl>
           <dt>Display name</dt><dd>${s.info.verified_name}</dd><dt>Number</dt><dd>${s.info.display_phone}</dd>
           <dt>Quality rating</dt><dd>${s.info.quality || 'unknown'}</dd>
-          <dt>Messaging limit</dt><dd>${s.info.limit_raw === 'TIER_UNLIMITED' ? 'Unlimited' : `${s.info.limit ?? 250} different people per 24 hours`} (shared by all numbers in your Meta business portfolio)</dd>
+          <dt>Messaging limit</dt><dd>${waLimitText(s.info)} (shared by all numbers in your Meta business portfolio)</dd>
           <dt>Sent in last 24 hours</dt><dd>${sentToday}</dd></dl>
           <form method="post" action="/senders/${s.id}/recheck" class="stack">${csrfField(ctx.csrf)}
             <details><summary>Replace the access token</summary><textarea name="token" rows="2" placeholder="New permanent token (leave empty to keep the current one)"></textarea></details>
@@ -262,11 +261,11 @@ ${s.info.provider === 'gmail_api' ? html`<section class="card"><h2>Reconnect</h2
           ${s.info.app_subscribed === false ? html`<p class="warn">The app could not subscribe itself to your WhatsApp Business Account. Make sure the token has the whatsapp_business_management permission, then press "Check again with Meta".</p>` : ''}</section>
         <section class="card"><h2>Send a test to your own WhatsApp</h2>
           <form method="post" action="/senders/${s.id}/test" class="row">${csrfField(ctx.csrf)}
-            <input name="to" placeholder="Your number, e.g. +971501234567" required>
+            <input name="to" placeholder="Your WhatsApp number with country code" required>
             <select name="template">${(templates || []).filter((t) => t.supported && !['IMAGE', 'VIDEO'].includes(t.headerFormat)).map((t) => html`<option value="${t.name}|${t.language}">${t.name} (${t.language})</option>`)}</select>
             <button>Send test</button></form></section>
         <section class="card"><div class="row between"><h2>Message templates</h2><a class="button primary" href="/senders/${s.id}/templates/new">Create a template</a></div>
-          <p class="muted">WhatsApp only allows business-started messages that use a template approved by Meta. Campaigns can use templates marked "ready".</p>
+          <p class="muted">Campaigns can use templates marked "ready".</p>
           ${templates === null ? html`<p class="bad">Could not load templates from Meta.</p>` : html`<div class="tablewrap"><table><thead><tr><th>Name</th><th>Language</th><th>Category</th><th>Status</th><th>Opt-out</th><th>Usable here</th></tr></thead><tbody>
           ${templates.map((t) => html`<tr><td>${t.name}</td><td>${t.language}</td><td>${t.category}</td><td>${t.status}</td><td>${t.hasOptOut ? 'yes' : 'no'}</td>
             <td>${t.supported ? (t.hasOptOut ? html`<span class="badge green">ready</span>` : html`<span class="badge amber">needs opt-out</span>`) : html`<span class="muted">${t.reason}</span>`}</td></tr>`)}</tbody></table></div>`}</section>`}
@@ -279,14 +278,14 @@ ${s.info.provider === 'gmail_api' ? html`<section class="card"><h2>Reconnect</h2
     ctx.page('New template', html`
       <p class="crumbs"><a href="/senders">Senders</a> › <a href="/senders/${s.id}">${s.label}</a> ›</p>
       <h1>Create a WhatsApp template</h1>
-      <p class="lead">Meta reviews every template (usually minutes, sometimes up to a day). The template gets a <b>Stop promotions</b> button so customers can opt out with one tap.</p>
+      <p class="lead">Meta reviews every template (usually within minutes, sometimes up to a day).</p>
       <form method="post" action="/senders/${s.id}/templates" enctype="multipart/form-data" class="card stack">${csrfField(ctx.csrf)}
-        <label>Template name<input name="name" required pattern="[a-z0-9_]{1,100}" placeholder="november_offer"><small>Lowercase letters, numbers and _ only.</small></label>
+        <label>Template name<input name="name" required pattern="[a-z0-9_]{1,100}"><small>Lowercase letters, numbers and _ only.</small></label>
         <label>Language<select name="language"><option value="en">English</option><option value="ar">Arabic</option><option value="en_US">English (US)</option><option value="en_GB">English (UK)</option></select></label>
-        <label>Image or video at the top (optional)<input type="file" name="media" accept="image/jpeg,image/png,video/mp4"><small>JPG/PNG up to 5 MB or MP4 up to 16 MB. You attach the real image/video when you create the campaign; this one is Meta's review sample.</small></label>
-        <label>Message text<textarea name="body" required rows="6" maxlength="1024" dir="auto" placeholder="Hi {{1}}, this week only: 20% off all skates at GoSkate Marina. Show this message at the counter."></textarea>
-          <small>Write <b>{{1}}</b> where the customer's name should appear (optional). Marketing templates must not look like spam.</small></label>
-        <label>Footer (optional, max 60 characters)<input name="footer" maxlength="60" dir="auto" placeholder="Tap Stop promotions to unsubscribe"></label>
+        <label>Image or video at the top (optional)<input type="file" name="media" accept="image/jpeg,image/png,video/mp4"><small>JPG/PNG up to 5 MB or MP4 up to 16 MB. This is only Meta's review sample — you attach the real one in the campaign.</small></label>
+        <label>Message text<textarea name="body" required rows="6" maxlength="1024" dir="auto"></textarea>
+          <small>Write <b>{{1}}</b> where the customer's name should appear (optional).</small></label>
+        <label>Footer (optional, max 60 characters)<input name="footer" maxlength="60" dir="auto"></label>
         <label>Opt-out button text<input name="button" maxlength="25" value="Stop promotions" dir="auto" required></label>
         <button class="primary">Submit to Meta for approval</button>
       </form>`, { active: '/senders' });
@@ -305,10 +304,10 @@ ${s.info.provider === 'gmail_api' ? html`<section class="card"><h2>Reconnect</h2
     const f = ctx.files.find((x) => x.field === 'media');
     if (f) { try { media = checkMedia(f, 'whatsapp'); } catch (e) { return ctx.go(back, { err: e.message }); } }
     const buttonText = str(ctx.body.button, 25) || 'Stop promotions';
-    if (!wa.OPT_OUT_BUTTON.test(buttonText)) return ctx.go(back, { err: 'The button must clearly say it stops messages, e.g. "Stop promotions" or "إيقاف العروض".' });
+    if (!wa.OPT_OUT_BUTTON.test(buttonText)) return ctx.go(back, { err: 'The button must clearly say it stops messages, like "Stop promotions".' });
     const language = ['en', 'ar', 'en_US', 'en_GB'].includes(ctx.body.language) ? ctx.body.language : 'en';
     try {
-      const out = await wa.createTemplate({ ...s.info, ...decryptJson(s.secrets) }, { name, language, bodyText, footerText: str(ctx.body.footer, 60), buttonText, media });
+      const out = await wa.createTemplate(senderCreds(s), { name, language, bodyText, footerText: str(ctx.body.footer, 60), buttonText, media });
       ctx.go(`/senders/${s.id}`, { ok: `Template "${name}" submitted — Meta status: ${out.status || 'PENDING'}. Reload this page later to see when it is approved.` });
     } catch (e) { ctx.go(back, { err: `Meta did not accept the template: ${e.message}` }); }
   });
