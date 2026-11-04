@@ -160,9 +160,23 @@ t('a forged, changed or expired session is refused; the page cannot pick who it 
   throwsMsg(() => E.real.api(soon, 'getBootstrap', []), /SIGNED_OUT/);
   E.advance(-31 * 24 * 60);
 });
+t('a crafted link cannot put code into the page (Google\'s return values are checked and escaped)', () => {
+  const page = {}; const R = E.real; const orig = R.HtmlService.createTemplateFromFile;
+  R.HtmlService.createTemplateFromFile = () => Object.assign(page, { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; } });
+  try {
+    ['</script><script>alert(1)</script>', '"><img src=x onerror=alert(1)>', 'a'.repeat(600)].forEach(code => {
+      R.doGet({ parameter: { state: 'abc-123', code } });
+      assert.strictEqual(page.oauthJs, '""', 'refused: ' + code.slice(0, 20));
+    });
+    R.doGet({ parameter: { state: '<script>', code: 'x' } }); assert.strictEqual(page.oauthJs, '""');
+    R.doGet({ parameter: { state: 'abc-123', code: '4/0AX4XfW-good_code.1~' } });
+    assert(/4\/0AX4XfW-good_code\.1~/.test(page.oauthJs) && !/</.test(page.oauthJs));
+    assert(!/<\/script/i.test(R.safeJs_('</script><b>')), 'escaped even if something got through');
+  } finally { R.HtmlService.createTemplateFromFile = orig; }
+});
 t('anyone calling sign-in or the sender in a loop is slowed down (protects the daily limits)', () => {
   E.advance(2);
-  for (let i = 0; i < 60; i++) E.real.startLogin();
+  for (let i = 0; i < 300; i++) E.real.startLogin();
   throwsMsg(() => E.real.startLogin(), /Too many tries/);
   E.advance(2);
   assert(E.real.startLogin(), 'fine again a minute later');

@@ -16,7 +16,7 @@
 
   <div id="busy" class="busy hidden"><div class="busy-box"><div class="spinner"></div><p id="busyText">Working…</p></div></div>
 
-  <script>window.SF_FIRST = <?!= JSON.stringify(first || '') ?>; window.SF_OAUTH = <?!= JSON.stringify(oauth || '') ?>;</script>
+  <script>window.SF_FIRST = <?!= firstJs ?>; window.SF_OAUTH = <?!= oauthJs ?>;</script>
   <?!= include('SheetJS'); ?>
   <?!= include('App'); ?>
 </body>

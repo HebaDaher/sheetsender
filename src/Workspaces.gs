@@ -87,6 +87,13 @@ function sessionKey_() {
   }
   return k;
 }
+function dailyLimit_(name, max) {
+  const cache = CacheService.getScriptCache();
+  const key = 'DL_' + name + '_' + new Date().toISOString().slice(0, 10);
+  const n = Number(cache.get(key) || 0) + 1;
+  cache.put(key, String(n), 21600);
+  if (n > max) throw new Error('Too many sign-ins today. Try again tomorrow, or tell the app administrator.');
+}
 /** At most `max` times a minute for everyone together (protects the daily limits from anyone calling in a loop). */
 function rateLimit_(name, max) {
   const cache = CacheService.getScriptCache();
@@ -155,7 +162,7 @@ function apiActions_() {
 /** "Sign in with Google": Google's page asks only to share the email address (no warning screen). */
 function startLogin() {
   SP_ = null;
-  rateLimit_('login', 60);
+  rateLimit_('login', 300);
   migrate_();
   const client = oauthClient_();
   const state = Utilities.getUuid();
@@ -186,6 +193,7 @@ function finishLogin(code, state, error) {
   if (!cache.get(key)) throw new Error('This sign-in link expired or was already used. Click "Sign in with Google" again.');
   cache.remove(key);
   rateLimit_('loginfinish', 60);
+  dailyLimit_('loginfinish', 2000); // well below Google's daily limit of outside requests (Gmail sending needs it)
   if (error) throw new Error(error === 'access_denied' ? 'Sign-in was cancelled. Click "Sign in with Google" again.' : 'Google returned an error: ' + error);
   const client = oauthClient_();
   const res = UrlFetchApp.fetch(OAUTH.TOKEN_URL, {

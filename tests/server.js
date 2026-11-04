@@ -41,11 +41,17 @@ function makeRunner() {
 function renderIndex(query) {
   let html = fs.readFileSync(path.join(SRC, 'Index.html'), 'utf8');
   html = html.replace(/<\?!=\s*include\('(\w+)'\);?\s*\?>/g, (m, n) => fs.readFileSync(path.join(SRC, n + '.html'), 'utf8'));
-  html = html.replace(/<\?!=\s*JSON\.stringify\(first \|\| ''\)\s*\?>/, JSON.stringify(FIRST || ''));
+
   // like doGet: Google sends people back to the app's own link with ?code=&state=
   const q = new URLSearchParams(query || '');
-  const oauth = q.get('state') && (q.get('code') || q.get('error')) ? JSON.stringify({ code: q.get('code') || '', state: q.get('state'), error: q.get('error') || '' }) : '';
-  html = html.replace(/<\?!=\s*JSON\.stringify\(oauth \|\| ''\)\s*\?>/, JSON.stringify(oauth));
+  // the real doGet decides what goes into the page (same checks and escaping)
+  const t = {}; E.real.HtmlService = E.real.HtmlService; // (template object filled like HtmlService does)
+  const fake = { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; } };
+  const orig = E.real.HtmlService.createTemplateFromFile;
+  E.real.HtmlService.createTemplateFromFile = () => fake;
+  try { E.real.doGet({ parameter: Object.fromEntries(q) }); } finally { E.real.HtmlService.createTemplateFromFile = orig; }
+  html = html.replace(/<\?!=\s*firstJs\s*\?>/, fake.firstJs).replace(/<\?!=\s*oauthJs\s*\?>/, fake.oauthJs);
+  void t;
   if (/<\?/.test(html.replace(/<script>[\s\S]*?<\/script>/g, ''))) throw new Error('unresolved template tag');
   const inject = forced ? '<script>try{localStorage.setItem("sf_session",' + JSON.stringify(E.sessionFor(forced)) + ')}catch(e){}</script>' : '';
   forced = forced && process.env.LOGIN_FLOW ? '' : forced;

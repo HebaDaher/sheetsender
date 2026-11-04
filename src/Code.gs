@@ -86,12 +86,22 @@ function doGet(e) {
   page.first = /^[0-9a-f]{64}$/.test(String(p.first || '')) ? String(p.first) : '';
   // Google sends people back here after signing in / clicking Allow. The page itself finishes, after checking that
   // THIS browser started it (so nobody can push their own sign-in or connection into someone else's browser).
-  page.oauth = (p.state && (p.code || p.error)) ? JSON.stringify({
-    code: String(p.code || '').slice(0, 512), state: String(p.state).slice(0, 80), error: String(p.error || '').slice(0, 80) }) : '';
+  // Only the characters Google uses are let through, and the value is written safely into the page's script.
+  const code = String(p.code || ''), state = String(p.state || ''), err = String(p.error || '');
+  const ok = /^[A-Za-z0-9\/_.~-]{0,512}$/.test(code) && /^[A-Za-z0-9-]{1,80}$/.test(state) && /^[a-z_]{0,40}$/.test(err) && (code || err);
+  page.oauth = ok ? JSON.stringify({ code: code, state: state, error: err }) : '';
+  page.firstJs = safeJs_(page.first);
+  page.oauthJs = safeJs_(page.oauth);
   return page
     .evaluate()
     .setTitle(APP_NAME)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** A string as a JavaScript literal that cannot end the <script> it is written in. */
+function safeJs_(s) {
+  return JSON.stringify(String(s || '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
 /** Inserts another project file's raw content into the page (not evaluated as a template). */

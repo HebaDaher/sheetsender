@@ -158,7 +158,8 @@
     a.addEventListener('click', function (ev) {
       if (!setPending({ kind: a.getAttribute('data-kind'), state: a.getAttribute('data-state'), at: Date.now() })) {
         ev.preventDefault();
-        showBanner('error', 'This browser blocks the storage the app needs to sign you in safely. Allow cookies and site data for script.google.com (or use another browser), then try again.', true);
+        showBanner('error', 'This browser blocks the storage the app needs to sign you in safely (this happens in private/Incognito windows, or when “Block third-party cookies” is on). ' +
+          'Open the link in a normal window, or allow cookies for [*.]googleusercontent.com in the browser settings, then try again.', true);
       }
     });
   }
