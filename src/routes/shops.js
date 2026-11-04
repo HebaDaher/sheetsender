@@ -1,10 +1,10 @@
 // Shops, Excel uploads and column matching.
-import { html, csrfField, fmtDate, plural, showAddress, countryOptions } from '../html.js';
+import { html, csrfField, fmtDate, plural } from '../html.js';
 import { HttpError } from '../http.js';
 import { q, one, rows, tx } from '../db.js';
 import { owned, str } from './util.js';
 import { parseSpreadsheet, guessMapping, FIELDS } from '../excel.js';
-import { buildContacts, COUNTRIES } from '../contacts.js';
+import { buildContacts } from '../contacts.js';
 
 export async function shopStats(shopId) {
   return one(`SELECT count(*)::int AS total,
@@ -29,7 +29,7 @@ export default function register(r) {
       <section class="card">
         <h2>Add a shop</h2>
         <form method="post" action="/shops" class="row">${csrfField(ctx.csrf)}
-          <input name="name" placeholder="Shop name" required maxlength="80">
+          <input name="name" placeholder="Shop name, e.g. GoSkate Marina" required maxlength="80">
           <button class="primary">Add shop</button>
         </form>
       </section>`, { active: '/shops' });
@@ -54,14 +54,14 @@ export default function register(r) {
       <h1>${shop.name}</h1>
       <section class="card">
         <h2>${up ? 'Replace the customer file' : 'Upload the customer file'}</h2>
-        <p>Excel (.xlsx) or CSV, with the column titles in the first row.</p>
+        <p>Excel (.xlsx) or CSV. The first row must contain column titles such as <i>Name, Email, Phone, WhatsApp, Consent</i>.</p>
         <form method="post" action="/shops/${shop.id}/upload" enctype="multipart/form-data" class="row">${csrfField(ctx.csrf)}
           <input type="file" name="file" accept=".xlsx,.csv" required>
           <button class="primary">Upload</button>
         </form>
       </section>
       ${up ? html`<section class="card">
-        <div class="row between"><h2>Current list</h2><div class="row"><a class="button" href="/uploads/${up.id}/map">Change column matching</a><a class="button primary" href="/campaigns/new?shop=${shop.id}">New campaign</a></div></div>
+        <div class="row between"><h2>Current list</h2><a class="button" href="/uploads/${up.id}/map">Change column matching</a></div>
         <p class="muted">${up.filename} · uploaded ${fmtDate(up.created_at, ctx.user.timezone)}</p>
         <div class="stats">
           <div><b>${st.total}</b><span>people</span></div>
@@ -75,10 +75,13 @@ export default function register(r) {
           <tbody>${contacts.map((c) => html`<tr>
             <td>${c.row_number}</td><td>${c.name}</td>
             <td>${c.email || (c.email_raw ? html`<span class="bad">${c.email_raw} (invalid)</span>` : '—')}</td>
-            <td>${showAddress('whatsapp', c.phone) || (c.phone_raw ? html`<span class="bad">${c.phone_raw} (invalid)</span>` : '—')}</td>
+            <td>${c.phone ? '+' + c.phone : (c.phone_raw ? html`<span class="bad">${c.phone_raw} (invalid)</span>` : '—')}</td>
             <td>${yes(c.email && c.consent_email)}</td><td>${yes(c.phone && c.consent_whatsapp)}</td></tr>`)}</tbody>
         </table></div>
         ${st.total > 500 ? html`<p class="muted">Showing the first 500 of ${st.total} rows.</p>` : ''}
+      </section>
+      <section class="card">
+        <h2>Send to this shop</h2><a class="button primary" href="/campaigns/new?shop=${shop.id}">New campaign for ${shop.name}</a>
       </section>` : ''}
       <details class="danger"><summary>Delete this shop</summary>
         <form method="post" action="/shops/${shop.id}/delete" data-confirm="Delete ${shop.name}, its customer list and its campaign history? This cannot be undone.">${csrfField(ctx.csrf)}
@@ -111,9 +114,9 @@ export default function register(r) {
         ${FIELDS.map((fd) => html`<label class="maprow"><span>${fd.label}</span>
           <select name="${fd.key}"><option value="">— not in this file —</option>
           ${up.headers.map((h) => html`<option value="${h}" ${mapping[fd.key] === h ? 'selected' : ''}>${h}</option>`)}</select></label>`)}
-        <p class="note">Only people whose <b>Consent Status</b> says they agreed (for example <i>Yes</i>) are messaged. An empty cell counts as no consent.</p>
+        <p class="note"><b>Consent Status</b> must say that the person agreed to receive your messages, for example <i>Yes</i>, <i>Opted in</i> or <i>نعم</i>. Anything else — including an empty cell — counts as <b>no consent</b> and that person is skipped.</p>
         <label class="maprow"><span>Phone numbers without a country code are from</span>
-          <select name="country">${countryOptions(COUNTRIES, ctx.user.default_country)}</select></label>
+          <select name="country">${Object.entries((await import('../contacts.js')).COUNTRIES).map(([k, v]) => html`<option value="${k}" ${ctx.user.default_country === k ? 'selected' : ''}>${v.name} (+${v.cc})</option>`)}</select></label>
         <button class="primary">Save matching</button>
       </form>
       <section class="card"><h2>First rows of the file</h2><div class="tablewrap"><table>
@@ -130,6 +133,7 @@ export default function register(r) {
     if (!mapping.email && !mapping.phone && !mapping.whatsapp) return ctx.go(back, { err: 'Match at least an Email, Phone Number or WhatsApp Number column.' });
     if (!mapping.consent && !mapping.consent_email && !mapping.consent_whatsapp) return ctx.go(back, { err: 'Match the Consent Status column. Without it nobody can be messaged, because the app only sends to people who agreed.' });
     const used = Object.values(mapping); if (new Set(used).size !== used.length) return ctx.go(back, { err: 'The same column is matched twice. Each column can be used for one detail only.' });
+    const { COUNTRIES } = await import('../contacts.js');
     const country = COUNTRIES[ctx.body.country] ? ctx.body.country : ctx.user.default_country;
     const contacts = buildContacts(up, mapping, country);
     await tx(async (db) => {

@@ -48,11 +48,6 @@ export function layout({ title, user, csrf, body, active, notice, error, wide })
 </body></html>`.s;
 }
 
-export const channelName = (ch) => (ch === 'email' ? 'Email' : 'WhatsApp');
-export const showAddress = (ch, addr) => (ch === 'whatsapp' && addr ? '+' + addr : addr);
-export const waLimitText = (info) => (info?.limit_raw === 'TIER_UNLIMITED' ? 'unlimited' : `${info?.limit ?? 250} different people per 24 hours`);
-export const countryOptions = (countries, selected) => Object.entries(countries).map(([k, v]) => html`<option value="${k}" ${selected === k ? 'selected' : ''}>${v.name} (+${v.cc})</option>`);
-
 export const csrfField = (csrf) => html`<input type="hidden" name="_csrf" value="${csrf}">`;
 
 export function badge(status) {

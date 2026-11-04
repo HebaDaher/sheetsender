@@ -2,12 +2,12 @@
 // Rules: one message per person per campaign, provider limits respected, slow-down/pause instructions obeyed,
 // allowed hours respected, and a message that may already have gone out is never sent again automatically.
 import { pool, q, one, rows } from './db.js';
-import { senderCreds, sign } from './crypto.js';
+import { decryptJson, sign } from './crypto.js';
 import { config } from './config.js';
 import * as email from './providers/email.js';
 import * as wa from './providers/whatsapp.js';
 import { buildEmail } from './mime.js';
-import { emailHtml, emailText, fillPlaceholders, addOptOut } from './campaigns.js';
+import { emailHtml, emailText, fillPlaceholders } from './campaigns.js';
 
 const SENT = "('sent','delivered','read','unknown')";
 
@@ -92,7 +92,7 @@ export async function processCampaign(campaignId, { deadline, limit = Infinity, 
   if (sender.hold_until && new Date(sender.hold_until) > new Date()) return { note: sender.hold_reason, waitUntil: sender.hold_until };
   if (!withinHours(user)) return { note: `Outside your allowed sending hours (${user.send_start}:00–${user.send_end}:00, ${user.timezone}). Sending continues automatically when they start.` };
 
-  const creds = senderCreds(sender);
+  const creds = { ...decryptJson(sender.secrets), ...sender.info };
   if (c.channel === 'whatsapp') await refreshWaLimit(sender, creds);
   let cap = await capacity(sender, c.user_id);
   if (cap.left <= 0 && !(c.channel === 'whatsapp' && cap.recent)) {
@@ -194,7 +194,7 @@ export async function processCampaign(campaignId, { deadline, limit = Infinity, 
       } else if (k.action === 'fail_message') {
         await q("UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
       } else if (k.action === 'opted_out') {
-        await addOptOut(c.user_id, c.channel, m.address, k.text);
+        await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [c.user_id, c.channel, m.address, k.text]);
         await q("UPDATE messages SET status='skipped', skip_reason='Opted out', error=$2, updated_at=now() WHERE id=$1", [m.id, k.text]);
       } else {
         // Provider-level problem: put this message back untouched and stop.

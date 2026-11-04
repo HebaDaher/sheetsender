@@ -1,22 +1,8 @@
 // Who receives a campaign, what each person gets, and safe activation (no duplicates).
-import { q, rows as dbRows, tx } from './db.js';
+import { rows as dbRows, tx } from './db.js';
 import { sha256 } from './crypto.js';
 import { firstName } from './contacts.js';
 import { esc } from './html.js';
-
-// The key a template variable is saved under, e.g. "body:1" or "button:0:1".
-export const varKey = (v) => (v.component === 'button' ? `button:${v.index}:${v.name}` : `${v.component}:${v.name}`);
-
-// Counts per campaign, used by the home page and the campaign list (needs the campaign aliased as c).
-export const COUNT_COLUMNS = `(SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('queued','sending'))::int AS queued,
-  (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status IN ('sent','delivered','read'))::int AS sent,
-  (SELECT count(*) FROM messages m WHERE m.campaign_id=c.id AND m.status='failed')::int AS failed`;
-
-// Adds someone to the opt-out list and drops any message still waiting for them on that channel.
-export async function addOptOut(userId, channel, address, reason) {
-  await q('INSERT INTO suppressions (user_id, channel, address, reason) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [userId, channel, address, reason]);
-  await q("UPDATE messages SET status='skipped', skip_reason='Opted out', updated_at=now() WHERE user_id=$1 AND channel=$2 AND address=$3 AND status='queued'", [userId, channel, address]);
-}
 
 export const SOURCES = [['name', 'Customer name'], ['first_name', 'First name'], ['shop', 'Shop name'], ['fixed', 'Fixed text (type below)']];
 
@@ -40,7 +26,7 @@ export function waValues(campaign, contact, shopName) {
   const out = {};
   const info = campaign.template?.info; if (!info) return out;
   for (const v of info.vars) {
-    const key = varKey(v);
+    const key = v.component === 'button' ? `button:${v.index}:${v.name}` : `${v.component}:${v.name}`;
     const m = campaign.template.mapping?.[key] || { source: 'fixed', value: '' };
     let val;
     if (m.source === 'name') val = contact.name;
