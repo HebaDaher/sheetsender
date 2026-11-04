@@ -2044,6 +2044,15 @@
         (st.clientReady ? badge('ok', '✓ Saved') : badge('warn', 'Not set yet')) + '</div>' +
         '<p class="muted small" style="margin-top:8px">The secret is kept on the server only. It is never shown again, never sent to any page and never written to a Sheet. ' +
         'Signing in to the app shows no warning (only the email is asked). Connecting a Gmail account to send shows Google’s “unverified app” warning, and at most 100 Gmail accounts can be connected while the app is not verified by Google.</p></div>';
+      html += '<div class="card"><h2>Your own website (for Google verification)</h2>' +
+        '<p class="muted">Google verifies the app only if every address on its sign-in screens is on a domain you own. With your website on, Google sends people back to <b>https://your-site/oauth/</b>, a page on your site that passes them straight to the app.</p>' +
+        (st.website ? '<div class="notice ok">✓ In use: <b>' + esc(st.website) + '</b>. Google sends people back to ' + esc(st.redirectUri) + '</div>' :
+          '<ol class="small" style="line-height:1.7;padding-left:18px;margin:6px 0"><li>The website must already open in the browser (for example https://shopeleader.ae/oauth/).</li>' +
+          '<li>In Google Cloud → Clients → your client → Authorized redirect URIs, <b>add</b> (keep the old one too): <code>https://your-site/oauth/</code></li>' +
+          '<li>Write the website name below and click Use it. The app checks the page first, so sign-in never breaks.</li></ol>') +
+        '<div class="row"><input type="text" id="siteName" placeholder="shopeleader.ae" value="' + esc(st.website) + '" style="max-width:260px">' +
+        '<button class="btn primary small" id="saveSite">' + (st.website ? 'Save' : 'Use it') + '</button>' +
+        (st.website ? '<button class="btn small" id="stopSite">Stop using it</button>' : '') + '</div></div>';
     } else if (!st.clientReady) {
       html += '<div class="notice warn"><b>Gmail sending is not available yet.</b> The app administrator (' + esc(st.admin) + ') still has to finish the Google sign-in setup.</div>';
     }
@@ -2145,6 +2154,15 @@
     var copy = function (id) { var i = $(id); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied.'); };
     on('copyApp', function () { copy('appUrl'); });
     on('copyRedir', function () { copy('redir'); });
+    on('saveSite', function () {
+      var d = $('siteName').value.trim(); if (!d) return;
+      if (!confirm('Did you already add https://' + d.replace(/^https?:\/\//, '').replace(/\/.*$/, '') + '/oauth/ to the Authorized redirect URIs in Google Cloud?\n\nIf not, click Cancel and add it first — otherwise signing in stops working.')) return;
+      withBusy('Checking the website…', call('saveWebsite', d)).then(function (r) { showBanner('success', 'Done. Google now sends people back through ' + r.redirectUri); renderSettings(); });
+    });
+    on('stopSite', function () {
+      if (!confirm('Stop using your website for signing in? Google then sends people back to the app link again.')) return;
+      withBusy('Saving…', call('saveWebsite', '')).then(function () { showBanner('success', 'Switched back to the app link.'); renderSettings(); });
+    });
     on('saveClient', function () {
       withBusy('Saving…', call('saveOAuthClient', $('cid').value, $('csec').value)).then(function () {
         showBanner('success', 'Google sign-in saved. Now click “Connect a Gmail account”.'); renderSettings();

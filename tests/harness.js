@@ -142,7 +142,7 @@ function makeEnv(srcDir) {
   }
 
   function b64url(s) { return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-  function resp(code, obj, headers) { const t = JSON.stringify(obj); return { getResponseCode: () => code, getContentText: () => t, getHeaders: () => headers || {} }; }
+  function resp(code, obj, headers, raw) { const t = raw !== undefined ? raw : JSON.stringify(obj); return { getResponseCode: () => code, getContentText: () => t, getHeaders: () => headers || {} }; }
   function newBlob(bytes, type, name) {
     const b = { bytes: toBuf(bytes), type: type || '', name: name || '' };
     b.setContentType = (t) => { b.type = t; return b; }; b.setName = (n) => { b.name = n; return b; };
@@ -160,6 +160,8 @@ function makeEnv(srcDir) {
       fetchLog.push({ url, opts, as: users.effective });
       if (url.indexOf('https://graph.facebook.com/v25.0/') === 0) return graph(url, opts);
       if (url.indexOf('https://www.googleapis.com/') === 0) return driveApi(url, opts);
+      if (env.sites && url in env.sites) return resp(200, {}, {}, env.sites[url]);
+      if (env.sites && /^https:\/\/[a-z0-9.-]+\.ae\//.test(url)) throw new Error('DNS error: ' + url);
       const p = opts.payload || {};
       if (url === 'https://oauth2.googleapis.com/token') {
         if (p.client_id !== google.client.id || p.client_secret !== google.client.secret) return resp(401, { error: 'invalid_client' });
@@ -334,7 +336,7 @@ function makeEnv(srcDir) {
   };
   const services = Object.assign({}, ctx);
   function compile(dir) {
-    const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs', 'Lists.gs', 'Media.gs'].filter(f => fs.existsSync(path.join(dir, f)));
+    const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs', 'Lists.gs', 'Media.gs', 'Site.gs'].filter(f => fs.existsSync(path.join(dir, f)));
     return files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n') +
       (fs.existsSync(path.join(dir, 'Workspaces.gs')) ? "\nconst APP_URL = 'https://script.google.com/macros/s/DEPLOY123/exec';\n" : '') +
       (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +

@@ -78,6 +78,8 @@ function markAccount_(email, status, error, extra) {
  * of the OAuth client in Google Cloud.
  */
 function redirectUri_() {
+  const site = siteRedirectUri_(); // the app's own website, when the administrator switched it on
+  if (site) return site;
   if (typeof APP_URL !== 'undefined' && /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(APP_URL))) return String(APP_URL);
   const url = String(ScriptApp.getService().getUrl() || '');
   if (/\/exec$/.test(url)) return url;
@@ -143,6 +145,8 @@ function getSettings() {
     workspace: { id: ctx.ws.id, name: ctx.ws.name || 'My shops', owner: ctx.ws.owner },
     members: membersOf_(ctx),
     redirectUri: redirectUri_(),
+    appRedirectUri: typeof APP_URL !== 'undefined' ? String(APP_URL) : '',
+    website: ctx.isAdmin ? publicSite_() : '',
     redirectLooksWrong: false,
     clientId: ctx.isAdmin ? clientId : '',
     clientSecretSaved: secretSaved,
