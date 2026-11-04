@@ -16,6 +16,8 @@
 </ul>
 <h2>Contact lists</h2>
 <p>Names, emails, phone numbers and consent details of interested buyers are stored in a Google Sheet for each workspace. The Sheet is kept in the Google Drive of the app's administrator (who runs the app) and shared only with the workspace owner; inside the app, only the owner and the people they invite can see it. The administrator does not use this data for anything except running the app. People are only messaged if they agreed to be contacted, and anyone who asks to stop is marked as opted out and never messaged again.</p>
+<h2>Photos and videos</h2>
+<p>Photos and videos added for WhatsApp messages are stored in one folder the app makes in the Google Drive of the app's administrator. The app uses Google's “drive.file” permission: it can only see the files it made itself, nothing else in that Drive. Each file can only be used by the workspace it was added in. Removing a photo or video in the app moves the file to the Drive bin. For the WhatsApp Business API, the file is also uploaded to Meta to send it.</p>
 <h2>WhatsApp</h2>
 <ul>
 <li>If a workspace sends WhatsApp messages from its own Mac, the messages go through that Mac's WhatsApp; the tool keeps only the result (sent or not).</li>

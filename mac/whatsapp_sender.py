@@ -50,6 +50,15 @@ SEL_QR = "canvas[aria-label*='Scan'], [data-ref] canvas, div[data-ref]"
 SEL_COMPOSE = "footer div[contenteditable='true'], div[contenteditable='true'][data-tab='10']"
 SEL_SEND_BUTTON = ("[data-icon='send'], [data-icon='wds-ic-send-filled'], button[aria-label='Send'], "
                    "button[aria-label='إرسال'], [data-testid='send'], [data-testid='compose-btn-send']")
+# Photos and videos: the attach (📎/+) button, the file box of "Photos & videos", the caption box and Send in the preview.
+SEL_ATTACH = ("[data-icon='plus-rounded'], [data-icon='plus'], [data-icon='attach-menu-plus'], [data-icon='clip'], "
+              "button[aria-label='Attach'], [title='Attach'], button[aria-label='إرفاق'], [title='إرفاق']")
+SEL_MEDIA_INPUT = "input[type='file'][accept*='image'], input[type='file'][accept*='video']"
+ATTACH_MENU_TEXTS = ["Photos & videos", "Photos & Videos", "Photos and videos", "الصور والفيديوهات", "صور وفيديوهات"]
+SEL_CAPTION = ("div[contenteditable='true'][aria-label*='caption' i], div[contenteditable='true'][aria-placeholder*='caption' i], "
+               "div[contenteditable='true'][aria-label*='تعليق'], div[contenteditable='true'][data-tab='undefined']")
+SEL_MEDIA_SEND = ("div[role='button'][aria-label='Send'], div[role='button'][aria-label='إرسال'], "
+                  "[data-icon='wds-ic-send-filled'], [data-icon='send']")
 SETTLE_S = 3  # seconds the chat must stay open with the text before sending
 INVALID_TEXTS = ["phone number shared via url is invalid", "رقم الهاتف الذي تمت مشاركته عبر الرابط غير صالح"]
 
@@ -110,9 +119,30 @@ def results_path(job_path):
     return job_path.with_name(job_path.stem + "-results.json")
 
 
+MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "video/mp4": ".mp4", "video/3gpp": ".3gp"}
+
+
+def validate_media(media):
+    """The photo/video of a send list (or None). Only the 4 kinds WhatsApp takes, at most 16 MB."""
+    if not media:
+        return None
+    if not isinstance(media, dict) or media.get("mime") not in MEDIA_TYPES or not re.fullmatch(r"[A-Za-z0-9_-]{4,40}", str(media.get("media_id", ""))):
+        raise ValueError("The photo or video of this send list is not valid.")
+    size = int(media.get("size") or 0)
+    if not (0 < size <= 16 * 1024 * 1024):
+        raise ValueError("The photo or video of this send list is too big.")
+    return {**media, "size": size}
+
+
+def media_file_name(media):
+    """Where the helper keeps a downloaded photo/video (the name comes from the app's id, never from the file name)."""
+    return str(media["media_id"]) + MEDIA_TYPES[media["mime"]]
+
+
 def validate_job(job):
     if not isinstance(job, dict) or job.get("kind") != "shop-followups-whatsapp-job" or not isinstance(job.get("items"), list):
         raise ValueError("This file is not a Shop Follow-ups send list.")
+    validate_media(job.get("media"))
     good = []
     for it in job["items"]:
         phone = re.sub(r"\D", "", str(it.get("phone", "")))
@@ -179,8 +209,10 @@ def _problem_screenshot(page, phone):
         return None
 
 
-def send_one(page, phone, text):
+def send_one(page, phone, text, media_path=None):
     """Returns ('sent', '') or ('failed', reason) or ('logged_out', reason). Never raises because of page reloads."""
+    if media_path:
+        return send_media(page, phone, text, media_path)
     url = f"{WA_URL}/send?phone={phone}&text={urllib.parse.quote(text)}"
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=90000)
@@ -238,6 +270,142 @@ def send_one(page, phone, text):
     return "failed", "The message stayed in the box (not sent)" + (f" — picture saved: {shot.name}" if shot else "")
 
 
+def _first(page, selector):
+    for sel in selector.split(", "):
+        el = _safe(lambda: page.query_selector(sel))
+        if el is not None:
+            return el
+    return None
+
+
+def _out_count(page):
+    return len(_safe(lambda: page.query_selector_all("div.message-out"), []) or [])
+
+
+def send_media(page, phone, text, media_path):
+    """Sends a photo or video with the text as its caption. Same promise as send_one: never sends twice."""
+    url = f"{WA_URL}/send?phone={phone}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    except Exception as e:
+        return "failed", f"WhatsApp did not load ({str(e).splitlines()[0][:80]})"
+    # 1. The chat is open (the message box is there) and stays open for a moment.
+    deadline = time.time() + 90
+    ready_since = None
+    while True:
+        if time.time() > deadline:
+            _problem_screenshot(page, phone)
+            return "failed", "WhatsApp did not open the chat in time"
+        body = (_safe(lambda: page.inner_text("body"), "") or "").lower()
+        if any(t in body for t in INVALID_TEXTS):
+            return "failed", "This number is not on WhatsApp"
+        if _safe(lambda: page.query_selector(SEL_QR)) and not _safe(lambda: page.query_selector(SEL_LOGGED_IN)):
+            return "logged_out", "WhatsApp Web logged out"
+        if _box_text(page) is not None:
+            ready_since = ready_since or time.time()
+            if time.time() - ready_since >= SETTLE_S * TIME_SCALE:
+                break
+        else:
+            ready_since = None
+        time.sleep(0.5)
+    time.sleep(random.uniform(1, 2) * TIME_SCALE)
+    before = _out_count(page)
+
+    # 2. Attach the file: 📎 / + button, then the "Photos & videos" file box.
+    attach = _first(page, SEL_ATTACH)
+    if attach is None:
+        _problem_screenshot(page, phone)
+        return "failed", "Could not find WhatsApp's attach (📎) button — WhatsApp Web may have changed"
+    if not _safe(lambda: (attach.click(timeout=5000), True)[1], False):  # an icon inside the button: click the button
+        _safe(lambda: attach.evaluate("e => (e.closest('button,[role=button]') || e).click()"))
+    attached = False
+    end = time.time() + 10
+    while time.time() < end and not attached:
+        inp = _first(page, SEL_MEDIA_INPUT)
+        if inp is not None and _safe(lambda: (inp.set_input_files(str(media_path)), True)[1], False):
+            attached = True
+            break
+        for label in ATTACH_MENU_TEXTS:  # some versions only open the file box from the menu item
+            item = _safe(lambda: page.get_by_text(label, exact=True).first)
+            if item is not None and _safe(lambda: item.is_visible(), False):
+                try:
+                    with page.expect_file_chooser(timeout=5000) as fc:
+                        item.click()
+                    fc.value.set_files(str(media_path))
+                    attached = True
+                except Exception:
+                    pass
+                break
+        time.sleep(0.5)
+    if not attached:
+        _problem_screenshot(page, phone)
+        return "failed", "Could not attach the photo or video — WhatsApp Web may have changed"
+
+    # 3. The preview opens with a caption box: write the text there (new lines with Shift+Enter).
+    cap = None
+    end = time.time() + 60
+    while time.time() < end and cap is None:
+        cap = _first(page, SEL_CAPTION)
+        if cap is None:
+            time.sleep(0.5)
+    if cap is None:
+        _problem_screenshot(page, phone)
+        _safe(lambda: page.keyboard.press("Escape"))
+        return "failed", "WhatsApp did not show the photo/video preview"
+    _safe(lambda: cap.click(timeout=5000))
+    lines = str(text).split("\n")
+    for i, line in enumerate(lines):
+        if line:
+            _safe(lambda: page.keyboard.insert_text(line))
+        if i < len(lines) - 1:
+            _safe(lambda: page.keyboard.press("Shift+Enter"))
+    time.sleep(random.uniform(1, 2) * TIME_SCALE)
+    want = " ".join(str(text).split())
+    got = " ".join((_safe(lambda: cap.inner_text(), "") or "").split())
+    if want and want[:40] not in got:
+        _problem_screenshot(page, phone)
+        _safe(lambda: page.keyboard.press("Escape"))
+        return "failed", "The caption could not be written under the photo/video (not sent)"
+
+    # 4. Send ONCE (Enter; the Send button only if the preview is still open with the caption, i.e. Enter was ignored).
+    _safe(lambda: page.evaluate("window.__sfPressed = true"))
+    _safe(lambda: page.keyboard.press("Enter"))
+
+    def preview_closed():
+        return _first(page, SEL_CAPTION) is None
+
+    end = time.time() + 15
+    while time.time() < end and not preview_closed():
+        time.sleep(0.5)
+    if not preview_closed() and _safe(lambda: page.evaluate("window.__sfPressed === true"), False):
+        btn = _first(page, SEL_MEDIA_SEND)
+        if btn is not None:
+            if not _safe(lambda: (btn.click(timeout=5000), True)[1], False):
+                _safe(lambda: btn.evaluate("e => (e.closest('button,[role=button]') || e).click()"))
+        end = time.time() + 120  # a video can take a while to prepare
+        while time.time() < end and not preview_closed():
+            time.sleep(0.5)
+    if not _safe(lambda: page.evaluate("window.__sfPressed === true"), False):
+        # WhatsApp reloaded: never press again; look in the chat instead.
+        end = time.time() + 20
+        while time.time() < end:
+            if _in_chat(page, text):
+                return "sent", ""
+            time.sleep(0.5)
+        return "failed", ("WhatsApp reloaded just as the photo/video was being sent. To avoid sending it twice it was not "
+                          "sent again — check this chat on the phone")
+    if not preview_closed():
+        shot = _problem_screenshot(page, phone)
+        _safe(lambda: page.keyboard.press("Escape"))
+        return "failed", "The photo/video stayed in the preview (not sent)" + (f" — picture saved: {shot.name}" if shot else "")
+    # 5. The preview closed: the message is on its way. Give WhatsApp time to hand it to the phone (videos upload first).
+    end = time.time() + 60
+    while time.time() < end and _out_count(page) <= before and not _in_chat(page, text):
+        time.sleep(0.5)
+    time.sleep(2 * TIME_SCALE)
+    return "sent", ""
+
+
 def _in_chat(page, text):
     """Is this message already in the open chat as a sent message?"""
     want = " ".join(str(text).split())[:60]
@@ -267,6 +435,23 @@ def main():
         items = validate_job(job)
     except ValueError as e:
         sys.exit(str(e))
+    media_path = None
+    if job.get("media"):
+        # The photo/video must be next to the send list, with its original name (the helper downloads it by itself).
+        try:
+            m = validate_media(job["media"])
+        except ValueError as e:
+            sys.exit(str(e))
+        fname = Path(str(m.get("name", "") or "")).name
+        candidate = job_path.with_name(fname) if fname else None
+        good = bool(candidate) and candidate.is_file() and candidate.stat().st_size == m["size"]
+        if good and m.get("md5"):
+            import hashlib
+            good = hashlib.md5(candidate.read_bytes()).hexdigest() == m["md5"]
+        if not good:
+            sys.exit(f"This send list has a {'video' if m.get('kind') == 'video' else 'photo'}: put '{m.get('name')}' in the same folder "
+                     f"as the send list ({job_path.parent}), or press 'Start sending' in the app instead.")
+        media_path = candidate
     rules = job.get("rules") or {}
     delay = max(MIN_DELAY_MINUTES, float(rules.get("delayMinutes", 5)))
     cap = max(1, min(MAX_DAILY_CAP, int(rules.get("dailyCap", DAILY_CAP))))
@@ -335,7 +520,7 @@ def main():
 
             name = it.get("name") or it["phone"]
             say(f"({i}/{len(todo)}) Sending to {name} (+{it['phone']})…")
-            status, reason = send_one(page, it["phone"], it["text"])
+            status, reason = send_one(page, it["phone"], it["text"], media_path)
             now = datetime.now().isoformat(timespec="seconds")
             if status == "logged_out":
                 say("WhatsApp Web logged out. Stopping. Run again and scan the QR code.")
