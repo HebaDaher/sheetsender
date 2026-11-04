@@ -55,10 +55,67 @@ function makeEnv(srcDir) {
         components: [{ type: 'HEADER', format: 'TEXT', text: 'News from {{shop}}' }, { type: 'BODY', text: 'Hi {{first_name}}!' }] },
       { name: 'with_image', language: 'en_US', status: 'APPROVED', category: 'MARKETING',
         components: [{ type: 'HEADER', format: 'IMAGE' }, { type: 'BODY', text: 'Look {{1}}' }] },
+      { name: 'with_video', language: 'en_US', status: 'APPROVED', category: 'MARKETING',
+        components: [{ type: 'HEADER', format: 'VIDEO' }, { type: 'BODY', text: 'Watch {{1}}' }] },
+      { name: 'with_document', language: 'en_US', status: 'APPROVED', category: 'UTILITY',
+        components: [{ type: 'HEADER', format: 'DOCUMENT' }, { type: 'BODY', text: 'Your file {{1}}' }] },
       { name: 'waiting_one', language: 'en_US', status: 'PENDING', category: 'MARKETING', components: [{ type: 'BODY', text: 'x' }] }
     ],
-    sent: [], nextErrors: [], calls: 0
+    sent: [], nextErrors: [], calls: 0, media: {}, mediaUploads: 0
   };
+  /* ---------- fake Google Drive (only what the app uses: its folder, resumable uploads, reading, bin) ---------- */
+  const drive = { files: {}, sessions: {}, n: 0, failNextPut: 0 };
+  const toBuf = (p) => Buffer.isBuffer(p) ? p : Buffer.from(Array.isArray(p) ? p.map(b => b & 0xff) : (p && p.bytes ? p.bytes : Buffer.from(String(p || ''))));
+  function driveApi(url, opts) {
+    const auth = ((opts.headers || {}).Authorization || '').replace('Bearer ', '');
+    if (auth !== 'ya29.' + ADMIN) return resp(401, { error: { code: 401, message: 'Request had invalid authentication credentials.' } });
+    const m = (opts.method || 'get').toLowerCase();
+    const [base, query] = url.split('?');
+    if (url.indexOf('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=') === 0) {
+      const s = drive.sessions[url];
+      if (!s || m !== 'put') return resp(404, { error: { message: 'Not found' } });
+      if (drive.failNextPut) { drive.failNextPut--; return resp(503, { error: { message: 'Backend Error' } }); }
+      const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(opts.headers['Content-Range'] || '');
+      const buf = toBuf(opts.payload);
+      if (!range || Number(range[1]) !== s.got.length || Number(range[2]) - Number(range[1]) + 1 !== buf.length || Number(range[3]) !== s.size) return resp(400, { error: { message: 'bad range' } });
+      s.got = Buffer.concat([s.got, buf]);
+      if (s.got.length < s.size) return resp(308, {}, { Range: 'bytes=0-' + (s.got.length - 1) });
+      const id = 'drv' + (++drive.n);
+      drive.files[id] = { name: s.meta.name, parents: s.meta.parents, mime: s.meta.mimeType, bytes: s.got, trashed: false };
+      delete drive.sessions[url];
+      return resp(200, { id, size: String(s.size), md5Checksum: require('crypto').createHash('md5').update(s.got).digest('hex'), mimeType: s.meta.mimeType });
+    }
+    if (base === 'https://www.googleapis.com/upload/drive/v3/files' && /uploadType=resumable/.test(query) && m === 'post') {
+      const meta = JSON.parse(opts.payload);
+      const parent = drive.files[(meta.parents || [])[0]];
+      if (!parent || parent.trashed || !parent.folder) return resp(404, { error: { message: 'File not found: ' + (meta.parents || [])[0] } });
+      const loc = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=U' + (++drive.n);
+      drive.sessions[loc] = { meta, size: Number(opts.headers['X-Upload-Content-Length']), got: Buffer.alloc(0) };
+      return resp(200, {}, { Location: loc });
+    }
+    if (base === 'https://www.googleapis.com/drive/v3/files' && m === 'post') {
+      const meta = JSON.parse(opts.payload); const id = 'fld' + (++drive.n);
+      drive.files[id] = { name: meta.name, folder: meta.mimeType === 'application/vnd.google-apps.folder', trashed: false };
+      return resp(200, { id });
+    }
+    const fm = /^https:\/\/www\.googleapis\.com\/drive\/v3\/files\/([^/?]+)$/.exec(base);
+    if (fm) {
+      const f = drive.files[decodeURIComponent(fm[1])];
+      if (!f || (f.trashed && m !== 'get')) return resp(404, { error: { message: 'File not found' } });
+      if (f.trashed && /alt=media/.test(query)) return resp(404, { error: { message: 'File not found' } });
+      if (m === 'patch') { Object.assign(f, JSON.parse(opts.payload)); return resp(200, { id: fm[1] }); }
+      if (m === 'get' && /fields=/.test(query) && !/alt=media/.test(query)) {
+        return resp(200, { id: fm[1], name: f.name, mimeType: f.mime, size: String(f.bytes ? f.bytes.length : 0), trashed: !!f.trashed,
+          md5Checksum: f.bytes ? require('crypto').createHash('md5').update(f.bytes).digest('hex') : undefined });
+      }
+      if (m === 'get' && /alt=media/.test(query)) {
+        const r = /^bytes=(\d+)-(\d+)$/.exec((opts.headers || {}).Range || '');
+        if (r) return bin(206, f.bytes.subarray(Number(r[1]), Number(r[2]) + 1), f.mime);
+        return bin(200, f.bytes, f.mime);
+      }
+    }
+    return resp(400, { error: { message: 'unexpected drive call ' + m + ' ' + url } });
+  }
   function graph(url, opts) {
     meta.calls++;
     const auth = ((opts.headers || {}).Authorization || '').replace('Bearer ', '');
@@ -67,6 +124,14 @@ function makeEnv(srcDir) {
     const [pathPart] = rest.split('?');
     if ((opts.method || 'get') === 'get' && pathPart === meta.pnid) return resp(200, { display_phone_number: meta.display, verified_name: meta.name, quality_rating: 'GREEN', id: meta.pnid });
     if ((opts.method || 'get') === 'get' && pathPart === meta.waba + '/message_templates') return resp(200, { data: meta.templates, paging: {} });
+    if (opts.method === 'post' && pathPart === meta.pnid + '/media') {
+      const p = opts.payload || {};
+      if (p.messaging_product !== 'whatsapp' || !p.file || !p.file.bytes) return resp(400, { error: { message: 'Param file must be a file', code: 100 } });
+      if (p.type !== p.file.type) return resp(400, { error: { message: 'type mismatch', code: 100 } });
+      const id = 'mm' + (++meta.mediaUploads);
+      meta.media[id] = { bytes: p.file.bytes, type: p.type, name: p.file.name };
+      return resp(200, { id });
+    }
     if (opts.method === 'post' && pathPart === meta.pnid + '/messages') {
       if (meta.nextErrors.length) { const e = meta.nextErrors.shift(); return resp(e.http || 400, { error: { message: e.message || 'err', code: e.code } }); }
       const body = JSON.parse(opts.payload);
@@ -77,13 +142,24 @@ function makeEnv(srcDir) {
   }
 
   function b64url(s) { return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-  function resp(code, obj) { const t = JSON.stringify(obj); return { getResponseCode: () => code, getContentText: () => t }; }
+  function resp(code, obj, headers) { const t = JSON.stringify(obj); return { getResponseCode: () => code, getContentText: () => t, getHeaders: () => headers || {} }; }
+  function newBlob(bytes, type, name) {
+    const b = { bytes: toBuf(bytes), type: type || '', name: name || '' };
+    b.setContentType = (t) => { b.type = t; return b; }; b.setName = (n) => { b.name = n; return b; };
+    b.getBytes = () => Array.from(b.bytes).map(x => (x > 127 ? x - 256 : x)); b.getDataAsString = () => b.bytes.toString('utf8');
+    return b;
+  }
+  function bin(code, buf, type) {
+    return { getResponseCode: () => code, getContentText: () => buf.toString('latin1'), getHeaders: () => ({}),
+      getContent: () => Array.from(buf).map(x => (x > 127 ? x - 256 : x)), getBlob: () => newBlob(buf, type) };
+  }
   function newAccess(email) { const t = 'at_' + (++google.n); google.access[t] = { email, exp: clock + 3600e3 }; return t; }
 
   const UrlFetchApp = {
     fetch(url, opts = {}) {
       fetchLog.push({ url, opts, as: users.effective });
       if (url.indexOf('https://graph.facebook.com/v25.0/') === 0) return graph(url, opts);
+      if (url.indexOf('https://www.googleapis.com/') === 0) return driveApi(url, opts);
       const p = opts.payload || {};
       if (url === 'https://oauth2.googleapis.com/token') {
         if (p.client_id !== google.client.id || p.client_secret !== google.client.secret) return resp(401, { error: 'invalid_client' });
@@ -231,11 +307,12 @@ function makeEnv(srcDir) {
       getUuid: () => { uuid++; return ('00000000' + uuid.toString(16)).slice(-8) + '-aaaa-bbbb-cccc-ddddeeeeffff'; },
       formatDate: (d) => new RealDate(d.getTime()).toISOString().slice(0, 16),
       Charset: { UTF_8: 'UTF-8' },
-      base64Encode: (s) => Buffer.from(String(s), 'utf8').toString('base64'),
+      base64Encode: (s) => (Array.isArray(s) ? toBuf(s) : Buffer.from(String(s), 'utf8')).toString('base64'),
       base64EncodeWebSafe: (s) => (Array.isArray(s) ? Buffer.from(s.map(b => b & 0xff)) : Buffer.from(String(s), 'utf8')).toString('base64').replace(/\+/g, '-').replace(/\//g, '_'),
       computeHmacSha256Signature: (v, k) => Array.from(require('crypto').createHmac('sha256', String(k)).update(String(v), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
       base64DecodeWebSafe: (s) => Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64')),
-      newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString('utf8') }),
+      newBlob: (bytes, type, name) => newBlob(bytes, type, name),
+      base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')).map(x => (x > 127 ? x - 256 : x)),
       DigestAlgorithm: { SHA_256: 'sha256' },
       computeDigest: (alg, text) => Array.from(require('crypto').createHash('sha256').update(String(text), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b))
     },
@@ -243,6 +320,7 @@ function makeEnv(srcDir) {
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (t) => ({ text: t, setMimeType() { return this; }, getContent() { return t; } }) },
     ScriptApp: {
       getService: () => ({ getUrl: () => google.execUrl }),
+      getOAuthToken: () => 'ya29.' + users.effective,
       getProjectTriggers: () => triggers.filter(t => t.owner === users.effective), // like Google: only your own triggers
       deleteTrigger: t => { triggers.splice(triggers.indexOf(t), 1); },
       newTrigger: fn => ({ timeBased: () => ({ everyMinutes: m => ({ create: () => { const t = { fn, m, owner: users.effective, getHandlerFunction: () => fn }; triggers.push(t); return t; } }) }) })
@@ -295,7 +373,7 @@ function makeEnv(srcDir) {
       env.as(users.active || ADMIN);
       return proxy;
     },
-    google, meta, scriptProps, userProps, userCache, scriptCache, triggers, sent, fetchLog, users, sheetsById,
+    google, meta, drive, scriptProps, userProps, userCache, scriptCache, triggers, sent, fetchLog, users, sheetsById,
     get ss() { return ss; },
     sheetOf(email) {
       const k = Object.keys(scriptProps).filter(k => k.startsWith('W_') && JSON.parse(scriptProps[k]).owner === email && !JSON.parse(scriptProps[k]).broken).pop();

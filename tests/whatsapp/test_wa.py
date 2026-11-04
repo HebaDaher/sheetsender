@@ -105,4 +105,32 @@ check('exactly 7 min between messages' in out.stdout and 'Waiting 7.0 minutes' i
 out, sent, res, home = run_case('fast', items[:2], dict(all_hours, delayMinutes=1), port=8794)
 check('Rules: 3–4 min' in out.stdout, 'never faster than 3 minutes even if the list says 1: ' + [l for l in out.stdout.splitlines() if 'Rules' in l][0])
 
+print('Photo / video with the message as its caption')
+import hashlib
+def media_case(name, its, port, data, mime='image/jpeg', fname='Offer photo.jpg', put_file=True):
+    home = Path(f'/tmp/sf-wa-test-home-{name}'); shutil.rmtree(home, ignore_errors=True); (home / 'Downloads').mkdir(parents=True)
+    if put_file: (home / 'Downloads' / fname).write_bytes(data)
+    media = {'media_id': 'P00000001ABC', 'name': fname, 'mime': mime, 'kind': 'video' if mime.startswith('video') else 'image', 'size': len(data), 'md5': hashlib.md5(data).hexdigest()}
+    (home / 'Downloads' / 'whatsapp-job-example-shop.json').write_text(json.dumps({'kind': 'shop-followups-whatsapp-job', 'version': 1, 'job_id': 'WJOBM' + name,
+        'shop_id': 'SHOP1', 'shop_name': 'X', 'template_id': 'T', 'created_at': '', 'rules': all_hours, 'items': its, 'media': media}))
+    return run_case(name, its, all_hours, port=port, keep_home=home)
+photo = b'\xff\xd8\xff' + os.urandom(40000)
+mitems = [
+    {'contact_id': 'M1', 'name': 'Heba', 'phone': '971501111111', 'text': 'Hello Heba,\nnew photos of the shop. هل ما زلت مهتمة؟'},
+    {'contact_id': 'M2', 'name': 'ButtonOnly', 'phone': '971571234567', 'text': 'Hello ButtonOnly'},
+    {'contact_id': 'M3', 'name': 'ReloadAfterSend', 'phone': '971591234567', 'text': 'Hello ReloadAfterSend'},
+    {'contact_id': 'M4', 'name': 'Wrong', 'phone': '971000000000', 'text': 'Hello Wrong'},
+]
+out, sent, res, home = media_case('media', mitems, 8798, photo)
+print(out.stdout[-1200:]); print(out.stderr[-800:])
+check([m['phone'] for m in sent] == ['971501111111', '971571234567', '971591234567'], 'photo sent once to each valid number (also when Enter is ignored / WhatsApp reloads): ' + str([m['phone'] for m in sent]))
+check(sent and all(m.get('media') == 'Offer photo.jpg' and m.get('size') == len(photo) for m in sent), 'the photo itself was attached (same file, same size)')
+check(sent and sent[0]['text'] == 'Hello Heba,\nnew photos of the shop. هل ما زلت مهتمة؟', 'caption arrives exactly (new lines, Arabic): ' + repr(sent[0]['text'] if sent else ''))
+check(res and [(r['contact_id'], r['status']) for r in res['items']] == [('M1', 'sent'), ('M2', 'sent'), ('M3', 'sent'), ('M4', 'failed')], 'results correct')
+video = b'\x00\x00\x00\x18ftypmp42' + os.urandom(200000)
+out, sent, res, home = media_case('video', mitems[:1], 8799, video, 'video/mp4', 'tour.mp4')
+check(len(sent) == 1 and sent[0].get('media') == 'tour.mp4' and sent[0].get('type') == 'video/mp4', 'a video is sent the same way')
+out, sent, res, home = media_case('nofile', mitems[:1], 8800, photo, put_file=False)
+check(sent == [] and 'put \'Offer photo.jpg\' in the same folder' in (out.stdout + out.stderr), 'send list without its photo next to it: clear message, nothing sent')
+
 print('\nALL WHATSAPP CHECKS PASSED' if not errors else '\nFAILED: ' + '; '.join(errors))

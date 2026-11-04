@@ -33,16 +33,37 @@ class H(http.server.BaseHTTPRequestHandler):
                 reload_js = "box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ setTimeout(function(){ location.replace(location.href + '&reloaded=1'); }, 5); }}, true);"
 
             history = ''.join('<div class="message-out">%s</div>' % m['text'].replace('&', '&amp;').replace('<', '&lt;') for m in SENT if m['phone'] == phone)
+            # Photos/videos like WhatsApp Web: + button -> file box -> preview with a caption box -> Enter or Send.
+            # 97157…: Enter in the caption is ignored (only the Send button works); 97159…: reloads right after Enter.
+            media_js = '''
+document.getElementById('att').addEventListener('click', function(){ document.getElementById('menu').style.display='block'; });
+document.getElementById('mf').addEventListener('change', function(){
+  var f=this.files[0]; if(!f) return;
+  var p=document.createElement('div'); p.id='prev';
+  p.innerHTML='<div contenteditable="true" aria-label="Add a caption" id="cap" style="white-space:pre-wrap"></div><div role="button" aria-label="Send" id="msend"><span data-icon="wds-ic-send-filled"></span></div>';
+  document.body.appendChild(p);
+  var cap=document.getElementById('cap');
+  function sendMedia(){ var t=cap.innerText.replace(/\\n$/,''); fetch('/record',{method:'POST',body:JSON.stringify({phone:PHONE,text:t,media:f.name,size:f.size,type:f.type}),keepalive:true}).then(function(){
+      if(MEDIA_RELOAD){ location.replace(location.href + '&reloaded=1'); return; }
+      setTimeout(function(){ p.remove(); var o=document.createElement('div'); o.className='message-out'; o.textContent=t; document.getElementById('main').appendChild(o); }, 80); }); }
+  cap.addEventListener('keydown',function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); if(MEDIA_ENTER){ sendMedia(); } }});
+  document.getElementById('msend').addEventListener('click', sendMedia);
+});'''
+            media_enter = 'false' if phone.startswith('97157') else 'true'
+            media_reload = 'true' if phone.startswith('97159') and 'reloaded' not in q else 'false'
             return self.send_html('''<div id="pane-side"></div><div id="main">''' + history + '''</div>
 <footer><div contenteditable="true" data-tab="10" id="box" style="white-space:pre-wrap">%s</div>
-<button aria-label="Send" id="send"><span data-icon="send"></span></button></footer>
+<button aria-label="Send" id="send"><span data-icon="send"></span></button>
+<button aria-label="Attach" id="att"><span data-icon="plus-rounded">+</span></button>
+<div id="menu" style="display:none"><input type="file" id="mf" accept="image/*,video/mp4,video/3gpp,video/quicktime" style="display:none"></div></footer>
 <script>
-var box=document.getElementById('box'), ENTER_OK=%s;
+var box=document.getElementById('box'), ENTER_OK=%s, PHONE=%s, MEDIA_ENTER=%s, MEDIA_RELOAD=%s;
 function send(){ var t=box.innerText; fetch('/record',{method:'POST',body:JSON.stringify({phone:%s,text:t}),keepalive:true}).then(function(){ setTimeout(function(){ box.innerText=''; }, 50); }); }
 box.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); if(ENTER_OK) send(); }});
 document.getElementById('send').addEventListener('click', send);
 %s
-</script>''' % (esc, enter_ok, json.dumps(phone), reload_js))
+%s
+</script>''' % (esc, enter_ok, json.dumps(phone), media_enter, media_reload, json.dumps(phone), reload_js, media_js))
         return self.send_html('<div id="pane-side">chats</div>')
     def do_POST(self):
         n = int(self.headers.get('content-length', 0)); d = json.loads(self.rfile.read(n))

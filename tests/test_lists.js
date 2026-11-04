@@ -49,6 +49,20 @@ t('the same file uploaded again replaces that list\'s people (contacts are kept)
   assert(d.contacts.find(x => x.email === 'p2@ex.com'), 'P2 is still a contact');
   assert(!d.contacts.find(x => x.email === 'p2@ex.com').lists.includes(L1));
 });
+t('a re-upload in several parts: people leave the list only after the LAST part (a stopped upload keeps the old list)', () => {
+  E.as('dad@gmail.com');
+  const a = C.importContacts('SHOP1', [person(10), person(11)], { fileName: 'parts.csv', first: true });
+  const r1 = C.importContacts('SHOP1', [person(10)], { fileName: 'parts.csv', first: true, part: 0, last: false });
+  assert.strictEqual(r1.listId, a.listId);
+  let d = C.getShopData('SHOP1');
+  assert.strictEqual(d.lists.find(l => l.list_id === a.listId).people, 2, 'stopped after part 1: nobody taken out');
+  const r2 = C.importContacts('SHOP1', [person(12)], { fileName: 'parts.csv', listId: r1.listId, uploadToken: r1.uploadToken, part: 1, last: true });
+  assert.strictEqual(r2.leftList, 1);
+  d = C.getShopData('SHOP1');
+  const ids = Array.from(d.contacts.filter(c => (c.lists || '').split(',').includes(a.listId)).map(c => c.email)).sort();
+  assert.deepStrictEqual(ids, ['p10@ex.com', 'p12@ex.com']);
+  C.removeList('SHOP1', a.listId);
+});
 t('"keep both": the same file name can also be saved as a new list (the earlier one is kept)', () => {
   E.as('dad@gmail.com');
   const r = C.importContacts('SHOP1', [person(7)], { fileName: 'July buyers.csv', first: true, asNew: true });
@@ -68,7 +82,7 @@ t('send an email to chosen files only; the plan says which files', () => {
   firstK = C.startCampaign({ shopId: 'SHOP1', subject: 'Hi {first_name}', body: 'Message one', listIds: [L2], delayMinutes: 1, randomExtra: false, ignoreHours: true });
   assert.strictEqual(firstK.list_ids, L2);
   const everyone = C.getCampaignPreview({ shopId: 'SHOP1', subject: 'Hi {first_name}', body: 'Message one' });
-  assert.strictEqual(everyone.totalContacts, 7, 'no choice = everyone in the shop');
+  assert.strictEqual(everyone.totalContacts, 10, 'no choice = everyone in the shop');
   const both = C.getCampaignPreview({ shopId: 'SHOP1', subject: 'X', body: 'Y', listIds: [L1, L2] });
   assert.strictEqual(both.totalContacts, 5, 'P1,P6 + P3,P4,P5 (a person in both files counts once)');
 });
@@ -97,8 +111,8 @@ t('rename and remove a file; removed files cannot be chosen; contacts stay', () 
   throwsMsg(() => C.renameList(SHOP2, L1, 'x'), /not found/);
   C.removeList('SHOP1', L1);
   const d = C.getShopData('SHOP1');
-  assert.strictEqual(d.lists.length, 1);
-  assert.strictEqual(d.contacts.length, 7);
+  assert.strictEqual(d.lists.length, 1, JSON.stringify(Array.from(d.lists.map(l => l.name))));
+  assert.strictEqual(d.contacts.length, 10);
   assert(d.contacts.every(c => !c.lists.includes(L1)));
   throwsMsg(() => C.getCampaignPreview({ shopId: 'SHOP1', subject: 'a', body: 'b', listIds: [L1] }), /were removed/);
   const r = C.importContacts('SHOP1', [person(1)], { fileName: 'June buyers.xlsx', first: true });
@@ -121,7 +135,7 @@ t('contacts from before upload history: their file appears in the history once',
   sh.grid.forEach((r, i) => { if (i > 0 && r[h.indexOf('shop_id')] === SHOP2) r[h.indexOf('lists')] = ''; });
   E.dropCache && E.dropCache();
   const d = C.getShopData(SHOP2);
-  assert.strictEqual(d.lists.length, 1); assert.strictEqual(d.lists[0].file_name, 'old.xlsx'); assert.strictEqual(d.lists[0].people, 2);
+  assert.strictEqual(d.lists.length, 1, JSON.stringify(Array.from(d.lists.map(l => l.name)))); assert.strictEqual(d.lists[0].file_name, 'old.xlsx'); assert.strictEqual(d.lists[0].people, 2);
   assert.strictEqual(C.getShopData(SHOP2).lists.length, 1, 'made only once');
   assert.strictEqual(E.tab('Contacts').length, before + 2);
 });

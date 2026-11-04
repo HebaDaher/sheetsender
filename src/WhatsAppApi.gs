@@ -52,10 +52,13 @@ function parseWaTemplate_(t) {
   const header = comps.filter(function (c) { return c.type === 'HEADER'; })[0];
   const buttons = (comps.filter(function (c) { return c.type === 'BUTTONS'; })[0] || {}).buttons || [];
   const named = String(t.parameter_format || '').toUpperCase() === 'NAMED';
-  let why = '', headerText = '', headerParams = [];
+  let why = '', headerText = '', headerParams = [], headerMedia = '';
   if (header) {
-    if (String(header.format || '').toUpperCase() === 'TEXT') { headerText = header.text || ''; headerParams = placeholdersIn_(headerText); }
-    else why = 'It has a picture, video, document or location at the top, which this app cannot fill in.';
+    const format = String(header.format || '').toUpperCase();
+    if (format === 'TEXT') { headerText = header.text || ''; headerParams = placeholdersIn_(headerText); }
+    else if (format === 'IMAGE') headerMedia = 'image';    // the photo is chosen in the app when sending
+    else if (format === 'VIDEO') headerMedia = 'video';
+    else why = 'It has a document or location at the top, which this app cannot fill in (photos and videos are fine).';
   }
   buttons.forEach(function (b) {
     const type = String(b.type || '').toUpperCase();
@@ -71,7 +74,7 @@ function parseWaTemplate_(t) {
     name: String(t.name || ''), language: String(t.language || ''), category: String(t.category || ''),
     status: String(t.status || ''), body: String(body.text || '').slice(0, 1024), header: String(headerText).slice(0, 60),
     params: sortParams(placeholdersIn_(body.text)), header_params: sortParams(headerParams), named: named,
-    ok: !why, why: why
+    header_media: headerMedia, ok: !why, why: why
   };
 }
 
@@ -106,7 +109,7 @@ function saveWaTemplates_(ss, list) {
   const now = nowIso_();
   appendRows_(table, list.map(function (t) {
     return { name: t.name, language: t.language, category: t.category, status: t.status, updated_at: now,
-      details: JSON.stringify({ body: t.body, header: t.header, params: t.params, header_params: t.header_params, named: t.named, ok: t.ok, why: t.why }) };
+      details: JSON.stringify({ body: t.body, header: t.header, params: t.params, header_params: t.header_params, named: t.named, ok: t.ok, why: t.why, header_media: t.header_media || '' }) };
   }));
 }
 
@@ -115,7 +118,8 @@ function waTemplates_(ss) {
   return readTable_(ss, TABS.WA_TEMPLATES).rows.filter(function (r) { return r.name; }).map(function (r) {
     const d = parseJson_(r.details);
     return { name: r.name, language: r.language, category: r.category, status: r.status, body: d.body || '', header: d.header || '',
-      params: d.params || [], header_params: d.header_params || [], named: !!d.named, ok: !!d.ok, why: d.why || '' };
+      params: d.params || [], header_params: d.header_params || [], named: !!d.named, ok: !!d.ok, why: d.why || '',
+      header_media: d.header_media || '' };
   });
 }
 
@@ -268,7 +272,14 @@ function waApiPlan_(ss, p) {
   if (!tpl.ok) throw new Error('This template cannot be used here: ' + tpl.why);
   const mapping = cleanParamMap_(tpl.params, p.mapping, 'message');
   const headerMapping = cleanParamMap_(tpl.header_params, p.headerMapping, 'title');
-  const templateId = 'META:' + tpl.name + ':' + tpl.language;
+  let media = null;
+  if (tpl.header_media) {
+    media = mediaFor_(ss, shop.shop_id, p.mediaId);
+    if (!media) throw new Error('This template starts with a ' + (tpl.header_media === 'video' ? 'video' : 'photo') + '. Choose the ' + (tpl.header_media === 'video' ? 'video' : 'photo') + ' to send.');
+    if (media.kind !== tpl.header_media) throw new Error('This template needs a ' + (tpl.header_media === 'video' ? 'video' : 'photo') + ', not a ' + (media.kind === 'video' ? 'video' : 'photo') + '.');
+  }
+  // The same template with another photo or video counts as a different message (for "skip people who already got it").
+  const templateId = 'META:' + tpl.name + ':' + tpl.language + (media ? ':' + media.media_id : '');
   const previous = {};
   if (p.skipPrevious !== false) {
     readTable_(ss, TABS.LOG).rows.forEach(function (l) {
@@ -292,12 +303,13 @@ function waApiPlan_(ss, p) {
   const f = templateFields_(sample, shop);
   return {
     shop: shop, cfg: cfg, tpl: tpl, mapping: mapping, headerMapping: headerMapping, templateId: templateId, plan: plan,
-    audience: audience,
+    audience: audience, media: media,
     summary: {
       audience: audience.names,
       totalContacts: plan.length, willSend: pending.length, willSkip: plan.length - pending.length,
       skipReasons: Object.keys(reasons).map(function (r) { return { reason: r, count: reasons[r] }; }).sort(function (a, b) { return b.count - a.count; }),
       from: cfg.display_phone, fromName: cfg.verified_name,
+      media: media ? publicMedia_(media) : null,
       sample: { name: sample.full_name || sample.first_name || '', phone: sample.phone || '', header: renderWaText_(tpl.header, headerMapping, f), text: renderWaText_(tpl.body, mapping, f) }
     }
   };
@@ -339,10 +351,11 @@ function startWhatsAppApiCampaign(params) {
       next_send_at: startMs ? new Date(startMs).toISOString() : now, finished_at: '',
       total: String(p.plan.length), sent: '0', skipped: String(p.summary.willSkip), failed: '0', pending: String(p.summary.willSend),
       random_extra: rules.randomExtra ? 'yes' : 'no', ignore_hours: rules.startHour === 0 && rules.endHour === 24 ? 'yes' : 'no',
-      list_ids: p.audience.ids.join(','),
+      list_ids: p.audience.ids.join(','), media_id: p.media ? p.media.media_id : '',
       channel: 'whatsapp_api', daily_cap: String(rules.dailyCap), start_hour: String(rules.startHour), end_hour: String(rules.endHour),
       wa_template: JSON.stringify({ name: p.tpl.name, language: p.tpl.language, named: p.tpl.named, params: p.tpl.params,
-        header_params: p.tpl.header_params, mapping: p.mapping, header_mapping: p.headerMapping, body: p.tpl.body, header: p.tpl.header })
+        header_params: p.tpl.header_params, mapping: p.mapping, header_mapping: p.headerMapping, body: p.tpl.body, header: p.tpl.header,
+        header_media: p.tpl.header_media || '' })
     };
     const logRows = p.plan.map(function (item) {
       const c = item.contact;
@@ -382,7 +395,7 @@ const WA_ERR_TEXT = {
 
 function waApiToken_() { return ownerSecrets_().getProperty(waTokenKey_()) || ''; }
 
-function buildWaPayload_(spec, to, fields) {
+function buildWaPayload_(spec, to, fields, metaMediaId) {
   const toParams = function (keys, mapping) {
     return keys.map(function (k) {
       const p = { type: 'text', text: paramValue_(mapping[k] || 'text:-', fields) };
@@ -391,6 +404,11 @@ function buildWaPayload_(spec, to, fields) {
     });
   };
   const components = [];
+  if (spec.header_media && metaMediaId) {
+    const h = { type: spec.header_media };
+    h[spec.header_media] = { id: metaMediaId };
+    components.push({ type: 'header', parameters: [h] });
+  }
   if ((spec.header_params || []).length) components.push({ type: 'header', parameters: toParams(spec.header_params, spec.header_mapping || {}) });
   if ((spec.params || []).length) components.push({ type: 'body', parameters: toParams(spec.params, spec.mapping || {}) });
   const template = { name: spec.name, language: { code: spec.language } };
@@ -451,9 +469,19 @@ function stepWaApi_(ctx, campaign, nowMs) {
       return pause_(campaign, 'The WhatsApp Business API access token is missing. ' + WS.owner + ' must paste it again in ⚙ Settings, then press Resume.');
     }
 
+    let metaMedia = '';
+    if (spec.header_media) {
+      try {
+        metaMedia = metaMediaId_(ctx.ss, campaign.media_id, cfg, token);
+      } catch (e) {
+        const g = e.graph || {};
+        if (g.http === 401 || WA_ERR.AUTH.indexOf(g.code) !== -1) markWaApi_('needs_reconnect', g.message || e.message);
+        return pause_(campaign, (e && e.message ? e.message : String(e)) + ' Fix it, then press Resume.');
+      }
+    }
     const fields = templateFields_(contact, shop);
     item.attempts = String(Number(item.attempts || 0) + 1);
-    const r = graph_('post', cfg.phone_number_id + '/messages', token, buildWaPayload_(spec, contact.phone, fields));
+    const r = graph_('post', cfg.phone_number_id + '/messages', token, buildWaPayload_(spec, contact.phone, fields, metaMedia));
     const nextMs = nowMs + Math.round(delayMs * (1 + (campaign.random_extra === 'no' ? 0 : Math.random() * 0.4)));
     if (r.code === 200 && r.body && r.body.messages && r.body.messages.length) {
       item.contact_name = contact.full_name || contact.first_name;
@@ -482,6 +510,17 @@ function stepWaApi_(ctx, campaign, nowMs) {
     if (has(WA_ERR.SPAM)) {
       item.attempts = String(Number(item.attempts) - 1); updateRow_(log, item);
       return pause_(campaign, 'Meta limited this number because people blocked or reported the messages (' + e.message + '). Paused to protect the number. Wait a day, then press Resume.');
+    }
+    if (metaMedia && (e.code === 131052 || e.code === 131053)) { // Meta lost the photo/video: upload it again, once
+      if (forgetMetaMedia_(ctx.ss, campaign.media_id, 3600000) === 'recent') {
+        item.attempts = String(Number(item.attempts) - 1); updateRow_(log, item);
+        return pause_(campaign, 'Meta cannot use this ' + (spec.header_media === 'video' ? 'video' : 'photo') + ' (' + e.message + '). ' +
+          (spec.header_media === 'video' ? 'Use an MP4 video made with a phone (H.264), under 16 MB' : 'Use a JPG or PNG photo under 5 MB') + '. Stop this send and start a new one with another file.');
+      }
+      item.attempts = String(Number(item.attempts) - 1); updateRow_(log, item);
+      campaign.next_send_at = new Date(nowMs + 60000).toISOString();
+      campaign.status_reason = 'Meta could not use the ' + (spec.header_media === 'video' ? 'video' : 'photo') + ' (' + e.message + '). Uploading it again.';
+      return;
     }
     if (has(WA_ERR.PERSON) || (e.code === 100 && /phone|recipient|\bto\b/i.test(e.message))) {
       finish_(log, item, 'failed', WA_ERR_TEXT[e.code] || e.message);

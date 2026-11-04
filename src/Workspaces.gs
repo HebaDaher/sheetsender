@@ -156,7 +156,8 @@ function apiActions_() {
     saveSendingRules: saveSendingRules, restartEngine: restartEngine,
     saveWhatsAppApi: saveWhatsAppApi, refreshWhatsAppTemplates: refreshWhatsAppTemplates, disconnectWhatsAppApi: disconnectWhatsAppApi,
     getWhatsAppApiTemplates: getWhatsAppApiTemplates, getWhatsAppApiPreview: getWhatsAppApiPreview, startWhatsAppApiCampaign: startWhatsAppApiCampaign,
-    renameList: renameList, removeList: removeList
+    renameList: renameList, removeList: removeList,
+    startMediaUpload: startMediaUpload, uploadMediaChunk: uploadMediaChunk, removeMedia: removeMedia
   };
 }
 

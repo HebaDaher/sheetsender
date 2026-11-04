@@ -13,6 +13,8 @@ Sending rules come from the app (start time, minutes between messages, random ex
 The helper never sends faster than 3 minutes apart and stops after 3 problems in a row or if WhatsApp logs out.
 """
 
+import base64
+import hashlib
 import json
 import os
 import random
@@ -218,13 +220,14 @@ class Helper:
                 raise RuntimeError("A send is already running.")
             job = self.bridge.call("job", command_id=cmd["id"])["job"]
             items = core.validate_job(job)
+            media_path = self.fetch_media(core.validate_media(job.get("media")))
             rules = job.get("rules") or {}
             delay = max(core.MIN_DELAY_MINUTES, float(rules.get("delayMinutes", 5)))
             cap = max(1, min(core.MAX_DAILY_CAP, int(rules.get("dailyCap", core.DAILY_CAP))))
             start_at = parse_time(rules.get("startAt"))
             job["items"] = items
             self.job = {
-                "job": job, "state": "running", "message": "Starting…", "problems": 0,
+                "job": job, "state": "running", "message": "Starting…", "problems": 0, "media_path": media_path,
                 "rules": {"delay": delay, "extra": core.MAX_EXTRA if rules.get("randomExtra", True) else 0.0,
                           "dailyCap": cap, "startHour": int(rules.get("startHour", 9)), "endHour": int(rules.get("endHour", 21)),
                           "startAt": start_at},
@@ -237,6 +240,37 @@ class Helper:
             log(f"New send: {len(items)} people, shop '{job.get('shop_name', '')}'.")
             self.ensure_browser()
             self.keep_awake(True)
+
+    def fetch_media(self, media):
+        """Downloads the send's photo/video from the app (in parts) once, checks it, and returns where it is."""
+        if not media:
+            return None
+        folder = core.DATA_DIR / "media"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / core.media_file_name(media)
+
+        def ok(p):
+            if not p.is_file() or p.stat().st_size != media["size"]:
+                return False
+            return not media.get("md5") or hashlib.md5(p.read_bytes()).hexdigest() == media["md5"]
+        if ok(path):
+            return str(path)
+        log(f"Downloading the {media.get('kind', 'file')} '{media.get('name', '')}' ({media['size'] // 1024} KB)…")
+        tmp = path.with_suffix(path.suffix + ".part")
+        with open(tmp, "wb") as f:
+            offset = 0
+            while offset < media["size"]:
+                part = self.bridge.call("media", media_id=media["media_id"], offset=offset)
+                data = base64.b64decode(part.get("data") or "")
+                if not data or int(part.get("offset", -1)) != offset:
+                    raise RuntimeError("The photo/video download went wrong. Press Start sending again.")
+                f.write(data)
+                offset += len(data)
+        os.replace(tmp, path)
+        if not ok(path):
+            path.unlink(missing_ok=True)
+            raise RuntimeError("The photo/video arrived damaged. Press Start sending again.")
+        return str(path)
 
     def push_results(self):
         if not self.job:
@@ -293,7 +327,11 @@ class Helper:
         j["message"] = f"Sending to {name}…"
         log(f"Sending to {name} (+{it['phone']})…")
         try:
-            status, reason = core.send_one(self.page, it["phone"], it["text"])
+            mp = j.get("media_path")
+            if mp and not os.path.isfile(mp):
+                mp = self.fetch_media(core.validate_media(j["job"].get("media")))
+                j["media_path"] = mp
+            status, reason = core.send_one(self.page, it["phone"], it["text"], mp)
         except Exception as e:  # never retry the same person in a fast loop
             tries = j.setdefault("tries", {})
             tries[it["contact_id"]] = tries.get(it["contact_id"], 0) + 1

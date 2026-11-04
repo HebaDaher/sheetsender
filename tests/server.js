@@ -17,6 +17,7 @@ const FIRST = '';
 // The page signs in like a real visitor would. Older tests start already signed in as WEBUSER (the server puts that
 // person's session in the page); LOGIN_FLOW=1 starts signed out so a test can click "Sign in with Google".
 if (!process.env.FRESH) { E.as('owner@gmail.com'); E.ctx.addMember('dad@gmail.com'); }
+if (process.env.WA_API) { E.as('owner@gmail.com'); E.ctx.saveWhatsAppApi({ phoneNumberId: E.meta.pnid, wabaId: E.meta.waba, token: E.meta.token }); }
 let forced = process.env.LOGIN_FLOW ? '' : (process.env.WEBUSER || 'dad@gmail.com');
 E.as(process.env.WEBUSER || 'dad@gmail.com');
 if (process.env.REAL_CLOCK) E.realClock();
@@ -98,7 +99,7 @@ http.createServer((req, res) => {
   if (req.url === '/tick') { // simulate N minutes of the owner's trigger
     E.runTrigger(Number(process.env.TICK || 6)); res.end(JSON.stringify({ sent: E.sent.length })); return;
   }
-  if (req.url === '/meta') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.meta.sent, sheets: Object.keys(E.sheetsById) })); return; }
+  if (req.url === '/meta') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.meta.sent, sheets: Object.keys(E.sheetsById), mediaUploads: E.meta.mediaUploads })); return; }
   if (req.url.startsWith('/tab?')) { // any workspace's tab: /tab?owner=sara@gmail.com&name=Send%20Log
     const q = new URL('http://x' + req.url).searchParams;
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(E.tab(q.get('name'), E.sheetOf(q.get('owner'))))); return;

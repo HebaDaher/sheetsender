@@ -34,6 +34,22 @@ cp config/appsscript.json src/appsscript.json
 
 say "Step 4 of 5: upload the code"
 $CLASP push --force || fail "Upload failed. Check your internet connection and try again."
+
+# An update that needs a NEW Google permission: the administrator allows it in the editor BEFORE the new version is
+# published, so the live app never runs without it. (First installs allow everything with 'setup' at the end.)
+SCOPES="$(python3 -c 'import json;print(" ".join(sorted(json.load(open("config/appsscript.json"))["oauthScopes"])))')"
+if [ -f .deployment-id ] && [ "$(cat .authorized-scopes 2>/dev/null)" != "$SCOPES" ]; then
+  say "One extra step for this update: allow a new permission"
+  echo "This update adds photos and videos for WhatsApp. They are kept in your Google Drive, in a folder the app makes."
+  echo "Google asks you once to allow it (the app can only see the files it makes itself, nothing else in your Drive)."
+  echo
+  echo "  1. The script editor opens in your browser. Click Code.gs on the left."
+  echo "  2. At the top, choose 'authorize' in the function menu and click Run."
+  echo "  3. Review permissions -> choose the owner account -> Advanced -> Go to Shop Follow-ups (unsafe) -> Allow."
+  echo "  4. When the log at the bottom says 'Thank you', come back here."
+  $CLASP open-script
+  read -r -p "Press Enter here after you clicked Allow... "
+fi
 echo "Publishing the private WhatsApp link (used by the Macs that send WhatsApp messages)..."
 bash whatsapp/deploy-bridge.sh || echo "The WhatsApp link could not be published this time (the rest of the app is fine). Run Install.command again later."
 
@@ -64,6 +80,7 @@ if [ -f "$HOME/Library/LaunchAgents/com.shopfollowups.whatsapp.plist" ]; then
   launchctl kickstart -k "gui/$(id -u)/com.shopfollowups.whatsapp" 2>/dev/null
 fi
 
+echo "$SCOPES" > .authorized-scopes
 echo "$URL" > "App link.txt"
 say "Uploaded and published."
 echo "App link (also saved in 'App link.txt'):"

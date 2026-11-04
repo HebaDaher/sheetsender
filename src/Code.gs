@@ -50,7 +50,7 @@ const HEADERS = {
   Contacts: ['contact_id', 'shop_id', 'full_name', 'first_name', 'email', 'phone',
     'consent_status', 'consent_source', 'consent_date', 'opted_out', 'opt_out_date', 'opt_out_reason',
     'created_at', 'updated_at', 'source_file', 'lists'],
-  Templates: ['template_id', 'shop_id', 'template_name', 'channel', 'subject', 'body', 'active', 'updated_at'],
+  Templates: ['template_id', 'shop_id', 'template_name', 'channel', 'subject', 'body', 'active', 'updated_at', 'media_id'],
   Campaigns: ['campaign_id', 'shop_id', 'campaign_name', 'template_id', 'sender_email', 'delay_minutes',
     'skip_previous_recipients', 'status', 'status_reason', 'created_by', 'created_at', 'started_at',
     'next_send_at', 'finished_at', 'total', 'sent', 'skipped', 'failed', 'pending', 'random_extra', 'ignore_hours',
@@ -61,7 +61,8 @@ const HEADERS = {
   // Every uploaded Excel file is kept as a list (its history), so it can be used again for another message.
   Lists: ['list_id', 'shop_id', 'name', 'file_name', 'created_at', 'created_by', 'updated_at', 'rows', 'status'],
   // Photos and videos for WhatsApp (the file itself is in the administrator's Google Drive).
-  Media: ['media_id', 'shop_id', 'name', 'mime', 'size', 'kind', 'created_at', 'created_by', 'meta_id', 'meta_uploaded_at', 'status']
+  Media: ['media_id', 'shop_id', 'name', 'mime', 'size', 'kind', 'drive_id', 'md5', 'created_at', 'created_by', 'meta_id', 'meta_uploaded_at',
+    'meta_pnid', 'status']
 };
 
 /**
@@ -160,6 +161,17 @@ function setup() {
   const msg = 'Setup finished.\nAdministrator: ' + me + '\nYour workspace Sheet: ' + ss.getUrl() +
     '\nNext: open this link ONCE to sign in (valid 24 hours): ' + (/\/exec$/.test(url) ? url : '<the App link>') + '?first=' + first +
     '\nThen go to Settings, save the Google sign-in client and connect Gmail accounts.';
+  Logger.log(msg);
+  return msg;
+}
+
+/**
+ * Run by the app administrator in the Apps Script editor after an update that needs a new permission
+ * (Install.command says when). Running it makes Google ask for the permission once; it changes nothing.
+ */
+function authorize() {
+  ScriptApp.getOAuthToken();
+  const msg = 'Thank you — the app has the permissions it needs. Go back to the Install window and press Enter.';
   Logger.log(msg);
   return msg;
 }
@@ -562,7 +574,8 @@ function getShopData(shopId) {
     .map(stripRow_)
     .sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
   return { shop: publicShop_(shop), templates: templates, contacts: contacts, campaigns: campaigns, engine: engineStatus_(),
-    waApi: waApiPublic_(false), lists: listSummaries_(ctx.ss, shopId, contactRows, campaigns) };
+    waApi: waApiPublic_(false), lists: listSummaries_(ctx.ss, shopId, contactRows, campaigns),
+    media: shopMedia_(ctx.ss, shopId).map(publicMedia_) };
 }
 
 /**
@@ -593,7 +606,9 @@ function importContacts(shopId, rows, meta) {
     result.listId = list.list_id;
     result.listName = list.name || list.file_name;
     result.reuploaded = !!list._reuploaded;
+    result.uploadToken = list._token || '';
     let inFile = 0;
+    const seenIds = [];
 
     rows.forEach(function (raw, i) {
       const rowNo = (meta.firstRowNumber || 2) + i;
@@ -624,6 +639,7 @@ function importContacts(shopId, rows, meta) {
       const existing = (email && byEmail[email]) || (phone && byPhone[phone]);
       inFile++;
       if (existing) {
+        if (existing.contact_id) seenIds.push(existing.contact_id);
         const joined = addToList_(existing, list.list_id);
         let changed = false;
         ['full_name', 'first_name', 'email', 'phone', 'consent_status', 'consent_source', 'consent_date'].forEach(function (k) {
@@ -657,11 +673,13 @@ function importContacts(shopId, rows, meta) {
         created_at: now, updated_at: now, source_file: meta.fileName || '', lists: list.list_id
       };
       toAdd.push(created);
+      seenIds.push(created.contact_id);
       if (email) byEmail[email] = created;
       if (phone) byPhone[phone] = created;
       result.added++;
     });
 
+    finishListParts_(list, meta, seenIds, table, toUpdate, result);
     // Updates: rewrite the whole data block once (fast), then append new rows.
     saveRows_(table, toUpdate);
     appendRows_(table, toAdd);
@@ -701,12 +719,14 @@ function saveTemplate(t) {
   }
   return withLock_(function () {
     findShop_(ctx.ss, t.shop_id);
+    const media = channel === 'whatsapp' ? mediaFor_(ctx.ss, t.shop_id, t.media_id) : null;
     const table = readTable_(ctx.ss, TABS.TEMPLATES);
     let row = t.template_id ? table.rows.filter(function (r) { return r.template_id === t.template_id; })[0] : null;
     if (row && row.shop_id !== t.shop_id) throw new Error('This template belongs to another shop.');
     const values = {
       shop_id: t.shop_id, template_name: name, channel: channel, subject: channel === 'email' ? subject : '',
-      body: body, active: t.active === false || norm_(t.active) === 'no' ? 'no' : 'yes', updated_at: nowIso_()
+      body: body, active: t.active === false || norm_(t.active) === 'no' ? 'no' : 'yes', updated_at: nowIso_(),
+      media_id: media ? media.media_id : ''
     };
     if (row) {
       Object.keys(values).forEach(function (k) { row[k] = values[k]; });
@@ -1089,22 +1109,30 @@ function buildWhatsAppJob_(ss, params, rules, actor) {
     const shop = findShop_(ctx.ss, params.shopId);
     const templates = readTable_(ctx.ss, TABS.TEMPLATES);
     let template = null;
+    // A photo or video sent with the message. Text + photo is a different message from the same text alone.
+    let media = mediaFor_(ctx.ss, shop.shop_id, params.mediaId);
     if (params.body !== undefined) {
       const body = String(params.body || '').trim();
       if (!body) throw new Error('Write the WhatsApp message.');
       if (body.length > 3000) throw new Error('The message is too long for WhatsApp (max 3000 characters).');
+      if (media && body.length > 1000) throw new Error('With a photo or video, the message is its caption: at most 1000 characters (yours has ' + body.length + ').');
       const unknown = unknownPlaceholders_(body);
       if (unknown.length) throw new Error('These fields are not known: ' + unknown.join(', ') + '. You can use: {' + PLACEHOLDERS.join('}, {') + '}.');
-      template = templates.rows.filter(function (t) { return t.shop_id === shop.shop_id && norm_(t.channel) === 'whatsapp' && t.body === body; })[0];
+      const mid = media ? media.media_id : '';
+      template = templates.rows.filter(function (t) {
+        return t.shop_id === shop.shop_id && norm_(t.channel) === 'whatsapp' && t.body === body && (t.media_id || '') === mid;
+      })[0];
       reviveTemplate_(ctx.ss, template);
       if (!template) {
-        template = { template_id: newId_('T'), shop_id: shop.shop_id, template_name: body.split(/\r?\n/)[0].slice(0, 60),
-          channel: 'whatsapp', subject: '', body: body, active: 'yes', updated_at: nowIso_() };
+        template = { template_id: newId_('T'), shop_id: shop.shop_id,
+          template_name: ((media ? (media.kind === 'video' ? '🎬 ' : '📷 ') : '') + body.split(/\r?\n/)[0]).slice(0, 60),
+          channel: 'whatsapp', subject: '', body: body, active: 'yes', updated_at: nowIso_(), media_id: mid };
         appendRows_(templates, [template]);
       }
     } else {
       template = templates.rows.filter(function (t) { return t.template_id === params.templateId; })[0];
       if (!template || template.shop_id !== shop.shop_id || norm_(template.channel) !== 'whatsapp') throw new Error('Choose a WhatsApp message.');
+      media = mediaFor_(ctx.ss, shop.shop_id, template.media_id);
     }
     const already = {};
     if (params.skipPrevious !== false) {
@@ -1131,7 +1159,7 @@ function buildWhatsAppJob_(ss, params, rules, actor) {
     return {
       kind: 'shop-followups-whatsapp-job', version: 1,
       job_id: newId_('W'), shop_id: shop.shop_id, shop_name: shop.shop_name, template_id: template.template_id,
-      created_at: nowIso_(), created_by: ctx.email, rules: rules, list_names: audience.names,
+      created_at: nowIso_(), created_by: ctx.email, rules: rules, list_names: audience.names, media: mediaForJob_(media),
       items: items,
       skipped: Object.keys(skipped).map(function (r) { return { reason: r, count: skipped[r] }; })
     };
@@ -1331,7 +1359,7 @@ function startWhatsAppAuto(params) {
   const id = newId_('M');
   putJob_(id, job);
   queueWaCommand_({ id: id, type: 'start', by: ctx.email, params: {
-    shopId: params.shopId, templateId: job.template_id, skipPrevious: params.skipPrevious !== false,
+    shopId: params.shopId, templateId: job.template_id, skipPrevious: params.skipPrevious !== false, listIds: params.listIds || [],
     delayMinutes: rules.delayMinutes, randomExtra: rules.randomExtra, dailyCap: rules.dailyCap,
     startHour: rules.startHour, endHour: rules.endHour, startAt: rules.startAt } });
   return { people: job.items.length, skipped: job.skipped, rules: rules, template_id: job.template_id };
@@ -1478,6 +1506,9 @@ function doPost(e) {
       }
       if (!job) return jsonOut_({ ok: false, error: 'This send list expired. Press Start sending again in the app.' });
       return jsonOut_({ ok: true, job: job });
+    }
+    if (req.action === 'media') { // a photo/video of THIS workspace, in parts, for the Mac helper
+      return jsonOut_(Object.assign({ ok: true }, bridgeMediaPart_(ws, req.media_id, req.offset)));
     }
     if (req.action === 'results') {
       const ss = SpreadsheetApp.openById(ws.sheet_id); // the app runs as the administrator: it can open every workspace

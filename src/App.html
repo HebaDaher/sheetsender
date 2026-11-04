@@ -779,7 +779,7 @@
     var u = S.upload;
     var chunk = 400, prev = S.importResult && S.uploadDone ? S.importResult : null;
     var total = prev || { added: 0, updated: 0, unchanged: 0, rejected: 0, problems: [], files: [] };
-    var i = 0, listId = '', label = S.uploadTotal > 1 ? ' (file ' + (S.uploadDone + 1) + ' of ' + S.uploadTotal + ')' : '';
+    var i = 0, listId = '', token = '', label = S.uploadTotal > 1 ? ' (file ' + (S.uploadDone + 1) + ' of ' + S.uploadTotal + ')' : '';
     busy('Importing…');
     function next() {
       if (i >= rows.length) return Promise.resolve();
@@ -787,9 +787,10 @@
       var firstRowNumber = u.headerIndex + 2 + i;
       $('busyText').textContent = 'Importing' + label + '… ' + Math.min(i + chunk, rows.length) + ' of ' + rows.length;
       var meta = { fileName: u.fileName, firstRowNumber: firstRowNumber };
-      if (listId) meta.listId = listId; else { meta.first = true; meta.asNew = !!u.asNew; }
+      if (listId) { meta.listId = listId; meta.uploadToken = token; } else { meta.first = true; meta.asNew = !!u.asNew; }
+      meta.part = Math.floor(i / chunk); meta.last = i + chunk >= rows.length;
       return call('importContacts', S.shopId, part, meta).then(function (r) {
-        listId = r.listId || listId;
+        listId = r.listId || listId; token = r.uploadToken || token;
         if (i === 0) total.files.push(r.listName || u.fileName);
         total.added += r.added; total.updated += r.updated; total.unchanged += r.unchanged; total.rejected += r.rejected;
         total.problems = total.problems.concat(r.problems.map(function (p) { return S.uploadTotal > 1 ? u.fileName + ': ' + p : p; })).slice(0, 100);
@@ -1003,7 +1004,7 @@
     function note() {
       var t = selected(), x = cfg.getText(), el = $(p + 'TplNote'); if (!el) return;
       if (!t) el.textContent = 'New message — not saved yet. Click “Save” to keep it in the list (it is also saved by itself when you start sending).';
-      else if (t.body !== x.body || (cfg.channel === 'email' && t.subject !== x.subject)) el.innerHTML = '<span style="color:var(--warn)">Changed — click “Save” to update “' + esc(t.template_name) + '”, or “Save as new” to keep both.</span>';
+      else if (t.body !== x.body || (cfg.channel === 'email' && t.subject !== x.subject) || (cfg.channel === 'whatsapp' && (t.media_id || '') !== (x.media_id || ''))) el.innerHTML = '<span style="color:var(--warn)">Changed — click “Save” to update “' + esc(t.template_name) + '”, or “Save as new” to keep both.</span>';
       else el.textContent = '✓ Saved as “' + t.template_name + '”.';
     }
     function save(asNew) {
@@ -1013,7 +1014,7 @@
       if (name === null) return;
       if (!String(name).trim()) { showBanner('error', 'Give the message a name.'); return; }
       withBusy('Saving…', call('saveTemplate', { template_id: t ? t.template_id : '', shop_id: S.shopId, template_name: name, channel: cfg.channel,
-        subject: x.subject || '', body: x.body, active: 'yes' })).then(function (row) {
+        subject: x.subject || '', body: x.body, active: 'yes', media_id: x.media_id || '' })).then(function (row) {
         cfg.setSel(row.template_id);
         return reloadShop().then(function () { showBanner('success', (t ? 'Updated “' : 'Saved “') + row.template_name + '”.'); cfg.rerender(); });
       });
@@ -1393,7 +1394,10 @@
       tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === w.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
       '</select></label><input type="search" id="wSearch" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">Example message</div><div class="wa-bubble">' +
-      esc(renderText(tpl.body, fieldsFor(ok[0] || { first_name: 'Ahmed' }, S.data.shop))) + '</div></div></div></div>';
+      (mediaById(tpl.media_id) ? '<div class="small"><b>' + (mediaById(tpl.media_id).kind === 'video' ? '🎬 ' : '📷 ') + esc(mediaById(tpl.media_id).name) + '</b></div>' : '') +
+      esc(renderText(tpl.body, fieldsFor(ok[0] || { first_name: 'Ahmed' }, S.data.shop))) + '</div>' +
+      (mediaById(tpl.media_id) ? '<p class="small muted">“Open WhatsApp” can only fill in the text: attach the photo or video yourself in WhatsApp (📎). The Mac or the Business API send it automatically.</p>' : '') +
+      '</div></div></div>';
 
     html += '<div class="card"><h2>' + plural(ok.length, 'person') + ' can be messaged</h2>';
     if (!shown.length) html += '<p class="muted">Nobody to show.</p>';
@@ -1502,11 +1506,13 @@
 
   /* ---------- Automatic WhatsApp (runs on the Mac) ---------- */
   function autoWhatsAppHtml(tpls) {
-    var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', skipPrevious: true, sched: defaultSchedule({ cap: 30, h1: 9, h2: 21 }) });
+    var a = S.wa.auto || (S.wa.auto = { body: undefined, templateId: '', mediaId: '', skipPrevious: true, sched: defaultSchedule({ cap: 30, h1: 9, h2: 21 }) });
     if (a.body === undefined) {
       a.templateId = tpls.length ? tpls[0].template_id : '';
       a.body = tpls.length ? tpls[0].body : 'Hello {first_name}, this is {sender_name} about {shop_name}. ';
+      a.mediaId = tpls.length ? (tpls[0].media_id || '') : '';
     }
+    if (a.mediaId && !mediaById(a.mediaId)) a.mediaId = '';
     var html = '<div class="card"><h2>From a Mac (free)</h2>' +
       '<p class="muted">Write the message once with the person\'s name, choose the schedule and press <b>Start sending</b>. The WhatsApp Sender on the Mac sends it to each person by itself, and you can follow it here.</p>' +
       '<div class="notice warn small">WhatsApp does not allow automatic sending from a normal number. Going slowly lowers the risk, but WhatsApp can still block the number, ' +
@@ -1514,6 +1520,7 @@
     html += savedMenuHtml('wa', tpls, a.templateId, '— New message —');
     html += '<div class="grid2"><div><label class="field"><span>WhatsApp message</span><textarea id="waBody" style="min-height:150px">' + esc(a.body) + '</textarea></label>' +
       '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
+      mediaPickerHtml('wm', a.mediaId, '', 'The text is sent as the caption under the photo or video.') +
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
       '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are the Mac\'s time. The Mac must be on and connected to the internet; it stays awake by itself while sending.' }) + '</div>' +
@@ -1535,17 +1542,19 @@
     function live() {
       a.body = $('waBody').value;
       var people = audienceContacts().filter(function (x) { return x.waCheck.ok; }).slice(0, 4);
-      $('waGreets').innerHTML = people.length ? people.map(function (x) {
+      var mm = mediaById(a.mediaId);
+      $('waGreets').innerHTML = (mm && people.length ? '<div style="padding:4px 0"><b>' + (mm.kind === 'video' ? '🎬 ' : '📷 ') + esc(mm.name) + '</b> + this text as its caption:</div>' : '') + (people.length ? people.map(function (x) {
         var first = renderText(a.body, fieldsFor(x, S.data.shop)).split(/\r?\n/).filter(function (l) { return l.trim(); })[0] || '';
         return '<div style="padding:4px 0;border-bottom:1px solid var(--line)"><b>' + esc(x.full_name || x.first_name || x.phone) + ':</b> ' + esc(first) + '</div>';
-      }).join('') : '<span class="muted">Nobody can be messaged yet.</span>';
+      }).join('') : '<span class="muted">Nobody can be messaged yet.</span>');
     }
     var waCfg = { channel: 'whatsapp', list: function () { return S.data.templates.filter(function (t) { return t.channel === 'whatsapp' && t.active !== 'no'; }); },
       getSel: function () { return a.templateId; }, setSel: function (id) { a.templateId = id; },
-      getText: function () { return { subject: '', body: a.body || '' }; },
-      load: function (t) { a.body = t ? t.body : 'Hello {first_name}, '; },
+      getText: function () { return { subject: '', body: a.body || '', media_id: a.mediaId || '' }; },
+      load: function (t) { a.body = t ? t.body : 'Hello {first_name}, '; a.mediaId = t ? (t.media_id || '') : ''; },
       rerender: viewWhatsApp };
     bindSavedMenu('wa', waCfg);
+    bindMediaPicker('wm', '', function (id) { a.mediaId = id; viewWhatsApp(); });
     $('waBody').addEventListener('input', function () { live(); waCfg.onNote(); });
     $('waSkip').addEventListener('change', function () { a.skipPrevious = this.checked; });
     bindSchedule('ws', a.sched, function () {}, function () { return [a.sched.h1, a.sched.h2]; });
@@ -1559,7 +1568,7 @@
       var sc = a.sched;
       withBusy('Preparing the send list…', call('getWhatsAppJob', { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious,
         delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc),
-        ignoreHours: !!sc.ignoreHours, listIds: audienceIds() })).then(function (job) {
+        ignoreHours: !!sc.ignoreHours, listIds: audienceIds(), mediaId: a.mediaId || '' })).then(function (job) {
         var name = 'whatsapp-job-' + String(job.shop_name || job.shop_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() + '-' + job.created_at.slice(0, 16).replace(/[:T]/g, '-') + '.json';
         var blob = new Blob([JSON.stringify(job, null, 1)], { type: 'application/json' });
         var link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = name;
@@ -1577,11 +1586,13 @@
       if (prob) { showBanner('error', prob); return; }
       var sc = a.sched;
       var p = { shopId: S.shopId, body: $('waBody').value, skipPrevious: a.skipPrevious, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random,
-        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours, listIds: audienceIds() };
+        dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2), startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours, listIds: audienceIds(), mediaId: a.mediaId || '' };
       var st0 = sc.when === 'at' && sc.at ? new Date(sc.at) : new Date();
       var waits = !sc.ignoreHours && !(st0.getHours() >= sc.h1 && st0.getHours() < sc.h2);
       var files = audienceIds().map(function (id) { return listById(id).name; });
+      var mm = mediaById(a.mediaId);
       if (!confirm('Start sending this WhatsApp message from the Mac?\n\n' + (files.length ? 'To people from: ' + files.join(', ') + '\n' : '') +
+        (mm ? 'With the ' + (mm.kind === 'video' ? 'video' : 'photo') + ': ' + mm.name + '\n' : '') +
         (waits ? 'First message: ' + sc.h1 + ':00 (outside the sending hours now).\n' : (sc.when === 'at' ? 'Starts: ' + sc.at.replace('T', ' ') + '\n' : 'Starts now.\n')) +
         (sc.random ? sc.minutes + '–' + Math.round(sc.minutes * 1.4) : 'Exactly ' + sc.minutes) + ' minutes between messages, at most ' + sc.cap + ' per day' +
         (sc.ignoreHours ? ', day and night.' : ', ' + sc.h1 + ':00–' + sc.h2 + ':00.'))) return;
@@ -1632,6 +1643,90 @@
         '</ol><p class="small muted" style="margin:8px 0 0">Keep this line private: it is the key that lets that Mac send for this workspace. It is shown only once; click “Set up a Mac” again for a new one.</p></div>';
       $('macCopy').addEventListener('click', function () { var i = $('macCmd'); i.select(); try { document.execCommand('copy'); } catch (e) {} showBanner('success', 'Copied. Now paste it in the Mac\'s Terminal and press Enter.'); });
       pollHelper(true);
+    });
+  }
+
+  /* ---------- Photos and videos for WhatsApp ---------- */
+  var MEDIA_TYPES = { 'image/jpeg': ['image', 5], 'image/png': ['image', 5], 'video/mp4': ['video', 16], 'video/3gpp': ['video', 16] };
+  function mediaById(id) { return id ? (S.data.media || []).filter(function (m) { return m.media_id === id; })[0] : null; }
+  function sizeLabel(n) { return n >= 1048576 ? (Math.round(n / 104857.6) / 10) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  /** kind: '' = photo or video; 'image' or 'video' = only that (a Business API template decides). */
+  function mediaPickerHtml(p, selected, kind, note) {
+    var list = (S.data.media || []).filter(function (m) { return !kind || m.kind === kind; });
+    var what = kind === 'video' ? 'video' : kind === 'image' ? 'photo' : 'photo or video';
+    var accept = kind === 'video' ? 'video/mp4,video/3gpp' : kind === 'image' ? 'image/jpeg,image/png' : 'image/jpeg,image/png,video/mp4,video/3gpp';
+    var html = '<div class="media-pick" id="' + p + 'Media"><b>' + (kind ? 'The ' + what : 'Add a photo or video (optional)') + '</b>' +
+      (note ? '<div class="small muted">' + esc(note) + '</div>' : '');
+    if (!kind) html += '<label class="check"><input type="radio" name="' + p + 'Med" value=""' + (selected ? '' : ' checked') + '><span>No photo or video — text only</span></label>';
+    list.forEach(function (m) {
+      html += '<div class="row" style="gap:6px;align-items:center"><label class="check" style="flex:1"><input type="radio" name="' + p + 'Med" value="' + esc(m.media_id) + '"' +
+        (selected === m.media_id ? ' checked' : '') + '><span>' + (m.kind === 'video' ? '🎬 ' : '📷 ') + esc(m.name) + ' <span class="muted small">(' + sizeLabel(m.size) + ', added ' + esc(fmt(m.created_at)) + ')</span></span></label>' +
+        '<button class="link small danger-link" data-mdel="' + esc(m.media_id) + '">Remove</button></div>';
+    });
+    if (kind && !list.length) html += '<div class="small muted">No ' + what + ' added yet.</div>';
+    html += '<label class="btn small" style="margin-top:6px">+ Add a ' + what + '<input type="file" id="' + p + 'MedFile" accept="' + accept + '" class="hidden"></label>' +
+      '<div class="small muted" style="margin-top:4px">' + (kind === 'video' ? 'MP4, up to 16 MB.' : kind === 'image' ? 'JPG or PNG, up to 5 MB.' : 'Photos: JPG or PNG up to 5 MB. Videos: MP4 up to 16 MB (WhatsApp\'s limits).') + '</div></div>';
+    return html;
+  }
+  function bindMediaPicker(p, kind, onPick) {
+    var box = $(p + 'Media'); if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll('input[name="' + p + 'Med"]'), function (r) {
+      r.addEventListener('change', function () { onPick(r.value); });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-mdel]'), function (b) {
+      b.addEventListener('click', function () {
+        var m = mediaById(b.getAttribute('data-mdel')); if (!m) return;
+        if (!confirm('Remove “' + m.name + '”?\n\nIt disappears from this list. Messages already sent are not affected.')) return;
+        withBusy('Removing…', call('removeMedia', S.shopId, m.media_id)).then(reloadShop).then(function () {
+          showBanner('success', 'Removed.'); onPick('');
+        });
+      });
+    });
+    $(p + 'MedFile').addEventListener('change', function () {
+      var f = this.files[0]; this.value = '';
+      if (f) uploadMedia(f, kind).then(function (m) { if (m) onPick(m.media_id); });
+    });
+  }
+  /** Sends the file to the app in 2 MB parts (each goes straight into Google Drive). */
+  function uploadMedia(file, kind) {
+    hideBanner();
+    var type = String(file.type || '').toLowerCase();
+    if (!type && /\.jpe?g$/i.test(file.name)) type = 'image/jpeg';
+    if (!type && /\.png$/i.test(file.name)) type = 'image/png';
+    if (!type && /\.mp4$/i.test(file.name)) type = 'video/mp4';
+    var t = MEDIA_TYPES[type];
+    if (!t) {
+      showBanner('error', /quicktime|\.mov$/i.test(type + file.name) ? 'iPhone videos (.mov) cannot be sent as they are. Save or export the video as MP4 first (for example, send it to yourself on WhatsApp and save it again), then add it here.'
+        : /heic|heif/i.test(type + file.name) ? 'iPhone photos (HEIC) cannot be sent as they are. Save the photo as JPG first (on the iPhone: Settings → Camera → Formats → Most Compatible), then add it here.'
+        : 'This kind of file cannot be sent. Use a photo (JPG or PNG) or a video (MP4).');
+      return Promise.resolve(null);
+    }
+    if (kind && t[0] !== kind) { showBanner('error', 'This template needs a ' + (kind === 'video' ? 'video' : 'photo') + '.'); return Promise.resolve(null); }
+    if (file.size > t[1] * 1048576) { showBanner('error', 'This ' + (t[0] === 'video' ? 'video' : 'photo') + ' is bigger than ' + t[1] + ' MB (WhatsApp\'s limit). Make it smaller and try again.'); return Promise.resolve(null); }
+    busy('Adding the ' + (t[0] === 'video' ? 'video' : 'photo') + '…');
+    return new Promise(function (resolve) {
+      var reader = new FileReader();
+      reader.onerror = function () { done(); showBanner('error', 'The file could not be read.'); resolve(null); };
+      reader.onload = function () {
+        var bytes = new Uint8Array(reader.result);
+        call('startMediaUpload', S.shopId, { name: file.name, mime: type, size: bytes.length }).then(function (s) {
+          var off = 0;
+          function next() {
+            var part = bytes.subarray(off, Math.min(bytes.length, off + s.chunk));
+            var bin = '';
+            for (var i = 0; i < part.length; i += 32768) bin += String.fromCharCode.apply(null, part.subarray(i, i + 32768));
+            $('busyText').textContent = 'Adding the ' + (t[0] === 'video' ? 'video' : 'photo') + '… ' + Math.round(off * 100 / bytes.length) + '%';
+            return call('uploadMediaChunk', s.uploadId, off, btoa(bin)).then(function (r) {
+              off += part.length;
+              return r.done ? r.media : next();
+            });
+          }
+          return next();
+        }).then(function (m) {
+          return reloadShop().then(function () { done(); showBanner('success', 'Added “' + m.name + '”.'); resolve(m); });
+        }).catch(function (e) { done(); showBanner('error', 'The file was not added: ' + errText(e)); resolve(null); });
+      };
+      reader.readAsArrayBuffer(file);
     });
   }
 
@@ -1714,6 +1809,10 @@
     } else {
       html += '<p class="muted small">This template has no blanks: everyone gets the same text.</p>';
     }
+    if (t.header_media) {
+      if (a.mediaId && (!mediaById(a.mediaId) || mediaById(a.mediaId).kind !== t.header_media)) a.mediaId = '';
+      html += mediaPickerHtml('am', a.mediaId, t.header_media, 'This template starts with a ' + (t.header_media === 'video' ? 'video' : 'photo') + ' — choose which one (required).');
+    }
     html += '<label class="check"><input type="checkbox" id="apiSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this template</span></label>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="apiName" maxlength="100" value="' + esc(a.name) + '"></label></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">What the first people receive</div><div id="apiGreets" class="small"></div></div></div>';
@@ -1726,7 +1825,8 @@
     function live() {
       var people = audienceContacts().filter(function (x) { return x.waCheck.ok; }).slice(0, 3);
       $('apiGreets').innerHTML = people.length ? people.map(function (c) {
-        return '<div class="wa-bubble" style="margin-bottom:6px">' + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
+        var hm = t.header_media ? mediaById(a.mediaId) : null;
+        return '<div class="wa-bubble" style="margin-bottom:6px">' + (t.header_media ? '<div class="small"><b>' + (hm ? (hm.kind === 'video' ? '🎬 ' : '📷 ') + esc(hm.name) : '(' + (t.header_media === 'video' ? 'video' : 'photo') + ' not chosen yet)') + '</b></div>' : '') + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
           '<div class="muted small" style="margin-top:4px">→ ' + esc(c.full_name || c.first_name || c.phone) + '</div></div>';
       }).join('') : '<span class="muted">Nobody in this shop can be messaged yet (people need a phone number and consent).</span>';
     }
@@ -1747,6 +1847,7 @@
       });
     });
     $('apiSkip').addEventListener('change', function () { a.skipPrevious = this.checked; reset(); });
+    if (t.header_media) bindMediaPicker('am', t.header_media, function (id) { a.mediaId = id; reset(); drawApiBody(); });
     $('apiName').addEventListener('input', function () { a.name = this.value; });
     bindSchedule('as', a.sched, reset, function () { return [a.sched.h1, a.sched.h2]; });
     $('apiCheck').addEventListener('click', function () { apiPreview().catch(function () {}); });
@@ -1766,12 +1867,15 @@
   function apiParams() {
     var a = apiState(), t = apiTemplate(), sc = a.sched;
     return { shopId: S.shopId, template: t.name, language: t.language, mapping: a.mapping, headerMapping: a.headerMapping, skipPrevious: a.skipPrevious,
+      mediaId: t.header_media ? (a.mediaId || '') : '',
       name: a.name, delayMinutes: Number(sc.minutes), randomExtra: !!sc.random, dailyCap: Number(sc.cap), startHour: Number(sc.h1), endHour: Number(sc.h2),
       startAt: startAtIso(sc), ignoreHours: !!sc.ignoreHours, listIds: audienceIds() };
   }
 
   function apiPreview() {
-    var a = apiState(), prob = audienceProblem() || scheduleProblem(a.sched, { limits: true });
+    var a = apiState(), t0 = apiTemplate();
+    var prob = audienceProblem() || (t0 && t0.header_media && !a.mediaId ? 'Choose the ' + (t0.header_media === 'video' ? 'video' : 'photo') + ' for this template first.' : '') ||
+      scheduleProblem(a.sched, { limits: true });
     if (prob) { showBanner('error', prob); return Promise.reject(prob); }
     return withBusy('Checking…', call('getWhatsAppApiPreview', apiParams())).then(function (r) {
       a.review = r;

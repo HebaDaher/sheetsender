@@ -79,6 +79,9 @@ function listForImport_(ss, shopId, meta, actor, contactsTable, toUpdate) {
   if (meta.listId) {
     list = table.rows.filter(function (l) { return l.list_id === meta.listId && l.shop_id === shopId && l.status !== 'removed'; })[0];
     if (!list) throw new Error('This upload\'s file was removed while uploading. Upload the file again.');
+    const up = parseJson_(CacheService.getScriptCache().get('LUP_' + String(meta.uploadToken || '')) || '');
+    list._token = up && up.list === list.list_id ? String(meta.uploadToken) : '';
+    list._reuploaded = !!(up && up.reupload);
   } else {
     const fileName = cleanListName_(meta.fileName) || ('Upload ' + Utilities.formatDate(new Date(), 'Asia/Dubai', 'd MMM yyyy HH:mm'));
     const wanted = norm_(fileName);
@@ -87,10 +90,8 @@ function listForImport_(ss, shopId, meta, actor, contactsTable, toUpdate) {
     });
     list = meta.asNew ? null : sameName[0];
     if (list) {
-      // Same file uploaded again: the list becomes exactly the people in the new file.
-      contactsTable.rows.forEach(function (c) {
-        if (c.shop_id === shopId && removeFromList_(c, list.list_id) && toUpdate.indexOf(c) === -1) toUpdate.push(c);
-      });
+      // Same file uploaded again: the list becomes exactly the people in the new file. People who are no longer in
+      // the file leave the list only when the LAST part has arrived (a failed upload never leaves half a list).
       list.rows = '0';
       list.updated_at = now;
       list._reuploaded = true;
@@ -107,8 +108,39 @@ function listForImport_(ss, shopId, meta, actor, contactsTable, toUpdate) {
       appendRows_(table, [list]);
     }
   }
+  if (!meta.listId) {
+    list._token = Utilities.getUuid();
+    CacheService.getScriptCache().put('LUP_' + list._token, JSON.stringify({ list: list.list_id, reupload: !!list._reuploaded }), 21600);
+  }
   list._table = table;
   return list;
+}
+
+/**
+ * Remembers who was in this part of the upload; after the last part of a re-upload, people who are not in the new
+ * file leave that list (they stay in Contacts). If the memory was lost (6 hours), nobody is taken out.
+ */
+function finishListParts_(list, meta, seenIds, contactsTable, toUpdate, result) {
+  if (!list._token) return;
+  const cache = CacheService.getScriptCache();
+  const part = Math.max(0, Math.floor(Number(meta.part) || 0));
+  if (part > 500) throw new Error('This file is too big for one upload.');
+  cache.put('LSEEN_' + list._token + '_' + part, seenIds.join(','), 21600);
+  if (meta.last === false || !list._reuploaded) return;
+  const keys = [];
+  for (let i = 0; i <= part; i++) keys.push('LSEEN_' + list._token + '_' + i);
+  const got = cache.getAll ? cache.getAll(keys) : keys.reduce(function (o, k) { const v = cache.get(k); if (v !== null) o[k] = v; return o; }, {});
+  if (keys.some(function (k) { return got[k] === undefined || got[k] === null; })) { result.keptOldPeople = true; return; }
+  const seen = {};
+  keys.forEach(function (k) { String(got[k] || '').split(',').forEach(function (id) { if (id) seen[id] = true; }); });
+  let removed = 0;
+  contactsTable.rows.forEach(function (c) {
+    if (c.shop_id === list.shop_id && !seen[c.contact_id] && removeFromList_(c, list.list_id)) {
+      removed++;
+      if (toUpdate.indexOf(c) === -1) toUpdate.push(c);
+    }
+  });
+  result.leftList = removed;
 }
 
 function finishListImport_(list, rowsInPart) {

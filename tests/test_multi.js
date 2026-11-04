@@ -408,7 +408,8 @@ t('approved templates are listed for everyone in the workspace (with what cannot
   const by = n => r.templates.find(x => x.name === n);
   assert.deepStrictEqual(Array.from(by('shop_followup').params), ['1', '2']);
   assert.strictEqual(by('named_hello').named, true); assert.deepStrictEqual(Array.from(by('named_hello').header_params), ['shop']);
-  assert.strictEqual(by('with_image').ok, false); assert(/picture/.test(by('with_image').why));
+  assert.strictEqual(by('with_image').ok, true); assert.strictEqual(by('with_image').header_media, 'image', 'photo templates can be used (photo chosen in the app)');
+  assert.strictEqual(by('with_document').ok, false); assert(/document/.test(by('with_document').why));
   assert.strictEqual(by('waiting_one').status, 'PENDING');
 });
 t('preview: every {{n}} must be chosen; shows exactly what a person receives', () => {
@@ -416,7 +417,8 @@ t('preview: every {{n}} must be chosen; shows exactly what a person receives', (
   const base = { shopId: 'SHOP1', template: 'shop_followup', language: 'en_US', delayMinutes: 2, dailyCap: 100, startHour: 0, endHour: 24 };
   throwsMsg(() => C.getWhatsAppApiPreview(Object.assign({ mapping: { 1: 'first_name' } }, base)), /\{\{2\}\}/);
   throwsMsg(() => C.getWhatsAppApiPreview(Object.assign({ mapping: { 1: 'first_name', 2: 'text:' } }, base)), /Write the text/);
-  throwsMsg(() => C.getWhatsAppApiPreview(Object.assign({}, base, { mapping: { 1: 'first_name' }, template: 'with_image' })), /approved message template|cannot be used/);
+  throwsMsg(() => C.getWhatsAppApiPreview(Object.assign({}, base, { mapping: { 1: 'first_name' }, template: 'with_document' })), /approved message template|cannot be used/);
+  throwsMsg(() => C.getWhatsAppApiPreview(Object.assign({}, base, { mapping: { 1: 'first_name' }, template: 'with_image' })), /Choose the photo/);
   const p = C.getWhatsAppApiPreview(Object.assign({ mapping: okMap }, base));
   assert(p.willSend >= 2);
   assert(/^Hello \w+, this is about Sara Bakery\. Are you still interested\?$/.test(p.sample.text), p.sample.text);
