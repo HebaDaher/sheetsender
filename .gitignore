@@ -7,3 +7,4 @@ tests/screenshots/
 src/Bridge.config.gs
 .bridge-deployment-id
 __pycache__/
+src/App.config.gs

@@ -111,7 +111,7 @@ t('client ID is validated; secret is kept server-side only (never in a page or a
   assert(!JSON.stringify(st).includes(G.client.secret), 'secret never returned to the page');
   assert.strictEqual(st.clientSecretSaved, true);
   assert.strictEqual(st.redirectUri, G.redirect);
-  assert.strictEqual(st.redirectUri, 'https://hebadaher.github.io/sheetsender/callback.html');
+  assert.strictEqual(st.redirectUri, 'https://script.google.com/macros/s/DEPLOY123/exec', 'Google sends people back to the app itself');
   C.saveOAuthClient(G.client.id, ''); // blank keeps the saved secret
   assert.strictEqual(E.scriptProps.OAUTH_CLIENT_SECRET, G.client.secret);
 });
@@ -159,6 +159,19 @@ t('a forged, changed or expired session is refused; the page cannot pick who it 
   const soon = E.real.makeSession_('dad@gmail.com'); E.advance(31 * 24 * 60);
   throwsMsg(() => E.real.api(soon, 'getBootstrap', []), /SIGNED_OUT/);
   E.advance(-31 * 24 * 60);
+});
+t('anyone calling sign-in or the sender in a loop is slowed down (protects the daily limits)', () => {
+  E.advance(2);
+  for (let i = 0; i < 60; i++) E.real.startLogin();
+  throwsMsg(() => E.real.startLogin(), /Too many tries/);
+  E.advance(2);
+  assert(E.real.startLogin(), 'fine again a minute later');
+  const runs = () => Object.keys(E.scriptCache).filter(k => k === 'PQ_RAN').length;
+  const before = E.scriptProps.LAST_RUN;
+  E.real.processQueue(); const first = E.scriptProps.LAST_RUN;
+  E.advance(0.2); for (let i = 0; i < 50; i++) E.real.processQueue();
+  assert.strictEqual(E.scriptProps.LAST_RUN, first, 'extra calls within 50 seconds do nothing');
+  assert(runs() === 1 && first !== before);
 });
 t('page actions only through the sign-in door; server-only functions cannot be called', () => {
   throwsMsg(() => E.real.getBootstrap(), /SIGNED_OUT/);         // a direct call has no session

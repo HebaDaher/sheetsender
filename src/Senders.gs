@@ -30,7 +30,7 @@ const SECRET = { CLIENT_SECRET: 'OAUTH_CLIENT_SECRET', TOKEN_PREFIX: 'GMAIL_TOKE
  * "unable to open the file" error when the browser is signed in to several Google accounts at once.
  * Must be listed exactly under "Authorized redirect URIs" of the OAuth client in Google Cloud.
  */
-const OAUTH_CALLBACK_URL = 'https://hebadaher.github.io/sheetsender/callback.html';
+const OAUTH_CALLBACK_URL = 'https://hebadaher.github.io/sheetsender/callback.html'; // earlier versions only
 
 /* ------------------------------------------------------------------ */
 /* Storage helpers                                                      */
@@ -71,8 +71,17 @@ function markAccount_(email, status, error, extra) {
   return acc;
 }
 
+/**
+ * Where Google sends people back after signing in or clicking Allow: the app's own link (/exec). The one-time code
+ * then arrives only in the app itself, in the browser that asked for it — never through another page.
+ * APP_URL is written by Install.command (App.config.gs); this exact address must be an "Authorized redirect URI"
+ * of the OAuth client in Google Cloud.
+ */
 function redirectUri_() {
-  return OAUTH_CALLBACK_URL;
+  if (typeof APP_URL !== 'undefined' && /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(APP_URL))) return String(APP_URL);
+  const url = String(ScriptApp.getService().getUrl() || '');
+  if (/\/exec$/.test(url)) return url;
+  throw new Error('The app link is not known yet. The administrator must run Install.command once more.');
 }
 
 /**
@@ -201,28 +210,6 @@ function startGmailConnect(loginHint) {
  */
 function finishGmailConnect(code, state, error) {
   return completeConnect_({ code: code, state: state, error: error });
-}
-
-/** Older redirect target (the web app itself). Kept so an old Cloud setting still works when only one account is signed in. */
-function oauthCallbackPage_(p) {
-  let ok = false, title, detail;
-  try {
-    const email = completeConnect_(p);
-    ok = true;
-    title = 'Connected: ' + email;
-    detail = 'This Gmail account can now send emails for the app. Close this tab and go back to the app ' +
-      '(Settings > Gmail accounts), then choose this account for a shop and click Test.';
-  } catch (e) {
-    title = 'Not connected';
-    detail = e.message;
-  }
-  const html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>' +
-    'body{font:16px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f6f8;color:#1d2433;margin:0;padding:40px 16px}' +
-    '.c{max-width:560px;margin:0 auto;background:#fff;border:1px solid #dfe3ea;border-radius:12px;padding:24px}' +
-    'h1{font-size:22px;margin:0 0 10px;color:' + (ok ? '#1f7a3a' : '#b42318') + '}a{color:#0f6e5c;font-weight:600}</style></head><body><div class="c">' +
-    '<h1>' + (ok ? '✓ ' : '') + escapeHtml_(title) + '</h1><p>' + escapeHtml_(detail) + '</p>' +
-    '<p><a href="' + escapeHtml_(String(ScriptApp.getService().getUrl() || '')) + '" target="_top">Back to the app</a></p></div></body></html>';
-  return HtmlService.createHtmlOutput(html).setTitle(APP_NAME + ' — Gmail connection');
 }
 
 function completeConnect_(p) {

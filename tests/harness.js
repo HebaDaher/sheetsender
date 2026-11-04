@@ -24,7 +24,8 @@ function makeEnv(srcDir) {
   /* ---------- fake Google OAuth + Gmail ---------- */
   const google = {
     client: { id: '123456789-abcdef.apps.googleusercontent.com', secret: 'GOCSPX-test_secret_123' },
-    redirect: 'https://hebadaher.github.io/sheetsender/callback.html',
+    redirect: 'https://script.google.com/macros/s/DEPLOY123/exec',                  // the app's own link (APP_URL)
+    redirects: ['https://script.google.com/macros/s/DEPLOY123/exec', 'https://hebadaher.github.io/sheetsender/callback.html'], // registered in Cloud
     execUrl: 'https://script.google.com/macros/s/DEPLOY123/exec',
     codes: {},          // code -> {email, scopes}
     refresh: {},        // refresh token -> email (valid)
@@ -89,7 +90,7 @@ function makeEnv(srcDir) {
         if (p.grant_type === 'authorization_code') {
           const c = google.codes[p.code];
           if (!c) return resp(400, { error: 'invalid_grant' });
-          if (p.redirect_uri !== google.redirect) return resp(400, { error: 'redirect_uri_mismatch', error_description: 'Bad redirect' });
+          if (google.redirects.indexOf(p.redirect_uri) === -1) return resp(400, { error: 'redirect_uri_mismatch', error_description: 'Bad redirect' });
           delete google.codes[p.code];
           const rt = 'rt_' + (++google.n);
           google.refresh[rt] = c.email;
@@ -195,9 +196,12 @@ function makeEnv(srcDir) {
     return book;
   }
 
+  const expiry = new Map(); // cache entries expire like Google's (seconds, on the simulated clock)
   const store = (bucket, key) => { bucket[key] = bucket[key] || {}; const b = bucket[key]; return {
     getProperty: k => (k in b ? b[k] : null), setProperty: (k, v) => { b[k] = String(v); }, deleteProperty: k => { delete b[k]; },
-    get: k => (k in b ? b[k] : null), put: (k, v) => { b[k] = String(v); }, remove: k => { delete b[k]; }, getKeys: () => Object.keys(b) }; };
+    get: k => { const ex = expiry.get(b); if (ex && ex[k] && ex[k] <= clock) { delete b[k]; delete ex[k]; } return k in b ? b[k] : null; },
+    put: (k, v, ttl) => { b[k] = String(v); if (!expiry.has(b)) expiry.set(b, {}); expiry.get(b)[k] = clock + 1000 * (ttl || 600); },
+    remove: k => { delete b[k]; }, getKeys: () => Object.keys(b) }; };
   const scriptCache = {};
 
   const ctx = {
@@ -254,13 +258,12 @@ function makeEnv(srcDir) {
   function compile(dir) {
     const files = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].filter(f => fs.existsSync(path.join(dir, f)));
     return files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n') +
+      (fs.existsSync(path.join(dir, 'Workspaces.gs')) ? "\nconst APP_URL = 'https://script.google.com/macros/s/DEPLOY123/exec';\n" : '') +
       (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +
         (fs.existsSync(path.join(dir, 'Workspaces.gs')) ? "const BRIDGE_URL = 'https://script.google.com/macros/s/AKfycbBRIDGE123/exec';\n" : ''));
   }
   vm.createContext(ctx);
-  const code = ['Code.gs', 'Workspaces.gs', 'Senders.gs', 'Sending.gs', 'WhatsAppApi.gs'].filter(f => fs.existsSync(path.join(srcDir, f))).map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n') +
-    (process.env.SF_NO_BRIDGE ? '' : "\nconst BRIDGE_TOKEN_SHA256 = '" + require('crypto').createHash('sha256').update('test-token').digest('hex') + "';\n" +
-      "const BRIDGE_URL = 'https://script.google.com/macros/s/AKfycbBRIDGE123/exec';\n");
+  const code = compile(srcDir);
   vm.runInContext(code, ctx, { filename: 'project.js' });
   void compile;
 

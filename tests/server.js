@@ -38,10 +38,14 @@ function makeRunner() {
 }
 </script>`;
 
-function renderIndex() {
+function renderIndex(query) {
   let html = fs.readFileSync(path.join(SRC, 'Index.html'), 'utf8');
   html = html.replace(/<\?!=\s*include\('(\w+)'\);?\s*\?>/g, (m, n) => fs.readFileSync(path.join(SRC, n + '.html'), 'utf8'));
   html = html.replace(/<\?!=\s*JSON\.stringify\(first \|\| ''\)\s*\?>/, JSON.stringify(FIRST || ''));
+  // like doGet: Google sends people back to the app's own link with ?code=&state=
+  const q = new URLSearchParams(query || '');
+  const oauth = q.get('state') && (q.get('code') || q.get('error')) ? JSON.stringify({ code: q.get('code') || '', state: q.get('state'), error: q.get('error') || '' }) : '';
+  html = html.replace(/<\?!=\s*JSON\.stringify\(oauth \|\| ''\)\s*\?>/, JSON.stringify(oauth));
   if (/<\?/.test(html.replace(/<script>[\s\S]*?<\/script>/g, ''))) throw new Error('unresolved template tag');
   const inject = forced ? '<script>try{localStorage.setItem("sf_session",' + JSON.stringify(E.sessionFor(forced)) + ')}catch(e){}</script>' : '';
   forced = forced && process.env.LOGIN_FLOW ? '' : forced;
@@ -95,5 +99,5 @@ http.createServer((req, res) => {
   }
   if (req.url === '/state') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ sent: E.sent, log: E.tab('Send Log'), contacts: E.tab('Contacts') })); return; }
   res.setHeader('content-type', 'text/html; charset=utf-8');
-  res.end(renderIndex());
+  res.end(renderIndex(req.url.split('?')[1] || ''));
 }).listen(8765, () => console.log('listening 8765'));

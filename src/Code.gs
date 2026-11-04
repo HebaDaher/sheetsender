@@ -82,9 +82,12 @@ const OPTOUT_WORDS = ['yes', 'y', 'true', '1', 'opted out', 'opted-out', 'opt ou
 
 function doGet(e) {
   const p = (e && e.parameter) || {};
-  if (p.state && (p.code || p.error)) return oauthCallbackPage_(p); // Google sends people back here after "Allow"
   const page = HtmlService.createTemplateFromFile('Index');
   page.first = /^[0-9a-f]{64}$/.test(String(p.first || '')) ? String(p.first) : '';
+  // Google sends people back here after signing in / clicking Allow. The page itself finishes, after checking that
+  // THIS browser started it (so nobody can push their own sign-in or connection into someone else's browser).
+  page.oauth = (p.state && (p.code || p.error)) ? JSON.stringify({
+    code: String(p.code || '').slice(0, 512), state: String(p.state).slice(0, 80), error: String(p.error || '').slice(0, 80) }) : '';
   return page
     .evaluate()
     .setTitle(APP_NAME)

@@ -50,16 +50,27 @@ else
   echo "$ID" > .deployment-id
 fi
 
+# The app's own link is where Google sends people back after "Sign in with Google" / "Allow".
+URL="https://script.google.com/macros/s/$ID/exec"
+CFG="const APP_URL = '$URL'; // made by Install.command: Google sends people back here after signing in"
+if [ "$(cat src/App.config.gs 2>/dev/null)" != "$CFG" ]; then
+  echo "$CFG" > src/App.config.gs
+  $CLASP push --force >/dev/null && $CLASP create-deployment --deploymentId "$ID" --description "app link $(date +%Y-%m-%d)" >/dev/null \
+    || fail "Saving the app link failed. Double-click Install.command again."
+fi
+
 if [ -f "$HOME/Library/LaunchAgents/com.shopfollowups.whatsapp.plist" ]; then
   mkdir -p "$HOME/.shop-followups/app" && cp whatsapp/whatsapp_sender.py whatsapp/whatsapp_helper.py "$HOME/.shop-followups/app/" 2>/dev/null
   launchctl kickstart -k "gui/$(id -u)/com.shopfollowups.whatsapp" 2>/dev/null
 fi
 
-URL="https://script.google.com/macros/s/$ID/exec"
 echo "$URL" > "App link.txt"
 say "Uploaded and published."
 echo "App link (also saved in 'App link.txt'):"
 echo "  $URL"
+echo
+echo "Google Cloud check (once): Google Auth Platform -> Clients -> your client -> 'Authorized redirect URIs'"
+echo "must include exactly:  $URL"
 echo
 if [ ! -f .setup-shown ]; then
   echo "LAST STEP: the script editor opens in your browser."

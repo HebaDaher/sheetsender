@@ -28,7 +28,7 @@ try:
             u = urllib.parse.urlparse(route.request.url); q = dict(urllib.parse.parse_qsl(u.query))
             GOOGLE['asked'] = q
             code = get('/consent?email=sara%40gmail.com')
-            route.fulfill(status=302, headers={'location': 'http://127.0.0.1:8765/pages/callback.html?' + urllib.parse.urlencode({'code': code, 'state': q['state']})})
+            route.fulfill(status=302, headers={'location': 'http://127.0.0.1:8765/?' + urllib.parse.urlencode({'code': code, 'state': q['state']})})
         ctx.route('https://accounts.google.com/**', fake_google)
         page = ctx.new_page()
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
@@ -40,15 +40,10 @@ try:
         page.wait_for_selector('#loginBtn')
         check('Sign in with Google' in page.inner_text('main'), 'link opens straight to "Sign in with Google" (nothing to install or allow)')
         page.screenshot(path=SHOTS + '/m0-login.png')
-        with page.expect_popup() as pop:
-            page.click('#loginBtn')
-        popup = pop.value
+        page.wait_for_selector('a#loginBtn')
+        page.click('#loginBtn')  # Google opens in this tab and sends the person back to the app
         page.wait_for_selector('#wCreate', timeout=15000)
         check(GOOGLE['asked'] and GOOGLE['asked'].get('scope') == 'openid email', 'Google is asked only for the email: ' + str(GOOGLE['asked'] and GOOGLE['asked'].get('scope')))
-        if not popup.is_closed():
-            try: popup.wait_for_event('close', timeout=10000)
-            except Exception: pass
-        check(popup.is_closed(), 'the Google window closes by itself')
 
         # 1. A new person opens the link
         check('Create my workspace' in page.inner_text('main'), 'new person: welcome with "Create my workspace"')

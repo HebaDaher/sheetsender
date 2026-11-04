@@ -123,6 +123,7 @@
 
   /* ---------------- Boot ---------------- */
   function start() {
+    if (window.SF_OAUTH && handleOAuthReturn()) return;
     if (window.SF_FIRST && !getSession()) {
       var first = window.SF_FIRST; window.SF_FIRST = '';
       withBusy('Signing you in…', rawCall('finishFirstLogin', [first])).then(function (r) { setSession(r.session); start(); });
@@ -136,43 +137,80 @@
   }
 
   /* ---------- Sign in with Google (only the email address is shared) ---------- */
-  var pendingLogin = null;
+  /*
+   * Google sends the person back to the app's own link with a one-time code. Before leaving, this page notes in
+   * its own storage which sign-in it started; on the way back the code is used only if it matches, so a sign-in
+   * started anywhere else is never accepted.
+   */
+  var PENDING_KEY = 'sf_pending';
+  function setPending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); return true; } catch (e) { return false; } }
+  function takePending() {
+    try { var v = JSON.parse(localStorage.getItem(PENDING_KEY) || 'null'); localStorage.removeItem(PENDING_KEY); return v; } catch (e) { return null; }
+  }
+  function stateOf(url) { var m = String(url).match(/[?&]state=([^&]+)/); return m ? decodeURIComponent(m[1]) : ''; }
+  function clearUrl() { try { google.script.history.replace(null, {}, ''); } catch (e) { /* not available */ } }
+  /** A real link (the click itself opens Google in this tab, which browsers allow). */
+  function googleLink(id, url, label, kind, cls) {
+    return '<a class="' + (cls || 'btn primary big') + '" id="' + id + '" href="' + esc(url) + '" target="_top" rel="noopener" data-kind="' + kind + '" data-state="' + esc(stateOf(url)) + '">' + label + '</a>';
+  }
+  function bindGoogleLink(id) {
+    var a = $(id); if (!a) return;
+    a.addEventListener('click', function (ev) {
+      if (!setPending({ kind: a.getAttribute('data-kind'), state: a.getAttribute('data-state'), at: Date.now() })) {
+        ev.preventDefault();
+        showBanner('error', 'This browser blocks the storage the app needs to sign you in safely. Allow cookies and site data for script.google.com (or use another browser), then try again.', true);
+      }
+    });
+  }
+
   function renderLogin(message) {
     stopAutoRefresh();
     $('who').innerHTML = '';
     $('app').innerHTML = '<div class="card login-card"><div class="logo-big">✉</div><h1>Shop Follow-ups</h1>' +
       '<p class="muted">Follow up with the people interested in your shops — by email and WhatsApp.</p>' +
       (message ? '<div class="notice warn">' + esc(message) + '</div>' : '') +
-      '<button class="btn primary big gbtn" id="loginBtn"><span class="g">G</span> Sign in with Google</button>' +
+      '<div id="loginSlot"><button class="btn primary big gbtn" disabled><span class="g">G</span> Sign in with Google</button></div>' +
       '<p class="small muted" style="margin-top:12px">Google asks only to share your email address with the app. Several Google accounts in this browser? Just choose the one you want.</p>' +
-      '<div id="loginPaste" class="hidden" style="margin-top:14px;text-align:left"><label class="field"><span>Sign-in code (only if this page did not continue by itself)</span>' +
-      '<div class="row"><input type="text" id="loginCode" placeholder="Paste the code from the Google tab"><button class="btn small" id="loginCodeGo">Continue</button></div></label></div>' +
       '<p class="small muted" style="margin-top:18px"><a href="https://hebadaher.github.io/sheetsender/start.html" target="_blank" rel="noopener">How it works</a> · ' +
       '<a href="https://hebadaher.github.io/sheetsender/privacy.html" target="_blank" rel="noopener">Privacy</a></p></div>';
-    $('loginBtn').addEventListener('click', login);
-    $('loginCodeGo').addEventListener('click', function () {
-      var d = null;
-      try { d = JSON.parse(atob(($('loginCode').value || '').trim().replace(/-/g, '+').replace(/_/g, '/'))); } catch (e) { d = null; }
-      if (!d || !d.state || (!d.code && !d.error)) { showBanner('error', 'That is not a valid code. Copy the whole code from the Google tab.'); return; }
-      finishLogin(d.code, d.state, d.error);
-    });
-  }
-  function login() {
-    var win = window.open('', '_blank', 'width=520,height=680');
     rawCall('startLogin', []).then(function (url) {
-      var st = (url.match(/[?&]state=([^&]+)/) || [])[1];
-      pendingLogin = { state: st ? decodeURIComponent(st) : '' };
-      if (win) win.location.href = url; else { window.open(url, '_blank'); }
-      $('loginPaste').classList.remove('hidden');
-    }, function (e) { if (win) win.close(); showBanner('error', errText(e)); });
-  }
-  function finishLogin(code, state, error) {
-    if (pendingLogin && pendingLogin.state && state !== pendingLogin.state) return;
-    pendingLogin = null;
-    withBusy('Signing in…', rawCall('finishLogin', [code || '', state || '', error || ''])).then(function (r) {
-      setSession(r.session); hideBanner(); start();
+      if (!$('loginSlot')) return;
+      $('loginSlot').innerHTML = googleLink('loginBtn', url, '<span class="g">G</span> Sign in with Google', 'login', 'btn primary big gbtn');
+      bindGoogleLink('loginBtn');
+    }, function (e) {
+      if ($('loginSlot')) $('loginSlot').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
     });
   }
+
+  /** Back from Google: finish what THIS browser started. */
+  function handleOAuthReturn() {
+    var o = null; try { o = JSON.parse(window.SF_OAUTH); } catch (e) { o = null; }
+    window.SF_OAUTH = ''; clearUrl();
+    var p = takePending();
+    if (!o) return false;
+    if (!p || p.state !== o.state || Date.now() - Number(p.at || 0) > 15 * 60000) {
+      showBanner('error', 'That Google page was not opened from this browser (or it took too long), so it was ignored. Please try again.', true);
+      return false;
+    }
+    if (p.kind === 'login') {
+      withBusy('Signing in…', rawCall('finishLogin', [o.code || '', o.state || '', o.error || ''])).then(function (r) {
+        setSession(r.session); hideBanner(); start();
+      });
+      return true;
+    }
+    if (p.kind === 'gmail') {
+      if (!getSession()) { renderLogin('Sign in again, then connect the Gmail account once more.'); return true; }
+      withBusy('Finishing the Gmail connection…', call('finishGmailConnect', o.code || '', o.state || '', o.error || '')).then(function (email) {
+        return call('getBootstrap').then(function (b) {
+          S.boot = b; drawWho(); renderSettings();
+          showBanner('success', '✓ Connected: ' + email + '. Now choose it for a shop below and click “Send test”.', true);
+        });
+      });
+      return true;
+    }
+    return false;
+  }
+
   function signOut() {
     if (!confirm('Sign out of Shop Follow-ups on this browser?')) return;
     setSession(''); S.boot = null; renderLogin();
@@ -1755,7 +1793,7 @@
     html += '<div class="card"><div class="row"><h2 style="margin:0">Gmail accounts</h2><span class="spacer"></span>' +
       '<button class="btn small" id="refreshSet">↻ Refresh</button>' +
       '<button class="btn primary" id="connectNew"' + (st.clientReady ? '' : ' disabled') + '>+ Connect a Gmail account</button></div>' +
-      '<p class="muted" style="margin-top:8px">A Google page opens in a new tab. Sign in as the shop\'s Gmail, tick “Send email on your behalf” and click Allow. ' +
+      '<p class="muted" style="margin-top:8px">Google\'s page opens. Sign in as the shop\'s Gmail, tick “Send email on your behalf” and click Allow. ' +
       'The app can only send email; it cannot read anyone\'s inbox. You can connect as many Gmail accounts as you need.</p>';
     if (!st.accounts.length) html += '<p class="muted">No Gmail accounts connected yet.</p>';
     else {
@@ -1771,8 +1809,7 @@
       });
       html += '</table></div>';
     }
-    html += '<div id="pasteBox" class="hidden" style="margin-top:12px"><label class="field"><span>Connection code (only if this page did not finish by itself)</span>' +
-      '<div class="row"><input type="text" id="pasteCode" placeholder="Paste the code from the Google tab"><button class="btn small" id="pasteGo">Finish connecting</button></div></label></div>';
+    html += '<div id="connectGo"></div>';
     html += '</div>';
 
     // Shops
@@ -1855,8 +1892,6 @@
       });
     });
     on('refreshSet', renderSettings);
-    on('pasteGo', pasteConnectionCode);
-    if (pendingConnect) $('pasteBox').classList.remove('hidden');
     on('connectNew', function () { connectAccount(''); });
     each('data-recon', function (em) { connectAccount(em); });
     each('data-test', function (em) {
@@ -1978,51 +2013,19 @@
       }).join('') + '</ul></details>' : '');
   }
 
-  // Result of "Connect": the callback page sends {code, state} back to this tab (postMessage),
-  // or the person pastes the connection code it shows. This tab then finishes in the owner's session.
-  var pendingConnect = null;
-  window.addEventListener('message', function (ev) {
-    var d = ev.data;
-    if (!d || d.type !== 'sf-oauth') return;
-    if (pendingLogin && d.state === pendingLogin.state) return finishLogin(d.code, d.state, d.error);
-    if (!pendingConnect) return;
-    finishConnect(d.code, d.state, d.error);
-  });
-
-  function finishConnect(code, state, error) {
-    if (pendingConnect && pendingConnect.state && state !== pendingConnect.state) return;
-    pendingConnect = null;
-    withBusy('Finishing the connection…', call('finishGmailConnect', code || '', state || '', error || '')).then(function (email) {
-      showBanner('success', '✓ Connected: ' + email + '. Now click “Send test” next to it.', true);
-      renderSettings();
-    });
-  }
-
+  /** Connect a Gmail account: Google's page opens in this tab and comes back here to finish. */
   function connectAccount(hint) {
-    // Open the tab right away (inside the click) so the browser does not block it, then send it to Google.
-    var win = window.open('', '_blank');
-    call('startGmailConnect', hint).then(function (url) {
-      var state = (url.match(/[?&]state=([^&]+)/) || [])[1];
-      pendingConnect = { state: state ? decodeURIComponent(state) : '' };
-      if (win) { win.location.href = url; }
-      else { showBanner('error', 'Your browser blocked the new tab. Allow pop-ups for this page and click Connect again.'); return; }
-      showBanner('success', 'Finish in the new tab: choose' + (hint ? ' ' + hint : ' the shop\'s Gmail') +
-        ', click Advanced → Go to Shop Follow-ups, tick “Send email on your behalf”, click Continue. ' +
-        'This page then finishes by itself. If it does not, copy the connection code from that tab and paste it below.', true);
-      var box = $('pasteBox'); if (box) box.classList.remove('hidden');
-    }, function (e) {
-      if (win) win.close();
-      showBanner('error', errText(e));
+    withBusy('Preparing…', call('startGmailConnect', hint)).then(function (url) {
+      var box = $('connectGo'); if (!box) return;
+      box.innerHTML = '<div class="sched" style="margin-top:12px"><b>Connect ' + esc(hint || 'a Gmail account') + '</b>' +
+        '<ol class="small" style="margin:6px 0 10px;padding-left:20px;line-height:1.6"><li>Click the button: Google opens in this tab.</li>' +
+        '<li>Choose ' + (hint ? esc(hint) : 'the shop’s Gmail') + '. Google says it hasn’t verified the app: click <b>Advanced</b> → <b>Go to Shop Follow-ups</b>.</li>' +
+        '<li>Tick <b>Send email on your behalf</b> and click <b>Continue</b>. You come back here and it is connected.</li></ol>' +
+        googleLink('connectGoBtn', url, 'Continue to Google →', 'gmail', 'btn primary') + ' <button class="btn" id="connectCancel">Cancel</button></div>';
+      bindGoogleLink('connectGoBtn');
+      $('connectCancel').addEventListener('click', function () { box.innerHTML = ''; });
+      box.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
-  }
-
-  function pasteConnectionCode() {
-    var raw = ($('pasteCode').value || '').trim();
-    var d = null;
-    try { d = JSON.parse(atob(raw.replace(/-/g, '+').replace(/_/g, '/'))); } catch (e) { d = null; }
-    if (!d || (!d.code && !d.error) || !d.state) { showBanner('error', 'That is not a valid connection code. Copy the whole code from the Google tab and try again.'); return; }
-    pendingConnect = { state: d.state };
-    finishConnect(d.code, d.state, d.error);
   }
 
 

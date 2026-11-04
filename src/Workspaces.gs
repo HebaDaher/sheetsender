@@ -56,7 +56,7 @@ function sp_() {
       if (IN_LOCK) { const f = props.getProperty(k); memo[k] = f; put(k, f === null ? NONE : f, 21600); return f; } // exact inside a lock
       if (Object.prototype.hasOwnProperty.call(memo, k)) return memo[k];
       let v = cache.get(ck(k));
-      if (v === null || v === undefined) { v = props.getProperty(k); put(k, v === null ? NONE : v, 30); }
+      if (v === null || v === undefined) { v = props.getProperty(k); put(k, v === null ? NONE : v, 10); }
       else if (v === NONE) v = null;
       memo[k] = v;
       return v;
@@ -78,8 +78,22 @@ let CURRENT_EMAIL = ''; // set only by api() from a valid session
 
 function sessionKey_() {
   let k = sp_().getProperty('SESSION_KEY');
-  if (!k) { k = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); sp_().setProperty('SESSION_KEY', k); }
+  if (!k) {
+    k = withLock_(function () { // the very first sign-in: made once, even if two people sign in at the same moment
+      let x = sp_().getProperty('SESSION_KEY');
+      if (!x) { x = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); sp_().setProperty('SESSION_KEY', x); }
+      return x;
+    });
+  }
   return k;
+}
+/** At most `max` times a minute for everyone together (protects the daily limits from anyone calling in a loop). */
+function rateLimit_(name, max) {
+  const cache = CacheService.getScriptCache();
+  const key = 'RL_' + name + '_' + Math.floor(Date.now() / 60000);
+  const n = Number(cache.get(key) || 0) + 1;
+  cache.put(key, String(n), 120);
+  if (n > max) throw new Error('Too many tries right now. Wait a minute and try again.');
 }
 function b64u_(text) { return Utilities.base64EncodeWebSafe(String(text), Utilities.Charset.UTF_8).replace(/=+$/, ''); }
 function sign_(text) {
@@ -141,6 +155,7 @@ function apiActions_() {
 /** "Sign in with Google": Google's page asks only to share the email address (no warning screen). */
 function startLogin() {
   SP_ = null;
+  rateLimit_('login', 60);
   migrate_();
   const client = oauthClient_();
   const state = Utilities.getUuid();
@@ -170,6 +185,7 @@ function finishLogin(code, state, error) {
   const key = 'LOGIN_' + String(state || '');
   if (!cache.get(key)) throw new Error('This sign-in link expired or was already used. Click "Sign in with Google" again.');
   cache.remove(key);
+  rateLimit_('loginfinish', 60);
   if (error) throw new Error(error === 'access_denied' ? 'Sign-in was cancelled. Click "Sign in with Google" again.' : 'Google returned an error: ' + error);
   const client = oauthClient_();
   const res = UrlFetchApp.fetch(OAUTH.TOKEN_URL, {

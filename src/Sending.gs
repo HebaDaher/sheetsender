@@ -17,6 +17,10 @@ function processQueue() {
   SP_ = null; CURRENT_EMAIL = '';
   const me = norm_(Session.getEffectiveUser().getEmail());
   if (!me || me !== adminEmail_()) return; // triggers left by the earlier version (one per person) do nothing now
+  // Anyone can call public functions of a web app; at most one real run every 50 seconds, whoever calls.
+  const cache = CacheService.getScriptCache();
+  if (cache.get('PQ_RAN')) return;
+  cache.put('PQ_RAN', '1', 50);
   migrate_();
   sp_().setProperty('LAST_RUN', nowIso_());
   const now = Date.now();
