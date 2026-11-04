@@ -47,6 +47,18 @@ try:
         check('Sara Shops' in page.inner_text('#who') and page.query_selector('#openSettings'), 'top bar: workspace name + Settings')
         check('Emails may not be going out' not in page.inner_text('main'), 'no scary sender warning on a new workspace')
 
+        # Add a shop and rename one right on the screens (no Settings needed)
+        page.click('#addShopBtn'); page.fill('#newShopName', 'Temp Shop'); page.press('#newShopName', 'Enter')
+        page.wait_for_selector('.shop-card >> text=Temp Shop')
+        check(True, '"+ Add a shop" on the home page works')
+        page.click('.shop-card >> text=Temp Shop'); page.wait_for_selector('#shopRename')
+        page.click('#shopRename'); page.fill('#shopNewName', 'Sara Market'); page.click('#shopNameSave')
+        page.wait_for_selector('h1 >> text=Sara Market')
+        check('Renamed to Sara Market' in page.inner_text('#banner'), 'shop renamed from its own page')
+        page.screenshot(path=SHOTS + '/m1b-rename.png')
+        page.click('#backHome'); page.wait_for_selector('.shop-card >> text=Sara Market')
+        check('Temp Shop' not in page.inner_text('main'), 'home shows the new name')
+
         # 2. Settings: add a shop, a person, the WhatsApp Business API
         page.click('#openSettings'); page.wait_for_selector('#shopAdd')
         txt = page.inner_text('main')
@@ -54,7 +66,7 @@ try:
         check('Share the app' in txt and 'People who can use this workspace' in txt and 'WhatsApp Business API' in txt, 'sections: share, people, WhatsApp API')
         page.click('#shopAdd'); page.fill('#sfName', 'Sara Cafe'); page.fill('#sfReply', 'sara@gmail.com'); page.click('#sfSave')
         page.wait_for_selector('text=Added Sara Cafe')
-        page.wait_for_selector('[data-shopedit] >> nth=1')
+        page.wait_for_selector('[data-shopedit] >> nth=2')
         check('Sara Cafe' in page.inner_text('main'), 'shop added from Settings')
         page.fill('#mEmail', 'dad@gmail.com'); page.click('#mAdd')
         page.wait_for_selector('[data-mremove="dad@gmail.com"]')
@@ -72,6 +84,7 @@ try:
         # 3. Import people into Sara Bakery
         page.click('#setBack'); page.wait_for_selector('.shop-card')
         page.click('.shop-card >> text=Sara Bakery'); page.wait_for_selector('#drop')
+        check(page.query_selector('#shopRename') is not None, 'owner sees Rename on the shop page')
         page.set_input_files('#file', os.path.join(HERE, '..', 'sample-contacts.xlsx'))
         page.wait_for_selector('#doImport'); page.click('#doImport'); page.wait_for_selector('text=Last import')
 

@@ -212,9 +212,8 @@
       html += '<div class="notice info"><b>Finish setup:</b> ' + esc(b.settingsNeeded) + ' <button class="link" id="goSettings">Open Settings</button></div>';
     }
     b.setupProblems.forEach(function (p) { html += '<div class="notice warn">' + esc(p) + '</div>'; });
-    if (!b.shops.length) {
-      html += '<div class="card"><h2>No shops yet</h2><p>' + (b.isOwner ? 'Add your shops in <b>⚙ Settings → Shops</b>.' :
-        'Ask ' + esc(b.owner) + ' (the owner of this workspace) to add shops in ⚙ Settings → Shops.') + '</p></div>';
+    if (!b.shops.length && !b.isOwner) {
+      html += '<div class="card"><h2>No shops yet</h2><p>Ask ' + esc(b.owner) + ' (the owner of this workspace) to add shops.</p></div>';
     } else {
       html += '<div class="shops">';
       b.shops.forEach(function (s) {
@@ -224,6 +223,8 @@
           '<div style="margin-top:10px">' + (s.senderOk ? badge('ok', '✓ Ready to send') : badge('bad', '⚠ Sending Gmail not connected')) + '</div>' +
           '</button>';
       });
+      if (b.isOwner) html += '<div class="shop-card add-shop" id="addShopCard"><button class="link" id="addShopBtn" style="font-size:17px;font-weight:600">+ Add a shop</button>' +
+        '<div class="muted small">Give it a name; choose its Gmail after.</div></div>';
       html += '</div>';
     }
     if (b.isOwner) {
@@ -234,9 +235,57 @@
     }
     $('app').innerHTML = html;
     if ($('goSettings')) $('goSettings').addEventListener('click', renderSettings);
+    if ($('addShopBtn')) $('addShopBtn').addEventListener('click', addShopInline);
     Array.prototype.forEach.call(document.querySelectorAll('[data-shop]'), function (el) {
       el.addEventListener('click', function () { openShop(el.getAttribute('data-shop')); });
     });
+  }
+
+  /** Home page: "+ Add a shop" turns into a small form right there. */
+  function addShopInline() {
+    var card = $('addShopCard');
+    card.innerHTML = '<label class="field" style="margin:0"><span>New shop name</span><input type="text" id="newShopName" maxlength="80" placeholder="e.g. Al Barsha Shop"></label>' +
+      '<div class="row" style="margin-top:8px"><button class="btn primary small" id="newShopSave">Add</button><button class="btn small" id="newShopCancel">Cancel</button></div>';
+    $('newShopName').focus();
+    var save = function () {
+      var name = $('newShopName').value.trim();
+      if (!name) { showBanner('error', 'Write the shop name.'); $('newShopName').focus(); return; }
+      withBusy('Adding the shop…', call('saveShop', { shop_name: name })).then(function (shop) {
+        return call('getBootstrap').then(function (b) {
+          S.boot = b;
+          showBanner('success', 'Added ' + shop.shop_name + '. Next: choose which Gmail sends for it (⚙ Settings → Shops).', true);
+          renderHome();
+        });
+      });
+    };
+    $('newShopSave').addEventListener('click', save);
+    $('newShopName').addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); if (e.key === 'Escape') renderHome(); });
+    $('newShopCancel').addEventListener('click', renderHome);
+  }
+
+  /** Shop page: "✎ Rename" edits the name right in the title. */
+  function renameShopInline() {
+    var shop = S.data.shop, box = $('shopTitle');
+    box.innerHTML = '<div class="row" style="margin:6px 0 10px"><input type="text" id="shopNewName" maxlength="80" value="' + esc(shop.shop_name) + '" style="max-width:360px;font-size:20px;font-weight:600">' +
+      '<button class="btn primary small" id="shopNameSave">Save</button><button class="btn small" id="shopNameCancel">Cancel</button></div>';
+    var inp = $('shopNewName'); inp.focus(); inp.select();
+    var save = function () {
+      var name = inp.value.trim();
+      if (!name) { showBanner('error', 'Write the shop name.'); inp.focus(); return; }
+      if (name === shop.shop_name) { renderShop(); return; }
+      var senderName = !shop.sender_name || shop.sender_name === shop.shop_name ? name : shop.sender_name; // keeps a custom sender name
+      withBusy('Saving…', call('saveShop', { shop_id: shop.shop_id, shop_name: name, sender_name: senderName, reply_to: shop.reply_to,
+        country_code: shop.country_code, active: true })).then(function () {
+        return reloadShop().then(function () {
+          S.boot.shops.forEach(function (x) { if (x.shop_id === shop.shop_id) x.shop_name = name; });
+          showBanner('success', 'Renamed to ' + name + '. Emails use the new name for {shop_name} from now on.');
+          renderShop();
+        });
+      });
+    };
+    $('shopNameSave').addEventListener('click', save);
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); if (e.key === 'Escape') renderShop(); });
+    $('shopNameCancel').addEventListener('click', renderShop);
   }
 
   function openShop(shopId, view) {
@@ -271,11 +320,13 @@
       ['whatsapp', '', 'WhatsApp'], ['templates', '', 'Message templates']
     ];
     var html = '<button class="link" id="backHome">← All shops</button>';
-    html += '<h1>' + esc(shop.shop_name || shop.shop_id) + '</h1>';
+    html += '<div id="shopTitle"><h1 style="display:inline-block;margin-right:10px">' + esc(shop.shop_name || shop.shop_id) + '</h1>' +
+      (S.boot.isOwner ? '<button class="link" id="shopRename">✎ Rename</button>' : '') + '</div>';
     html += '<p class="muted">' + (shop.sender_email
       ? 'Emails are sent from the Gmail account <b>' + esc(shop.sender_email) + '</b>' + (shop.sender_name ? ' as “' + esc(shop.sender_name) + '”' : '')
       : 'No sending Gmail account is chosen for this shop yet.') + '</p>';
-    if (!shop.senderOk) html += '<div class="notice bad"><b>This shop cannot send emails yet.</b>\n' + esc(shop.senderProblem) + '</div>';
+    if (!shop.senderOk) html += '<div class="notice bad"><b>This shop cannot send emails yet.</b>\n' + esc(shop.senderProblem) +
+      (S.boot.isOwner ? '<div style="margin-top:8px"><button class="btn small primary" id="fixSender">Choose / connect a Gmail →</button></div>' : '') + '</div>';
     html += '<div id="engineBox">' + engineNotice() + '</div>';
     html += '<nav class="tabs">';
     tabs.forEach(function (t) {
@@ -285,6 +336,8 @@
     html += '</nav><section id="view"></section>';
     $('app').innerHTML = html;
     $('backHome').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(useBoot); renderHome(); });
+    if ($('shopRename')) $('shopRename').addEventListener('click', renameShopInline);
+    if ($('fixSender')) $('fixSender').addEventListener('click', function () { hideBanner(); renderSettings(); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-view]'), function (el) {
       el.addEventListener('click', function () { S.view = el.getAttribute('data-view'); hideBanner(); renderShop(); });
     });
