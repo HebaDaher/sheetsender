@@ -1534,9 +1534,9 @@
     var m = waMode();
     var sub = S.waSub === 'manual' ? 'manual' : m;
     var aud = audienceHtml('wh');
-    return subnavHtml([['mac', 'From a Mac', 'data-wamode="mac"'], ['api', 'Business API', 'data-wamode="api"'], ['manual', 'One by one', 'data-wasub="manual"']], sub) +
-      '<p class="muted small sub-note">' + (sub === 'mac' ? 'Automatic · free · your normal WhatsApp · the Mac must be on' : sub === 'api' ? 'Automatic · paid to Meta per message · works with every laptop off' :
-        'Opens WhatsApp with the message written; you press Send.') + '</p>' +
+    return subnavHtml([['mac', 'Normal WhatsApp', 'data-wamode="mac"'], ['api', 'Business API', 'data-wamode="api"'], ['manual', 'One by one', 'data-wasub="manual"']], sub) +
+      '<p class="muted small sub-note">' + (sub === 'mac' ? 'Your normal WhatsApp number · free · sends automatically from a Mac that stays on' : sub === 'api' ? 'A separate Meta business number · paid per message · works with every laptop off' :
+        'Your normal WhatsApp on a phone or computer · it opens with the message written, you press Send') + '</p>' +
       (aud ? '<div class="card">' + aud + '</div>' : '');
   }
   function bindWaMode() {
@@ -1692,7 +1692,7 @@
       a.mediaId = tpls.length ? (tpls[0].media_id || '') : '';
     }
     if (a.mediaId && !mediaById(a.mediaId)) a.mediaId = '';
-    var html = '<div class="card"><h2>From a Mac (free)</h2>' +
+    var html = '<div class="card"><h2>Normal WhatsApp — sent from a Mac (free)</h2>' +
       helpHtml('<p>Write the message once with the person\'s name, choose the schedule and press <b>Start sending</b>. The WhatsApp Sender on the Mac sends it to each person by itself, and you can follow it here.</p>' +
         '<p>WhatsApp does not allow automatic sending from a normal number. Going slowly lowers the risk, but WhatsApp can still block the number, ' +
         'especially if people report it. Only people who agreed to be contacted are included.</p>') +

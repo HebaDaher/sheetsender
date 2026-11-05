@@ -180,7 +180,7 @@ try:
         rp = SHOTS + '/x-results.json'; json.dump(res, open(rp, 'w'))
         page.set_input_files('#waResults', rp); page.wait_for_selector('text=Results saved: 3 sent')
         check(True, 'results uploaded in the app')
-        page.wait_for_selector('#waJob')
+        page.wait_for_selector('#waJob', state='attached')
         page.screenshot(path=SHOTS + '/7-whatsapp.png', full_page=True)
         page.click('[data-wasub="manual"]')
         with page.expect_popup() as pop:
