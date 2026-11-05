@@ -496,22 +496,23 @@
       ['contacts', '1', 'Contacts'], ['send', '2', 'Send emails'], ['progress', '3', 'Progress'],
       ['whatsapp', '', 'WhatsApp'], ['templates', '', 'Message templates']
     ];
-    var html = '<button class="link" id="backHome">← All shops</button>';
-    html += '<div id="shopTitle"><h1 style="display:inline-block;margin-right:10px">' + esc(shop.shop_name || shop.shop_id) + '</h1>' +
-      (S.boot.isOwner ? '<button class="link" id="shopRename">✎ Rename</button>' : '') + '</div>';
-    html += '<p class="muted">' + (shop.sender_email
+    var html = '<div class="shop-head"><button class="link" id="backHome">← All shops</button>';
+    html += '<div id="shopTitle"><h1>' + esc(shop.shop_name || shop.shop_id) + '</h1>' +
+      (S.boot.isOwner ? '<button class="link small" id="shopRename">✎ Rename</button>' : '') + '</div>';
+    html += '<p class="muted small shop-sub">' + (shop.sender_email
       ? 'Emails are sent from the Gmail account <b>' + esc(shop.sender_email) + '</b>' + (shop.sender_name ? ' as “' + esc(shop.sender_name) + '”' : '')
-      : 'No sending Gmail account is chosen for this shop yet.') + '</p>';
+      : 'No sending Gmail account is chosen for this shop yet.') + '</p></div>';
     if (!shop.senderOk) html += '<div class="notice bad"><b>This shop cannot send emails yet.</b>\n' + esc(shop.senderProblem) +
       (S.boot.isOwner ? '<div style="margin-top:8px"><button class="btn small primary" id="fixSender">Choose / connect a Gmail →</button></div>' : '') + '</div>';
     html += '<div id="engineBox">' + engineNotice() + '</div>';
-    html += '<nav class="tabs">';
-    tabs.forEach(function (t, i) {
-      if (i === 3) html += '<span class="tab-sep" aria-hidden="true"></span>';
-      html += '<button class="tab' + (S.view === t[0] ? ' active' : '') + '" data-view="' + t[0] + '"' + (S.view === t[0] ? ' aria-current="page"' : '') + '>' +
-        (t[1] ? '<span class="num">' + t[1] + '</span>' : '') + esc(t[2]) + '</button>';
+    html += '<nav class="tabs" aria-label="Shop pages">';
+    tabs.forEach(function (t) {
+      html += '<button class="tab' + (S.view === t[0] ? ' active' : '') + '" data-view="' + t[0] + '"' + (S.view === t[0] ? ' aria-current="page"' : '') + '>' + esc(t[2]) + '</button>';
     });
-    html += '</nav><p class="tabs-help">Emails: <b>1 Contacts</b> → <b>2 Send emails</b> → <b>3 Progress</b>. WhatsApp and Message templates can be used at any time.</p><section id="view"></section>';
+    var cur = tabs.filter(function (t) { return t[0] === S.view; })[0];
+    html += '</nav><h2 class="page-title">' + esc(cur ? cur[2] : '') + '</h2>';
+    if (S.view === 'contacts' || S.view === 'send' || S.view === 'progress') html += '<ol class="stepbar" id="stepbar" aria-label="Steps for sending emails"></ol>';
+    html += '<section id="view"></section>';
     $('app').innerHTML = html;
     $('backHome').addEventListener('click', function () {
       hideBanner(); renderHome();
@@ -523,6 +524,27 @@
       el.addEventListener('click', function () { S.view = el.getAttribute('data-view'); hideBanner(); renderShop(); });
     });
     ({ contacts: viewContacts, send: viewSend, progress: viewProgress, whatsapp: viewWhatsApp, templates: viewTemplates })[S.view]();
+    updateStepbar();
+  }
+
+  /* Email sending steps: Contacts → Write → Check & send → Progress (display + quick links). */
+  function updateStepbar() {
+    var bar = $('stepbar'); if (!bar) return;
+    var box = $('reviewBox');
+    var now = S.view === 'contacts' ? 1 : S.view === 'progress' ? 4 : (box && box.innerHTML ? 3 : 2);
+    var steps = [['contacts', 'Contacts'], ['send', 'Write email'], ['send', 'Check & send'], ['progress', 'Progress']];
+    bar.innerHTML = steps.map(function (st, i) {
+      var n = i + 1, cls = n < now ? 'done' : n === now ? 'current' : '';
+      return '<li class="' + cls + '"' + (n === now ? ' aria-current="step"' : '') + '><button type="button" data-step="' + st[0] + '">' +
+        '<span class="dot">' + (n < now ? '✓' : n) + '</span><span class="lbl">' + st[1] + '</span></button></li>';
+    }).join('');
+    Array.prototype.forEach.call(bar.querySelectorAll('[data-step]'), function (b) {
+      b.addEventListener('click', function () {
+        var v = b.getAttribute('data-step');
+        if (v === S.view) { if (v === 'send' && b.textContent.indexOf('Check') !== -1 && $('sReview')) $('sReview').click(); return; }
+        S.view = v; hideBanner(); renderShop();
+      });
+    });
   }
 
   /* =================================================================== */
@@ -532,12 +554,12 @@
     var html = '';
     if (!S.upload) {
       html += '<div class="card"><h2>Upload this shop’s Excel files</h2>' +
-        '<p class="muted">Each file should have one row per person and a header row (for example: Name, Email, Phone, Consent). ' +
-        'You can choose several files at once. Every file is kept in the <b>Upload history</b> below, so you can send it a different message later without uploading it again. ' +
-        'A person in several files is saved once.</p>' +
+        '<p class="muted">One row per person, with a header row (for example: Name, Email, Phone, Consent).</p>' +
         '<div class="drop" id="drop"><p><b>Drag the Excel files here</b> or</p>' +
         '<label class="btn primary">Choose files<input type="file" id="file" accept=".xlsx,.xls,.csv" multiple class="hidden"></label>' +
-        '<p class="muted small" style="margin-top:12px">.xlsx, .xls or .csv — one or more</p></div></div>';
+        '<p class="muted small" style="margin-top:12px">.xlsx, .xls or .csv — one or more</p></div>' +
+        '<details class="more"><summary>Show details</summary><p class="small muted">You can choose several files at once. Every file is kept in the <b>Upload history</b>, so you can send it a different message later without uploading it again. ' +
+        'A person in several files is saved once. The same message is never sent twice to the same person (unless you untick that on the send page).</p></details></div>';
     } else {
       html += mappingHtml();
     }
@@ -560,8 +582,7 @@
     var lists = S.data.lists || [];
     if (!lists.length) return '';
     var html = '<div class="card" id="historyCard"><h2>Upload history (' + lists.length + ')</h2>' +
-      '<p class="muted small">Every file you uploaded. Use one again for a <b>new message</b> — no need to upload it again. ' +
-      'The same message is never sent twice to the same person (unless you untick that on the send page).</p><div class="lists">';
+      '<div class="lists">';
     lists.forEach(function (l) {
       var used = (l.campaigns || []).map(campaignName).filter(String);
       html += '<div class="list-row"><div class="list-main"><b>' + esc(l.name) + '</b>' +
@@ -920,7 +941,7 @@
       ' ' + badge('skipped', r.unchanged + ' unchanged') + (r.rejected ? ' ' + badge('failed', r.rejected + ' not imported') : '') + '</p>';
     if (r.problems.length) html += '<details><summary>' + plural(r.problems.length, 'row') + ' to check</summary><ul class="small">' +
       r.problems.map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul></details>';
-    html += '<p class="small muted" style="margin-top:8px">Next step: click <b>✉ Send email</b> or <b>WhatsApp</b> next to the file in the Upload history, or open <b>2 Send emails</b>.</p></div>';
+    html += '<p class="small muted" style="margin-top:8px">Next step: click <b>✉ Send email</b> or <b>WhatsApp</b> next to the file in the Upload history, or open <b>Send emails</b>.</p></div>';
     return html;
   }
 
@@ -1158,32 +1179,31 @@
   function viewSend() {
     var tpls = emailTemplates(), st = S.send;
     if (st.subject === undefined) loadTemplateIntoSend(tpls.length ? tpls[0].template_id : '');
-    var html = '<div class="card"><h2>1. Write the email</h2>' +
-      '<p class="muted">Write it once. Click <b>Insert the person\'s name</b> where the name should go, and each person gets their own name from the Excel file (Hello Heba, Hello Adnan…).</p>';
+    var html = '<div class="card"><h2>Write the email</h2>';
     html += savedMenuHtml('se', tpls, st.templateId, '— New email —');
     html += '<div class="grid2"><div>' +
       '<label class="field"><span>Subject</span><input type="text" id="sSubject" maxlength="250" value="' + esc(st.subject) + '" placeholder="Example: Is the shop still interesting for you?"></label>' +
       '<label class="field"><span>Message</span><textarea id="sBody" style="min-height:240px">' + esc(st.body) + '</textarea></label>' +
-      '<div class="row" style="margin-bottom:8px"><button class="btn primary small" id="sInsertName">+ Insert the person\'s name</button></div>' +
+      '<div class="row" style="margin-bottom:8px"><button class="btn small" id="sInsertName">+ Insert the person\'s name</button></div>' +
       '<div class="muted small">More fields:</div><div class="chips">' +
       ['full_name', 'shop_name', 'sender_name'].map(function (p) { return '<button class="chip" data-sph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
       '</div><div><div class="muted small" style="margin-bottom:4px">Preview — what <b id="sPrevName"></b> will receive</div><div id="sLive"></div>' +
-      '<div class="muted small" style="margin:12px 0 4px">How it starts for each person</div><div id="sGreets" class="small"></div>' +
+      '<details class="more"><summary>Show how it starts for each person</summary><div id="sGreets" class="small"></div></details>' +
       '<div id="sSpam" style="margin-top:12px"></div></div></div></div>';
 
     if (!st.sched) st.sched = defaultSchedule();
-    html += '<div class="card"><h2>2. Sending options</h2>' + audienceHtml('se') + '<div class="grid2"><div>' +
+    html += '<div class="card"><h2>Who gets it and when</h2>' + audienceHtml('se') + '<div class="grid2"><div>' +
       scheduleHtml('es', st.sched, { word: 'emails', note: 'Emails also respect the safe-sending limits in Settings (most per day and sending hours).' }) +
       '</div><div>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="sName" placeholder="Example: November follow-up" value="' + esc(st.name) + '"></label>' +
       '<label class="check"><input type="checkbox" id="sSkip"' + (st.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact email from this shop</span></label>' +
-      '</div></div><button class="btn primary" id="sReview">3. Check who will get it →</button></div>';
+      '</div></div><button class="btn primary" id="sReview">Next: check &amp; send →</button></div>';
     html += '<div id="reviewBox"></div>';
     $('view').innerHTML = html;
 
     function live() {
       st.subject = $('sSubject').value; st.body = $('sBody').value; st.review = null;
-      if ($('reviewBox')) $('reviewBox').innerHTML = '';
+      if ($('reviewBox')) $('reviewBox').innerHTML = ''; updateStepbar();
       var c = sendSample(), f = fieldsFor(c, S.data.shop);
       $('sPrevName').textContent = c.full_name || c.first_name || c.email || 'a contact';
       var unknown = (st.subject + ' ' + st.body).match(/\{\s*[a-zA-Z_]+\s*\}/g) || [];
@@ -1219,9 +1239,9 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-sph]'), function (b) {
       b.addEventListener('click', function () { insertAt('{' + b.getAttribute('data-sph') + '}'); });
     });
-    bindSchedule('es', st.sched, function () { st.review = null; if ($('reviewBox')) $('reviewBox').innerHTML = ''; },
+    bindSchedule('es', st.sched, function () { st.review = null; if ($('reviewBox')) $('reviewBox').innerHTML = ''; updateStepbar(); },
       function () { var R = S.boot.sendingRules || { startHour: 9, endHour: 21 }; return [R.startHour, R.endHour]; });
-    $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; });
+    $('sSkip').addEventListener('change', function () { st.skipPrevious = this.checked; st.review = null; $('reviewBox').innerHTML = ''; updateStepbar(); });
     $('sName').addEventListener('input', function () { st.name = this.value; });
     $('sReview').addEventListener('click', loadReview);
     bindAudience('se', function () { st.review = null; viewSend(); });
@@ -1272,7 +1292,7 @@
     var r = S.send.review, box = $('reviewBox');
     if (!box || !r) return;
     var p = r.preview;
-    var html = '<div class="card"><h2>3. Review before sending</h2>';
+    var html = '<div class="card"><h2>Check &amp; send</h2>';
     if (r.audience && r.audience.length) html += '<p class="muted small">Only people from: <b>' + esc(r.audience.join(', ')) + '</b></p>';
     html += '<div class="stats">' +
       '<div class="stat"><div class="n">' + r.willSend + '</div><div class="l">will get the email</div></div>' +
@@ -1286,11 +1306,8 @@
     }
     if (r.waitsForHoursLabel) html += '<div class="notice warn" style="margin-top:12px">Because of the sending hours, the first email goes out at <b>' + esc(r.waitsForHoursLabel) + '</b> (UAE time). To send right away, click “Send now anyway” in the Sending schedule.</div>';
     else if (r.startAtLabel) html += '<div class="notice info" style="margin-top:12px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
-    else html += '<div class="notice ok" style="margin-top:12px">The first email goes out right away (within about a minute).</div>';
-    if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, ' + (r.ignoreHours ? '<b>day and night</b> (sending hours off for this send)' : 'only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time)') + ', ' +
-      (r.randomExtra ? 'about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) : 'exactly ' + r.delayMinutes) + ' minutes apart.</p>';
     if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:12px">' + esc(r.dailyLimitNote) + '</div>';
-    html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
+    html += '<details class="more"><summary>Show the full email' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</summary>' +
       '<div class="email-preview"><div class="meta">' +
       '<div><b>From:</b> ' + esc(p.fromName) + ' &lt;' + esc(p.from) + '&gt;</div>' +
       '<div><b>To:</b> ' + esc(p.to) + '</div>' +
@@ -1301,12 +1318,13 @@
         return '<li><b>' + esc(x.name) + '</b> (' + esc(x.email) + '): ' + esc(x.firstLine) + '</li>';
       }).join('') + '</ul>';
     }
+    html += '</details>';
     if (!r.sender.ok) {
       html += '<div class="notice bad" style="margin-top:16px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
     }
     // Final check: everything that will happen, in one place, right above the button.
     var st = S.send, firstLabel = r.waitsForHoursLabel ? r.waitsForHoursLabel + ' (UAE time)' : r.startAtLabel ? r.startAtLabel + ' (UAE time)' : 'Right away (within about a minute)';
-    html += '<h3 style="margin-top:24px">Final check</h3><dl class="summary">' +
+    html += '<h3 style="margin-top:16px">Final check</h3><dl class="summary">' +
       '<dt>Shop</dt><dd>' + esc(S.data.shop.shop_name || S.data.shop.shop_id) + '</dd>' +
       '<dt>Sent by</dt><dd>Gmail · ' + esc(p.fromName) + ' &lt;' + esc(p.from) + '&gt;</dd>' +
       '<dt>Message</dt><dd>' + esc(p.subject) + (st.name ? ' <span class="muted">(send named “' + esc(st.name) + '”)</span>' : '') + '</dd>' +
@@ -1323,6 +1341,7 @@
     if (!r.willSend && r.sender.ok) html += '<p class="muted small">Nobody can receive this email right now — see the reasons above.</p>';
     html += '</div>';
     box.innerHTML = html;
+    updateStepbar();
     var btn = $('sStart');
     if (btn) btn.addEventListener('click', startSending);
   }
@@ -1519,10 +1538,10 @@
     html += '<div class="card"><h2>Send one by one yourself (optional)</h2><p class="muted small">Opens WhatsApp with the message written; you press Send.</p><div class="grid2"><div><label class="field"><span>Which message?</span><select id="wTpl">' +
       tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === w.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
       '</select></label><input type="search" id="wSearch" aria-label="Search people" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
-      '<div><div class="muted small" style="margin-bottom:4px">Example message</div><div class="wa-bubble">' +
+      '<div><details class="more"><summary>Show the message</summary><div class="wa-bubble">' +
       (mediaById(tpl.media_id) ? '<div class="small"><b>' + (mediaById(tpl.media_id).kind === 'video' ? '🎬 ' : '📷 ') + esc(mediaById(tpl.media_id).name) + '</b></div>' : '') +
       esc(renderText(tpl.body, fieldsFor(ok[0] || { first_name: 'Ahmed' }, S.data.shop))) + '</div>' +
-      (mediaById(tpl.media_id) ? '<p class="small muted">“Open WhatsApp” can only fill in the text: attach the photo or video yourself in WhatsApp (📎). The Mac or the Business API send it automatically.</p>' : '') +
+      '</details>' + (mediaById(tpl.media_id) ? '<p class="small muted">“Open WhatsApp” can only fill in the text: attach the photo or video yourself in WhatsApp (📎). The Mac or the Business API send it automatically.</p>' : '') +
       '</div></div></div>';
 
     html += '<div class="card"><h2>' + plural(ok.length, 'person') + ' can be messaged</h2>';
@@ -1645,10 +1664,10 @@
       'especially if people report it. Only people who agreed to be contacted are included.</div>';
     html += savedMenuHtml('wa', tpls, a.templateId, '— New message —');
     html += '<div class="grid2"><div><label class="field"><span>WhatsApp message</span><textarea id="waBody" style="min-height:150px">' + esc(a.body) + '</textarea></label>' +
-      '<button class="btn primary small" id="waName">+ Insert the person\'s name</button>' +
+      '<button class="btn small" id="waName">+ Insert the person\'s name</button>' +
       mediaPickerHtml('wm', a.mediaId, '', 'The text is sent as the caption under the photo or video.') +
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
-      '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
+      '<div><div class="muted small" style="margin-bottom:4px">Preview — how it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
       '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are the Mac\'s time. The Mac must be on and connected to the internet; it stays awake by itself while sending.' }) + '</div>' +
       '<div id="waHelper" class="notice info" style="margin-top:16px">Checking the WhatsApp Sender on the Mac…</div>' +
       '<div class="row" style="margin-top:12px"><button class="btn primary big" id="waStart" disabled>▶ Start sending</button>' +
@@ -1941,7 +1960,7 @@
     }
     html += '<label class="check"><input type="checkbox" id="apiSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this template</span></label>' +
       '<label class="field"><span>Name for this send (optional)</span><input type="text" id="apiName" maxlength="100" value="' + esc(a.name) + '"></label></div>' +
-      '<div><div class="muted small" style="margin-bottom:4px">What the first people receive</div><div id="apiGreets" class="small"></div></div></div>';
+      '<div><div class="muted small" style="margin-bottom:4px">Preview — what the first person receives</div><div id="apiGreets" class="small"></div></div></div>';
     html += '<div style="margin-top:12px">' + scheduleHtml('as', a.sched, { limits: true, note: 'UAE time. Meta allows a new business about 250 people per day at first.' }) + '</div>' +
       '<div id="apiReview"></div>' +
       '<div class="row" style="margin-top:12px"><button class="btn" id="apiCheck">Check who will receive it</button><button class="btn primary big" id="apiStart">▶ Start sending</button></div>';
@@ -1954,7 +1973,9 @@
         var hm = t.header_media ? mediaById(a.mediaId) : null;
         return '<div class="wa-bubble" style="margin-bottom:8px">' + (t.header_media ? '<div class="small"><b>' + (hm ? (hm.kind === 'video' ? '🎬 ' : '📷 ') + esc(hm.name) : '(' + (t.header_media === 'video' ? 'video' : 'photo') + ' not chosen yet)') + '</b></div>' : '') + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
           '<div class="muted small" style="margin-top:4px">→ ' + esc(c.full_name || c.first_name || c.phone) + '</div></div>';
-      }).join('') : '<span class="muted">Nobody in this shop can be messaged yet (people need a phone number and consent).</span>';
+      }).reduce(function (out, b, i, all) {
+        return out + (i === 1 ? '<details class="more"><summary>Show ' + (all.length - 1) + ' more</summary>' : '') + b + (i && i === all.length - 1 ? '</details>' : '');
+      }, '') : '<span class="muted">Nobody in this shop can be messaged yet (people need a phone number and consent).</span>';
     }
     var reset = function () { a.review = null; if ($('apiReview')) $('apiReview').innerHTML = ''; };
     $('apiTpl').addEventListener('change', function () { a.key = this.value; a.mapping = {}; a.headerMapping = {}; reset(); drawApiBody(); });
@@ -2036,7 +2057,7 @@
     var t = S.tpl.editing;
     if (t) return renderTemplateForm();
     var list = S.data.templates;
-    var html = '<div class="card"><div class="row"><h2 style="margin:0">Message templates</h2><span class="spacer"></span>' +
+    var html = '<div class="card"><div class="row"><h2 style="margin:0">Saved templates</h2><span class="spacer"></span>' +
       '<button class="btn primary" id="tNew">+ New template</button></div>' +
       '<p class="muted" style="margin-top:8px">Use fields like {first_name} and {shop_name}; the app fills them in for each person.</p>';
     if (!list.length) html += '<p class="muted">No templates yet.</p>';
