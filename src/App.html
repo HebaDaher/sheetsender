@@ -50,8 +50,33 @@
     if (!iso) return '';
     var d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
   }
+  /** This computer's time zone, in words, for every place where a time is chosen. */
+  function tzName() {
+    var z = ''; try { z = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { z = ''; }
+    var off = -new Date().getTimezoneOffset(), sign = off >= 0 ? '+' : '-'; off = Math.abs(off);
+    return (z ? z.replace(/_/g, ' ') + ', ' : '') + 'GMT' + sign + Math.floor(off / 60) + (off % 60 ? ':' + pad2(off % 60) : '');
+  }
+
+  /* Tables: each cell knows its column name, so on a phone every row shows as a small card ("Email: …"). */
+  function labelTables(root) {
+    Array.prototype.forEach.call((root || document).querySelectorAll('.table-wrap table'), function (t) {
+      var head = null, names = [];
+      Array.prototype.forEach.call(t.rows, function (tr) {
+        if (tr.querySelector('th')) { head = tr; tr.classList.add('th-row'); names = Array.prototype.map.call(tr.cells, function (c) { return c.textContent.trim(); }); return; }
+        Array.prototype.forEach.call(tr.cells, function (td, i) { if (!td.hasAttribute('data-label')) td.setAttribute('data-label', names[i] || ''); });
+      });
+    });
+  }
+  (function watchTables() {
+    var pending = false;
+    var mo = new MutationObserver(function () {
+      if (pending) return; pending = true;
+      (window.requestAnimationFrame || setTimeout)(function () { pending = false; labelTables(document); });
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+  })();
   function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text || status) + '</span>'; }
   function plural(n, word) { return n + ' ' + (n === 1 ? word : (word === 'person' ? 'people' : word + 's')); }
 
@@ -226,7 +251,7 @@
       (message ? '<div class="notice warn">' + esc(message) + '</div>' : '') +
       '<div id="loginSlot"><button class="btn primary big gbtn" disabled><span class="g">G</span> Sign in with Google</button></div>' +
       '<p class="small muted" style="margin-top:12px">Google asks only to share your email address with the app. Several Google accounts in this browser? Just choose the one you want.</p>' +
-      '<p class="small muted" style="margin-top:18px"><a href="https://followups.goskate.ae/start.html" target="_blank" rel="noopener">How it works</a> · ' +
+      '<p class="small muted" style="margin-top:16px"><a href="https://followups.goskate.ae/start.html" target="_blank" rel="noopener">How it works</a> · ' +
       '<a href="https://followups.goskate.ae/privacy.html" target="_blank" rel="noopener">Privacy</a> · ' +
       '<a href="https://followups.goskate.ae/terms.html" target="_blank" rel="noopener">Terms</a></p></div>';
     rawCall('startLogin', []).then(function (url) {
@@ -360,7 +385,7 @@
         html += '<button class="shop-card" data-shop="' + esc(s.shop_id) + '">' +
           '<div class="name">' + esc(s.shop_name || s.shop_id) + '</div>' +
           '<div class="muted small">Sends from ' + esc(s.sender_email || 'no Gmail chosen yet') + '</div>' +
-          '<div style="margin-top:10px">' + (s.senderOk ? badge('ok', '✓ Ready to send') : badge('bad', '⚠ Sending Gmail not connected')) + '</div>' +
+          '<div style="margin-top:12px">' + (s.senderOk ? badge('ok', '✓ Ready to send') : badge('bad', '⚠ Sending Gmail not connected')) + '</div>' +
           '</button>';
       });
       if (b.isOwner) html += '<div class="shop-card add-shop" id="addShopCard"><button class="link" id="addShopBtn" style="font-size:17px;font-weight:600">+ Add a shop</button>' +
@@ -368,10 +393,10 @@
       html += '</div>';
     }
     if (b.isOwner) {
-      html += '<p class="muted small" style="margin-top:20px">This is your workspace. Add shops, connect Gmail accounts, WhatsApp and the people who help you in ⚙ Settings. ' +
+      html += '<p class="muted small" style="margin-top:24px">This is your workspace. Add shops, connect Gmail accounts, WhatsApp and the people who help you in ⚙ Settings. ' +
         'Everything is saved in your <a href="' + esc(b.sheetUrl) + '" target="_blank" rel="noopener">Google Sheet</a>.</p>';
     } else {
-      html += '<p class="muted small" style="margin-top:20px">Workspace of ' + esc(b.owner) + '.</p>';
+      html += '<p class="muted small" style="margin-top:24px">Workspace of ' + esc(b.owner) + '.</p>';
     }
     $('app').innerHTML = html;
     if ($('goSettings')) $('goSettings').addEventListener('click', renderSettings);
@@ -481,11 +506,12 @@
       (S.boot.isOwner ? '<div style="margin-top:8px"><button class="btn small primary" id="fixSender">Choose / connect a Gmail →</button></div>' : '') + '</div>';
     html += '<div id="engineBox">' + engineNotice() + '</div>';
     html += '<nav class="tabs">';
-    tabs.forEach(function (t) {
-      html += '<button class="tab' + (S.view === t[0] ? ' active' : '') + '" data-view="' + t[0] + '">' +
+    tabs.forEach(function (t, i) {
+      if (i === 3) html += '<span class="tab-sep" aria-hidden="true"></span>';
+      html += '<button class="tab' + (S.view === t[0] ? ' active' : '') + '" data-view="' + t[0] + '"' + (S.view === t[0] ? ' aria-current="page"' : '') + '>' +
         (t[1] ? '<span class="num">' + t[1] + '</span>' : '') + esc(t[2]) + '</button>';
     });
-    html += '</nav><section id="view"></section>';
+    html += '</nav><p class="tabs-help">Emails: <b>1 Contacts</b> → <b>2 Send emails</b> → <b>3 Progress</b>. WhatsApp and Message templates can be used at any time.</p><section id="view"></section>';
     $('app').innerHTML = html;
     $('backHome').addEventListener('click', function () {
       hideBanner(); renderHome();
@@ -511,7 +537,7 @@
         'A person in several files is saved once.</p>' +
         '<div class="drop" id="drop"><p><b>Drag the Excel files here</b> or</p>' +
         '<label class="btn primary">Choose files<input type="file" id="file" accept=".xlsx,.xls,.csv" multiple class="hidden"></label>' +
-        '<p class="muted small" style="margin-top:10px">.xlsx, .xls or .csv — one or more</p></div></div>';
+        '<p class="muted small" style="margin-top:12px">.xlsx, .xls or .csv — one or more</p></div></div>';
     } else {
       html += mappingHtml();
     }
@@ -803,7 +829,7 @@
     html += '</div>';
 
     if (u.mapping.consent_status < 0) {
-      html += '<div class="notice warn" style="margin-top:14px"><b>No consent column chosen.</b> People without a clear “yes” are always skipped.' +
+      html += '<div class="notice warn" style="margin-top:16px"><b>No consent column chosen.</b> People without a clear “yes” are always skipped.' +
         '<label class="check"><input type="checkbox" id="consentAll"' + (u.consentAll ? ' checked' : '') + '>' +
         '<span>Everyone in this file agreed to be contacted by this shop (only tick this if it is true).</span></label>' +
         '<label class="field' + (u.consentAll ? '' : ' hidden') + '" id="consentSrcWrap"><span>Where did they agree?</span>' +
@@ -811,7 +837,7 @@
     }
 
     var probs = mappingProblems();
-    if (probs.length) html += '<div class="notice bad" style="margin-top:14px">' + esc(probs.join('\n')) + '</div>';
+    if (probs.length) html += '<div class="notice bad" style="margin-top:16px">' + esc(probs.join('\n')) + '</div>';
 
     var sample = mappedRows().slice(0, 5);
     html += '<h3 style="margin-top:16px">Preview (first ' + sample.length + ' rows)</h3><div class="table-wrap"><table><tr>' +
@@ -918,7 +944,7 @@
     var html = '<div class="card" id="contactsCard"><h2>' + (inList ? 'People in “' + esc(inList.name) + '” (' + list.length + ')' : 'Contacts for this shop (' + list.length + ')') + '</h2>';
     if (inList) html += '<div class="row" style="margin-bottom:8px"><button class="btn small" id="cListAll">← Show all contacts</button></div>';
     if (!list.length) return html + '<p class="muted">No contacts yet. Upload the Excel file above.</p></div>';
-    html += '<div class="row"><input type="search" id="cSearch" placeholder="Search name, email or phone" value="' + esc(S.contactSearch) + '" style="max-width:340px"></div>';
+    html += '<div class="row"><input type="search" id="cSearch" aria-label="Search contacts" placeholder="Search name, email or phone" value="' + esc(S.contactSearch) + '" style="max-width:340px"></div>';
     html += '<div class="chips">' + [['all', 'All'], ['can', 'Can receive emails'], ['cannot', 'Will be skipped'], ['optedout', 'Opted out']].map(function (f) {
       return '<button class="chip" data-cf="' + f[0] + '"' + (S.contactFilter === f[0] ? ' style="border-color:var(--accent);font-weight:600"' : '') + '>' +
         f[1] + ' (' + counts[f[0]] + ')</button>';
@@ -985,7 +1011,8 @@
       '<div class="opt"><span style="min-width:120px">Start sending</span>' +
       '<label class="check" style="margin:0"><input type="radio" name="' + p + 'When" value="now"' + (sc.when === 'now' ? ' checked' : '') + '><span>Now</span></label>' +
       '<label class="check" style="margin:0"><input type="radio" name="' + p + 'When" value="at"' + (sc.when === 'at' ? ' checked' : '') + '><span>At</span></label>' +
-      '<input type="datetime-local" id="' + p + 'At" value="' + esc(sc.at) + '"' + (sc.when === 'at' ? '' : ' disabled') + '></div>' +
+      '<input type="datetime-local" id="' + p + 'At" aria-label="Start date and time" value="' + esc(sc.at) + '"' + (sc.when === 'at' ? '' : ' disabled') + '></div>' +
+      '<p class="tz-note">Date and time are in this computer’s time zone: <b>' + esc(tzName()) + '</b>.</p>' +
       '<div class="opt"><span style="min-width:120px">Wait between ' + (opts.word || 'messages') + '</span>' +
       '<input type="number" id="' + p + 'Min" min="' + (sc.minDelay || 3) + '" max="120" step="1" value="' + esc(sc.minutes) + '"> minutes' +
       '<span class="muted small" id="' + p + 'MinNote"></span></div>' +
@@ -1016,7 +1043,7 @@
     if (hr >= h1 && hr < h2) { box.innerHTML = ''; return; }
     box.innerHTML = '<div class="notice warn small" style="margin:8px 0 0"><b>' + (sc.when === 'at' ? 'The start time ' + label : 'It is now ' + label) +
       ', outside the sending hours (' + h1 + ':00–' + h2 + ':00).</b> So the first message would wait until <b>' + h1 + ':00</b>. ' +
-      '<div class="row" style="margin-top:6px"><button class="btn small primary" id="' + p + 'HoursIgnore">Send ' + (sc.when === 'at' ? 'at that time' : 'now') + ' anyway</button>' +
+      '<div class="row" style="margin-top:8px"><button class="btn small primary" id="' + p + 'HoursIgnore">Send ' + (sc.when === 'at' ? 'at that time' : 'now') + ' anyway</button>' +
       '<span class="muted">(switches off the sending hours for this send only)</span></div></div>';
     $(p + 'HoursIgnore').onclick = function () {
       sc.ignoreHours = true;
@@ -1137,7 +1164,7 @@
     html += '<div class="grid2"><div>' +
       '<label class="field"><span>Subject</span><input type="text" id="sSubject" maxlength="250" value="' + esc(st.subject) + '" placeholder="Example: Is the shop still interesting for you?"></label>' +
       '<label class="field"><span>Message</span><textarea id="sBody" style="min-height:240px">' + esc(st.body) + '</textarea></label>' +
-      '<div class="row" style="margin-bottom:6px"><button class="btn primary small" id="sInsertName">+ Insert the person\'s name</button></div>' +
+      '<div class="row" style="margin-bottom:8px"><button class="btn primary small" id="sInsertName">+ Insert the person\'s name</button></div>' +
       '<div class="muted small">More fields:</div><div class="chips">' +
       ['full_name', 'shop_name', 'sender_name'].map(function (p) { return '<button class="chip" data-sph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
       '</div><div><div class="muted small" style="margin-bottom:4px">Preview — what <b id="sPrevName"></b> will receive</div><div id="sLive"></div>' +
@@ -1257,12 +1284,12 @@
         return '<li>' + esc(s.reason) + ': <b>' + s.count + '</b></li>';
       }).join('') + '</ul></details>';
     }
-    if (r.waitsForHoursLabel) html += '<div class="notice warn" style="margin-top:10px">Because of the sending hours, the first email goes out at <b>' + esc(r.waitsForHoursLabel) + '</b> (UAE time). To send right away, click “Send now anyway” in the Sending schedule.</div>';
-    else if (r.startAtLabel) html += '<div class="notice info" style="margin-top:10px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
-    else html += '<div class="notice ok" style="margin-top:10px">The first email goes out right away (within about a minute).</div>';
+    if (r.waitsForHoursLabel) html += '<div class="notice warn" style="margin-top:12px">Because of the sending hours, the first email goes out at <b>' + esc(r.waitsForHoursLabel) + '</b> (UAE time). To send right away, click “Send now anyway” in the Sending schedule.</div>';
+    else if (r.startAtLabel) html += '<div class="notice info" style="margin-top:12px">Scheduled: the first email goes out on <b>' + esc(r.startAtLabel) + '</b> (UAE time).</div>';
+    else html += '<div class="notice ok" style="margin-top:12px">The first email goes out right away (within about a minute).</div>';
     if (r.rules) html += '<p class="small muted" style="margin-top:8px">Safe sending: at most <b>' + r.rules.dailyCap + '</b> emails per day from this Gmail, ' + (r.ignoreHours ? '<b>day and night</b> (sending hours off for this send)' : 'only between <b>' + r.rules.startHour + ':00</b> and <b>' + r.rules.endHour + ':00</b> (UAE time)') + ', ' +
       (r.randomExtra ? 'about ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) : 'exactly ' + r.delayMinutes) + ' minutes apart.</p>';
-    if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:10px">' + esc(r.dailyLimitNote) + '</div>';
+    if (r.dailyLimitNote) html += '<div class="notice info" style="margin-top:12px">' + esc(r.dailyLimitNote) + '</div>';
     html += '<h3 style="margin-top:16px">What the email looks like' + (r.willSend ? ' (for ' + esc(p.toName || p.to) + ')' : ' (example)') + '</h3>' +
       '<div class="email-preview"><div class="meta">' +
       '<div><b>From:</b> ' + esc(p.fromName) + ' &lt;' + esc(p.from) + '&gt;</div>' +
@@ -1270,15 +1297,29 @@
       (p.replyTo ? '<div><b>Replies go to:</b> ' + esc(p.replyTo) + '</div>' : '') +
       '<div><b>Subject:</b> ' + esc(p.subject) + '</div></div><div class="body">' + esc(p.body) + '</div></div>';
     if (p.samples && p.samples.length > 1) {
-      html += '<p class="small muted" style="margin-top:10px">Each person gets their own name:</p><ul class="small">' + p.samples.map(function (x) {
+      html += '<p class="small muted" style="margin-top:12px">Each person gets their own name:</p><ul class="small">' + p.samples.map(function (x) {
         return '<li><b>' + esc(x.name) + '</b> (' + esc(x.email) + '): ' + esc(x.firstLine) + '</li>';
       }).join('') + '</ul>';
     }
     if (!r.sender.ok) {
-      html += '<div class="notice bad" style="margin-top:14px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
+      html += '<div class="notice bad" style="margin-top:16px"><b>Cannot send from ' + esc(p.from) + '.</b>\n' + esc(r.sender.reason) + '</div>';
     }
-    html += '<div class="row" style="margin-top:16px"><button class="btn primary big" id="sStart"' + (!r.sender.ok || !r.willSend ? ' disabled' : '') + '>' +
-      (r.startAtLabel ? '⏱ Schedule for ' : '▶ Start sending to ') + plural(r.willSend, 'person') + '</button></div>';
+    // Final check: everything that will happen, in one place, right above the button.
+    var st = S.send, firstLabel = r.waitsForHoursLabel ? r.waitsForHoursLabel + ' (UAE time)' : r.startAtLabel ? r.startAtLabel + ' (UAE time)' : 'Right away (within about a minute)';
+    html += '<h3 style="margin-top:24px">Final check</h3><dl class="summary">' +
+      '<dt>Shop</dt><dd>' + esc(S.data.shop.shop_name || S.data.shop.shop_id) + '</dd>' +
+      '<dt>Sent by</dt><dd>Gmail · ' + esc(p.fromName) + ' &lt;' + esc(p.from) + '&gt;</dd>' +
+      '<dt>Message</dt><dd>' + esc(p.subject) + (st.name ? ' <span class="muted">(send named “' + esc(st.name) + '”)</span>' : '') + '</dd>' +
+      '<dt>Who gets it</dt><dd>' + (r.audience && r.audience.length ? 'People from: ' + esc(r.audience.join(', ')) : 'Everyone in this shop') + '</dd>' +
+      '<dt>Recipients</dt><dd><b>' + plural(r.willSend, 'person') + '</b>' + (r.willSkip ? ' · ' + r.willSkip + ' skipped (reasons above)' : '') + '</dd>' +
+      '<dt>First email</dt><dd>' + esc(firstLabel) + '</dd>' +
+      '<dt>Pace</dt><dd>' + (r.randomExtra ? 'About ' + r.delayMinutes + '–' + Math.round(r.delayMinutes * 1.4) : 'Exactly ' + r.delayMinutes) + ' minutes apart' +
+        (r.rules ? ', at most ' + r.rules.dailyCap + ' per day' + (r.ignoreHours ? ', day and night' : ', ' + r.rules.startHour + ':00–' + r.rules.endHour + ':00 UAE time') : '') + '</dd>' +
+      '<dt>Repeats</dt><dd>' + (st.skipPrevious ? 'People who already got this exact email are skipped' : 'Not checked: people who already got this email will get it again') + '</dd>' +
+      '</dl>';
+    html += '<div class="row"><button class="btn primary big" id="sStart"' + (!r.sender.ok || !r.willSend ? ' disabled' : '') + '>' +
+      (r.startAtLabel ? '⏱ Schedule for ' : '▶ Start sending to ') + plural(r.willSend, 'person') + '</button>' +
+      '<span class="muted small">You confirm once more before anything is sent.</span></div>';
     if (!r.willSend && r.sender.ok) html += '<p class="muted small">Nobody can receive this email right now — see the reasons above.</p>';
     html += '</div>';
     box.innerHTML = html;
@@ -1288,9 +1329,14 @@
 
   function startSending() {
     var st = S.send, r = st.review;
+    if (st.starting) return; // a second click while the first is on its way never starts a second send
     if (!confirm((r.startAtLabel ? 'Schedule' : 'Start sending') + ' this email to ' + plural(r.willSend, 'person') + '?\n\n' +
       (r.startAtLabel ? 'First email: ' + r.startAtLabel + ' (UAE time).\n' : '') + 'One email every ' + plural(r.delayMinutes, 'minute') + (r.randomExtra ? ' or a little more' : '') + '. You can pause at any time in "Progress".')) return;
-    withBusy('Starting…', call('startCampaign', sendParams())).then(function (camp) {
+    st.starting = true;
+    if ($('sStart')) $('sStart').disabled = true;
+    busy('Starting…');
+    call('startCampaign', sendParams()).then(function (camp) {
+      done(); st.starting = false;
       return reloadShop().then(function () {
         S.send.review = null; S.send.name = ''; S.send.templateId = camp.template_id;
         S.view = 'progress';
@@ -1298,6 +1344,10 @@
         renderShop();
         showBanner('success', camp.status_reason ? camp.status_reason : 'Sending has started. The first email goes out within about a minute.');
       });
+    }, function (e) {
+      // Nothing was started: the button works again and everything typed stays as it was.
+      done(); st.starting = false; if ($('sStart')) $('sStart').disabled = false;
+      showBanner('error', errText(e));
     });
   }
 
@@ -1381,7 +1431,7 @@
     });
     html += '<div class="card"><div class="row"><h3 style="margin:0">' + (f === 'all' ? 'Everyone' : statusLabel(f)) + ' (' + rows.length + ')</h3>' +
       (f !== 'all' ? '<button class="link" data-f="all">Show everyone</button>' : '') + '</div>' +
-      '<div class="table-wrap scroll" style="margin-top:10px"><table><tr><th>Name</th><th>' + (isWa ? 'Phone' : 'Email') + '</th><th>Status</th><th>Reason / details</th><th>Time</th></tr>' +
+      '<div class="table-wrap scroll" style="margin-top:12px"><table><tr><th>Name</th><th>' + (isWa ? 'Phone' : 'Email') + '</th><th>Status</th><th>Reason / details</th><th>Time</th></tr>' +
       rows.map(function (r) {
         return '<tr><td>' + esc(r.contact_name) + '</td><td>' + esc(isWa ? (r.phone ? '+' + r.phone : '') : r.email) + '</td><td>' + badge(r.status, statusLabel(r.status)) + '</td>' +
           '<td>' + esc(r.status === 'sent' ? '' : r.reason) + '</td><td>' + esc(fmt(r.sent_at)) + '</td></tr>';
@@ -1468,7 +1518,7 @@
 
     html += '<div class="card"><h2>Send one by one yourself (optional)</h2><p class="muted small">Opens WhatsApp with the message written; you press Send.</p><div class="grid2"><div><label class="field"><span>Which message?</span><select id="wTpl">' +
       tpls.map(function (t) { return '<option value="' + esc(t.template_id) + '"' + (t.template_id === w.templateId ? ' selected' : '') + '>' + esc(t.template_name) + '</option>'; }).join('') +
-      '</select></label><input type="search" id="wSearch" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
+      '</select></label><input type="search" id="wSearch" aria-label="Search people" placeholder="Search name or phone" value="' + esc(w.search) + '"></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">Example message</div><div class="wa-bubble">' +
       (mediaById(tpl.media_id) ? '<div class="small"><b>' + (mediaById(tpl.media_id).kind === 'video' ? '🎬 ' : '📷 ') + esc(mediaById(tpl.media_id).name) + '</b></div>' : '') +
       esc(renderText(tpl.body, fieldsFor(ok[0] || { first_name: 'Ahmed' }, S.data.shop))) + '</div>' +
@@ -1569,9 +1619,9 @@
         ', ' + job.left + ' left of ' + job.total + (running ? '' : ' — ' + esc({ done: 'finished', stopped: 'stopped' }[job.state] || job.state)) + '.' +
         (job.message ? '<br>' + esc(job.message) : '') +
         (job.last ? '<br><span class="small">Last: ' + esc(job.last.status === 'sent' ? '✓ sent ' : '✗ not sent ') + '(+' + esc(job.last.phone) + ')' + (job.last.reason ? ' — ' + esc(job.last.reason) : '') + '</span>' : '') +
-        '<div style="height:8px;background:var(--line);border-radius:4px;margin-top:6px;overflow:hidden"><div style="height:100%;width:' + (job.total ? Math.round(done * 100 / job.total) : 0) + '%;background:var(--accent)"></div></div></div>';
+        '<div style="height:8px;background:var(--line);border-radius:4px;margin-top:8px;overflow:hidden"><div style="height:100%;width:' + (job.total ? Math.round(done * 100 / job.total) : 0) + '%;background:var(--accent)"></div></div></div>';
     }
-    if (h.online) html += '<div class="small muted" style="margin-top:6px">Sent today from this Mac: ' + num(h.sent_today) + (h.pending && h.pending.length ? ' · waiting for the Mac to pick up: ' + esc(h.pending.map(function (p) { return p.type; }).join(', ')) : '') + '</div>';
+    if (h.online) html += '<div class="small muted" style="margin-top:8px">Sent today from this Mac: ' + num(h.sent_today) + (h.pending && h.pending.length ? ' · waiting for the Mac to pick up: ' + esc(h.pending.map(function (p) { return p.type; }).join(', ')) : '') + '</div>';
     box.className = 'notice ' + kind;
     box.innerHTML = html;
     start.disabled = !h.online || running || (h.pending || []).some(function (p) { return p.type === 'start'; });
@@ -1600,13 +1650,13 @@
       '<label class="check"><input type="checkbox" id="waSkip"' + (a.skipPrevious ? ' checked' : '') + '><span>Skip people who already received this exact message on WhatsApp</span></label></div>' +
       '<div><div class="muted small" style="margin-bottom:4px">How it starts for each person</div><div id="waGreets" class="small"></div></div></div>' +
       '<div style="margin-top:12px">' + scheduleHtml('ws', a.sched, { limits: true, note: 'Times are the Mac\'s time. The Mac must be on and connected to the internet; it stays awake by itself while sending.' }) + '</div>' +
-      '<div id="waHelper" class="notice info" style="margin-top:14px">Checking the WhatsApp Sender on the Mac…</div>' +
-      '<div class="row" style="margin-top:10px"><button class="btn primary big" id="waStart" disabled>▶ Start sending</button>' +
+      '<div id="waHelper" class="notice info" style="margin-top:16px">Checking the WhatsApp Sender on the Mac…</div>' +
+      '<div class="row" style="margin-top:12px"><button class="btn primary big" id="waStart" disabled>▶ Start sending</button>' +
       '<button class="btn danger hidden" id="waStop">■ Stop</button>' +
       '<button class="btn hidden" id="waOpen">Open WhatsApp on the Mac</button>' +
       '<span class="spacer"></span><button class="btn hidden" id="waLink">Set up a Mac</button></div>' +
       '<div id="macSetup"></div>' +
-      '<details style="margin-top:14px"><summary class="small">Without the helper: send list files</summary>' +
+      '<details style="margin-top:16px"><summary class="small">Without the helper: send list files</summary>' +
       '<p class="small muted">Only if the WhatsApp Sender helper is not installed: download a send list and run the sender by hand, then upload its results.</p>' +
       '<div class="row"><button class="btn small" id="waJob">Download the send list</button>' +
       '<label class="btn small">Upload results<input type="file" id="waResults" accept=".json" class="hidden"></label></div></details></div>';
@@ -1713,7 +1763,7 @@
       box.innerHTML = '<div class="sched" style="margin-top:12px"><b>Set up the Mac (one time, 2–3 minutes)</b><ol style="line-height:1.7;margin:8px 0 0;padding-left:20px">' +
         '<li>On the Mac that will send (signed in, connected to the internet), open <b>Terminal</b>: press <b>⌘ + Space</b>, type <b>Terminal</b>, press <b>Enter</b>.</li>' +
         '<li>Click <b>Copy</b>, then click in the Terminal window, press <b>⌘ + V</b> and <b>Enter</b>:' +
-        '<div class="row" style="margin-top:6px"><input type="text" id="macCmd" readonly value="' + esc(r.command) + '" style="font-family:monospace;font-size:12px"><button class="btn small primary" id="macCopy">Copy</button></div></li>' +
+        '<div class="row" style="margin-top:8px"><input type="text" id="macCmd" readonly value="' + esc(r.command) + '" style="font-family:monospace;font-size:12px"><button class="btn small primary" id="macCopy">Copy</button></div></li>' +
         '<li>Wait until it says <b>Done</b> (if it asks to install Python, install it and paste the line again). Keep the Mac on.</li>' +
         '<li>Back here, the box above turns green. Click <b>Open WhatsApp on the Mac</b> and scan the QR code with the phone: WhatsApp → Settings → Linked devices → Link a device.</li>' +
         '</ol><p class="small muted" style="margin:8px 0 0">Keep this line private: it is the key that lets that Mac send for this workspace. It is shown only once; click “Set up a Mac” again for a new one.</p></div>';
@@ -1740,7 +1790,7 @@
         '<button class="link small danger-link" data-mdel="' + esc(m.media_id) + '">Remove</button></div>';
     });
     if (kind && !list.length) html += '<div class="small muted">No ' + what + ' added yet.</div>';
-    html += '<label class="btn small" style="margin-top:6px">+ Add a ' + what + '<input type="file" id="' + p + 'MedFile" accept="' + accept + '" class="hidden"></label>' +
+    html += '<label class="btn small" style="margin-top:8px">+ Add a ' + what + '<input type="file" id="' + p + 'MedFile" accept="' + accept + '" class="hidden"></label>' +
       '<div class="small muted" style="margin-top:4px">' + (kind === 'video' ? 'MP4, up to 16 MB.' : kind === 'image' ? 'JPG or PNG, up to 5 MB.' : 'Photos: JPG or PNG up to 5 MB. Videos: MP4 up to 16 MB (WhatsApp\'s limits).') + '</div></div>';
     return html;
   }
@@ -1902,7 +1952,7 @@
       var people = audienceContacts().filter(function (x) { return x.waCheck.ok; }).slice(0, 3);
       $('apiGreets').innerHTML = people.length ? people.map(function (c) {
         var hm = t.header_media ? mediaById(a.mediaId) : null;
-        return '<div class="wa-bubble" style="margin-bottom:6px">' + (t.header_media ? '<div class="small"><b>' + (hm ? (hm.kind === 'video' ? '🎬 ' : '📷 ') + esc(hm.name) : '(' + (t.header_media === 'video' ? 'video' : 'photo') + ' not chosen yet)') + '</b></div>' : '') + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
+        return '<div class="wa-bubble" style="margin-bottom:8px">' + (t.header_media ? '<div class="small"><b>' + (hm ? (hm.kind === 'video' ? '🎬 ' : '📷 ') + esc(hm.name) : '(' + (t.header_media === 'video' ? 'video' : 'photo') + ' not chosen yet)') + '</b></div>' : '') + (t.header ? '<b>' + esc(render(t.header, a.headerMapping, c)) + '</b><br>' : '') + esc(render(t.body, a.mapping, c)) +
           '<div class="muted small" style="margin-top:4px">→ ' + esc(c.full_name || c.first_name || c.phone) + '</div></div>';
       }).join('') : '<span class="muted">Nobody in this shop can be messaged yet (people need a phone number and consent).</span>';
     }
@@ -2032,7 +2082,7 @@
       PLACEHOLDERS.map(function (p) { return '<button class="chip" data-ph="' + p + '">{' + p + '}</button>'; }).join('') + '</div>' +
       '<label class="check"><input type="checkbox" id="tActive"' + (t.active !== 'no' ? ' checked' : '') + '><span>Template is on (can be chosen)</span></label>' +
       '</div><div><div class="muted small" style="margin-bottom:4px">Preview</div><div id="tPreview"></div>' +
-      '<p class="muted small" style="margin-top:10px">Tip: end emails with a line such as “Reply STOP if you prefer no more emails.” and mark those people as opted out.</p></div></div>' +
+      '<p class="muted small" style="margin-top:12px">Tip: end emails with a line such as “Reply STOP if you prefer no more emails.” and mark those people as opted out.</p></div></div>' +
       '<div class="row" style="margin-top:12px"><button class="btn primary" id="tSave">Save template</button><button class="btn" id="tCancel">Cancel</button></div></div>';
     $('view').innerHTML = html;
     function sync() {
@@ -2108,7 +2158,7 @@
     var st = S.settings;
     var connected = st.accounts.filter(function (a) { return a.status === 'connected'; });
     var html = '<button class="link" id="setBack">← All shops</button><h1>Settings</h1>' +
-      '<div class="row" style="margin-bottom:10px"><span class="muted">Workspace:</span> <b id="wsTitle">' + esc(st.workspace.name) + '</b>' +
+      '<div class="row" style="margin-bottom:12px"><span class="muted">Workspace:</span> <b id="wsTitle">' + esc(st.workspace.name) + '</b>' +
       '<button class="link" id="wsRename">Rename</button><span class="spacer"></span><span class="muted small">Only you (the owner) can see this page.</span></div>';
     html += '<div id="engineBox">' + engineNotice() + '</div>';
 
@@ -2134,10 +2184,10 @@
       html += '<div class="card"><h2>Your own website (for Google verification)</h2>' +
         '<p class="muted">Google verifies the app only if every address on its sign-in screens is on a domain you own. With your website on, Google sends people back to <b>https://your-site/oauth/</b>, a page on your site that passes them straight to the app.</p>' +
         (st.website ? '<div class="notice ok">✓ In use: <b>' + esc(st.website) + '</b>. Google sends people back to ' + esc(st.redirectUri) + '</div>' :
-          '<ol class="small" style="line-height:1.7;padding-left:18px;margin:6px 0"><li>The website must already open in the browser (for example https://shopeleader.ae/oauth/).</li>' +
+          '<ol class="small" style="line-height:1.7;padding-left:18px;margin:6px 0"><li>The website must already open in the browser (for example https://followups.your-shop.ae/oauth/).</li>' +
           '<li>In Google Cloud → Clients → your client → Authorized redirect URIs, <b>add</b> (keep the old one too): <code>https://your-site/oauth/</code></li>' +
           '<li>Write the website name below and click Use it. The app checks the page first, so sign-in never breaks.</li></ol>') +
-        '<div class="row"><input type="text" id="siteName" placeholder="shopeleader.ae" value="' + esc(st.website) + '" style="max-width:260px">' +
+        '<div class="row"><input type="text" id="siteName" placeholder="followups.your-shop.ae" aria-label="Website name" value="' + esc(st.website) + '" style="max-width:260px">' +
         '<button class="btn primary small" id="saveSite">' + (st.website ? 'Save' : 'Use it') + '</button>' +
         (st.website ? '<button class="btn small" id="stopSite">Stop using it</button>' : '') + '</div></div>';
     } else if (!st.clientReady) {
@@ -2172,7 +2222,7 @@
       '<div id="shopForm"></div>';
     if (!st.shops.length) html += '<p class="muted">No shops yet. Click “Add a shop”.</p>';
     else {
-      html += '<div class="table-wrap" style="margin-top:10px"><table><tr><th>Shop</th><th>Sends emails from</th><th>Status</th><th></th></tr>';
+      html += '<div class="table-wrap" style="margin-top:12px"><table><tr><th>Shop</th><th>Sends emails from</th><th>Status</th><th></th></tr>';
       st.shops.forEach(function (s) {
         var options = '<option value="">— choose a connected Gmail —</option>' + connected.map(function (a) {
           return '<option value="' + esc(a.email) + '"' + (a.email === s.sender_email ? ' selected' : '') + '>' + esc(a.email) + '</option>';
@@ -2197,7 +2247,7 @@
     html += st.members.length
       ? '<div class="table-wrap"><table>' + st.members.map(function (m) { return '<tr><td>' + esc(m) + '</td><td style="text-align:right"><button class="btn small danger" data-mremove="' + esc(m) + '">Remove</button></td></tr>'; }).join('') + '</table></div>'
       : '<p class="muted">Only you so far.</p>';
-    html += '<div class="row" style="margin-top:10px"><input type="email" id="mEmail" placeholder="their Gmail address" style="max-width:320px"><button class="btn primary small" id="mAdd">Add</button></div>' +
+    html += '<div class="row" style="margin-top:12px"><input type="email" id="mEmail" aria-label="Their Gmail address" placeholder="their Gmail address" style="max-width:320px"><button class="btn primary" id="mAdd">Add</button></div>' +
       '<p class="muted small">They use your workspace through the app only (they do not get your Google Sheet).</p></div>';
 
     // WhatsApp Business API
@@ -2338,7 +2388,7 @@
       (api.configured && api.status === 'connected' ? '<button class="btn" id="waReload">↻ Reload templates</button><button class="btn danger" id="waDisc">Disconnect</button>' : '') + '</div>' +
       '<p class="muted small" style="margin-top:8px">The token is kept privately on the server for your account only. It is never shown again or written to the Sheet.</p>' +
       '<div id="waTplList"></div>' +
-      '<details style="margin-top:10px"><summary><b>How to get these (one time, about 20 minutes)</b></summary><ol class="small" style="line-height:1.6">' +
+      '<details style="margin-top:12px"><summary><b>How to get these (one time, about 20 minutes)</b></summary><ol class="small" style="line-height:1.6">' +
       '<li>Open <a href="https://business.facebook.com" target="_blank" rel="noopener">business.facebook.com</a> and create (or choose) your business.</li>' +
       '<li>Open <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a> → <b>Create app</b> → use case <b>Connect with customers through WhatsApp</b> → choose your business → create.</li>' +
       '<li>In the app: <b>WhatsApp → API Setup</b>. Click <b>Add phone number</b> and verify it with the SMS code. Use a number that is <b>not</b> in the WhatsApp app on a phone (or remove it from the app first). Then copy the <b>Phone number ID</b> and the <b>WhatsApp Business Account ID</b> shown there into the boxes above.</li>' +
@@ -2371,7 +2421,7 @@
     var box = $('waTplList'); if (!box) return;
     var ok = list.filter(function (t) { return t.status === 'APPROVED' && t.ok; });
     var other = list.filter(function (t) { return !(t.status === 'APPROVED' && t.ok); });
-    box.innerHTML = '<p class="small" style="margin-top:10px"><b>Templates you can use (' + ok.length + '):</b> ' + (ok.length ? ok.map(function (t) { return esc(t.name) + ' <span class="muted">(' + esc(t.language) + ')</span>'; }).join(', ') : '<span class="muted">none approved yet</span>') + '</p>' +
+    box.innerHTML = '<p class="small" style="margin-top:12px"><b>Templates you can use (' + ok.length + '):</b> ' + (ok.length ? ok.map(function (t) { return esc(t.name) + ' <span class="muted">(' + esc(t.language) + ')</span>'; }).join(', ') : '<span class="muted">none approved yet</span>') + '</p>' +
       (other.length ? '<details class="small"><summary>' + other.length + ' other template' + (other.length === 1 ? '' : 's') + '</summary><ul>' + other.map(function (t) {
         return '<li>' + esc(t.name) + ' (' + esc(t.language) + '): ' + esc(t.status !== 'APPROVED' ? 'status ' + t.status.toLowerCase().replace(/_/g, ' ') : t.why) + '</li>';
       }).join('') + '</ul></details>' : '');
