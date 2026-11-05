@@ -1,6 +1,9 @@
+import sys
 """Speed: with a slow server (2.5 s per call, like Google on a bad day) the app shows what it already has at once."""
 import subprocess, time, os
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from reveal import patch
 HERE = os.path.dirname(__file__)
 srv = subprocess.Popen(['node', os.path.join(HERE, 'server.js')], env=dict(os.environ, RPC_DELAY='2500'), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 time.sleep(1.2)
@@ -11,7 +14,7 @@ def check(cond, msg):
 try:
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'])
-        page = b.new_page(viewport={'width': 1100, 'height': 900})
+        page = patch(b.new_page(viewport={'width': 1100, 'height': 900}))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         page.on('dialog', lambda d: d.accept())
         page.goto('http://127.0.0.1:8765/'); page.wait_for_selector('.shop-card', timeout=20000)
@@ -31,7 +34,7 @@ try:
         check(page.evaluate('!!window.XLSX'), 'Excel reader loaded when a file was chosen')
         page.click('#doImport'); page.wait_for_selector('text=Import finished', timeout=60000)
         page.click('#backHome'); page.wait_for_selector('.shop-card'); page.click('.shop-card'); page.wait_for_selector('#historyCard', timeout=5000)
-        check('Contacts for this shop (12)' in page.inner_text('main'), 'reopened shop shows the new data (not an old copy)')
+        check('Contacts for this shop (12)' in page.text_content('main'), 'reopened shop shows the new data (not an old copy)')
         page.click('text=Sign out'); page.wait_for_selector('text=Sign in with Google', timeout=20000)
         check(page.evaluate("localStorage.getItem('sf_boot')") is None, 'signing out forgets the saved copy')
         b.close()

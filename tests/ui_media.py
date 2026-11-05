@@ -1,6 +1,9 @@
+import sys
 """Photos and videos in the browser: add a photo on the WhatsApp tab (Mac), a photo template on the Business API."""
 import subprocess, time, json, urllib.request, os, tempfile
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from reveal import patch
 
 HERE = os.path.dirname(__file__)
 SHOTS = os.path.join(HERE, 'screenshots'); os.makedirs(SHOTS, exist_ok=True)
@@ -22,7 +25,7 @@ heic = fpath('IMG_1.heic', os.urandom(1000))
 try:
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'])
-        page = b.new_page(viewport={'width': 1200, 'height': 900})
+        page = patch(b.new_page(viewport={'width': 1200, 'height': 900}))
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         page.on('dialog', lambda d: d.accept())

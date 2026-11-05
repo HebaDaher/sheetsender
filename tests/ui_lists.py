@@ -1,6 +1,9 @@
+import sys
 """Upload history in the browser: several files at once, the history, send to one file, show people, rename, remove."""
 import subprocess, time, json, urllib.request, os, tempfile
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from reveal import patch
 
 HERE = os.path.dirname(__file__)
 SHOTS = os.path.join(HERE, 'screenshots'); os.makedirs(SHOTS, exist_ok=True)
@@ -25,7 +28,7 @@ eid = csv('eid.csv', [('Eid One', 'eid1@ex.com', '0501110003', 'yes'), ('Rana Tw
 try:
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'])
-        page = b.new_page(viewport={'width': 1200, 'height': 900})
+        page = patch(b.new_page(viewport={'width': 1200, 'height': 900}))
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         PROMPT = {'text': None}
@@ -100,8 +103,7 @@ try:
         page.click('.list-row:nth-child(1) [data-lwa]')
         page.wait_for_selector('#whAud')
         check(page.is_checked('input[name="whAudMode"][value="pick"]'), 'WhatsApp tab opens with the file chosen')
-        if page.query_selector('[data-wamode="mac"]'):
-            page.click('[data-wamode="mac"]'); page.wait_for_selector('#waBody')
+        page.click('[data-wasub="manual"]'); page.wait_for_selector('#wTpl')
         check('3 people can be messaged' in page.inner_text('main'), 'one-by-one list shows only the file\'s people')
         page.screenshot(path=SHOTS + '/lists-3-whatsapp.png', full_page=True)
 

@@ -1,5 +1,7 @@
 import subprocess, time, json, urllib.request, sys, os
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from reveal import patch
 
 SHOTS = os.path.join(os.path.dirname(__file__), 'screenshots')
 os.makedirs(SHOTS, exist_ok=True)
@@ -14,7 +16,7 @@ def check(cond, msg):
 try:
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'])
-        page = b.new_page(viewport={'width': 1200, 'height': 900})
+        page = patch(b.new_page(viewport={'width': 1200, 'height': 900}))
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         PROMPT = {'text': None}
@@ -86,7 +88,6 @@ try:
         page.wait_for_selector('#seTpl')
         check('✓ Saved as' in page.inner_text('#seTplNote'), 'Save updates the saved email')
         page.fill('#sBody', page.input_value('#sBody').replace(' Thanks.', ''))
-        page.click('summary:has-text("Show how it starts")')
         greets = page.inner_text('#sGreets')
         check('Hello Fatima,' in greets and 'Hello Omar,' in greets, 'each person gets their own name: ' + greets.replace(chr(10), ' | ')[:120])
         page.fill('#esMin', '2')
@@ -100,7 +101,7 @@ try:
         check('5–7 minutes' in page.inner_text('#esRandNote'), 'switch on: 5–7 minutes')
         page.click('#sReview')
         page.wait_for_selector('#sStart')
-        page.click('#reviewBox summary:has-text("Show the full email")')
+        page.click('#reviewBox details.preview summary')
         txt = page.inner_text('#reviewBox')
         check('will get the email' in txt, 'review shows counts')
         n = page.inner_text('#reviewBox .stat .n')
@@ -131,13 +132,13 @@ try:
             check(reason in txt, 'skip reason shown: ' + reason)
         page.screenshot(path=SHOTS + '/6-progress-done.png', full_page=True)
 
-        page.click('[data-view="whatsapp"]')
+        page.click('[data-view="whatsapp"]'); page.click('[data-wasub="manual"]')
         page.wait_for_selector('[data-wa]')
         href = page.get_attribute('[data-wa]', 'href')
         check(href.startswith('https://wa.me/9715') and 'text=Hello%20' in href, 'WhatsApp link: ' + href[:70])
         rows = page.locator('[data-wa]').count()
         check(rows == 7 or rows == 7, 'WhatsApp-eligible people: %d (5 + Noura phone-only + Hamad bad email)' % rows)
-        page.fill('#waBody', 'Hello ')
+        page.click('[data-wamode="mac"]'); page.fill('#waBody', 'Hello ')
         page.click('#waBody'); page.keyboard.press('End'); page.click('#waName'); page.keyboard.type(', the shop is still available.')
         check('Fatima Hassan: Hello Fatima, the shop' in page.inner_text('#waGreets'), 'WhatsApp preview per person')
         PROMPT['text'] = 'WA short'
@@ -181,6 +182,7 @@ try:
         check(True, 'results uploaded in the app')
         page.wait_for_selector('#waJob')
         page.screenshot(path=SHOTS + '/7-whatsapp.png', full_page=True)
+        page.click('[data-wasub="manual"]')
         with page.expect_popup() as pop:
             page.click('[data-wa]')
         pop.value.close()
@@ -201,7 +203,7 @@ try:
 
         # ---- Owner: Settings page ----
         get('/as/owner%40gmail.com')
-        o = b.new_page(viewport={'width': 1200, 'height': 900})
+        o = patch(b.new_page(viewport={'width': 1200, 'height': 900}))
         o.on('pageerror', lambda e: errors.append('owner pageerror: ' + str(e)))
         o.on('dialog', lambda d: d.accept())
         o.goto('http://127.0.0.1:8765/'); o.wait_for_selector('#openSettings')
@@ -249,7 +251,7 @@ try:
         get('/as/dad%40gmail.com')
 
         # mobile layout
-        m = b.new_page(viewport={'width': 390, 'height': 844})
+        m = patch(b.new_page(viewport={'width': 390, 'height': 844}))
         m.on('pageerror', lambda e: errors.append('mobile pageerror: ' + str(e)))
         m.goto('http://127.0.0.1:8765/'); m.wait_for_selector('.shop-card'); m.click('.shop-card'); m.wait_for_selector('#drop')
         sw = m.evaluate('document.documentElement.scrollWidth')

@@ -1,7 +1,10 @@
+import sys
 # Browser test of the multi-user features: a new person's own workspace, Settings (shops, people, WhatsApp
 # Business API), WhatsApp tab (API mode and "Set up a Mac"), and switching workspaces.
 import subprocess, time, json, urllib.request, urllib.parse, os
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from reveal import patch
 
 HERE = os.path.dirname(__file__)
 SHOTS = os.path.join(HERE, 'screenshots'); os.makedirs(SHOTS, exist_ok=True)
@@ -30,7 +33,7 @@ try:
             code = get('/consent?email=sara%40gmail.com')
             route.fulfill(status=302, headers={'location': 'http://127.0.0.1:8765/?' + urllib.parse.urlencode({'code': code, 'state': q['state']})})
         ctx.route('https://accounts.google.com/**', fake_google)
-        page = ctx.new_page()
+        page = patch(ctx.new_page())
         page.on('console', lambda m: m.type == 'error' and errors.append('console: ' + m.text))
         page.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         page.on('dialog', lambda d: d.accept())
@@ -74,7 +77,7 @@ try:
 
         # 2. Settings: add a shop, a person, the WhatsApp Business API
         page.click('#openSettings'); page.wait_for_selector('#shopAdd')
-        txt = page.inner_text('main')
+        txt = page.text_content('main')
         check('Google sign-in (app administrator' not in txt, 'sign-in client section hidden for non-admins')
         check('Share the app' in txt and 'People who can use this workspace' in txt and 'WhatsApp Business API' in txt, 'sections: share, people, WhatsApp API')
         page.click('#shopAdd'); page.fill('#sfName', 'Sara Cafe'); page.fill('#sfReply', 'sara@gmail.com'); page.click('#sfSave')
@@ -158,7 +161,7 @@ try:
         # 7. Phone size
         page.set_viewport_size({'width': 375, 'height': 800})
         page.click('.shop-card >> text=Sara Bakery'); page.wait_for_selector('#drop')
-        page.click('[data-view="whatsapp"]'); page.wait_for_selector('.modes')
+        page.click('[data-view="whatsapp"]'); page.wait_for_selector('.subnav')
         sw = page.evaluate('document.documentElement.scrollWidth')
         check(sw <= 380, 'no sideways scrolling on a phone: ' + str(sw))
         page.screenshot(path=SHOTS + '/m5-phone.png', full_page=True)
