@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Shop Follow-ups</title>
+<style>html,body{margin:0;height:100%;background:#f4f6f8}iframe{display:block;border:0;width:100%;height:100%}</style></head>
+<body>
+<!-- The app itself runs on Google (Apps Script); this page shows it at the app's own address. Nothing is stored here. -->
+<iframe id="app" title="Shop Follow-ups" allow="clipboard-write"></iframe>
+<noscript><p>Please turn on JavaScript, or <a href="https://script.google.com/macros/s/AKfycbxbNPWgRTi4oL_4c0Z_jNo2FH-zCCc7M20dGO-TMZkIkq5vpFTXS2kv1RzDlk4K8S4/exec">open the app here</a>.</p></noscript>
+<script>
+(function () {
+  var APP = "https://script.google.com/macros/s/AKfycbxbNPWgRTi4oL_4c0Z_jNo2FH-zCCc7M20dGO-TMZkIkq5vpFTXS2kv1RzDlk4K8S4/exec";
+  // Remember (for this browser tab only) that the app is used here, so Google's sign-in comes back to this page.
+  try { sessionStorage.setItem('sf_app', '1'); } catch (e) {}
+  var q = new URLSearchParams(location.search), out = new URLSearchParams();
+  var code = q.get('code') || '', state = q.get('state') || '', error = q.get('error') || '';
+  if (/^[A-Za-z0-9\/_.~-]{1,512}$/.test(code)) out.set('code', code);
+  if (/^[A-Za-z0-9-]{1,80}$/.test(state)) out.set('state', state);
+  if (/^[a-z_]{1,40}$/.test(error)) out.set('error', error);
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  document.getElementById('app').src = APP + (out.toString() ? '?' + out.toString() : '');
+})();
+</script>
+</body></html>

@@ -18,7 +18,9 @@
   if (/^[A-Za-z0-9-]{1,80}$/.test(state)) out.set('state', state);
   if (/^[a-z_]{1,40}$/.test(error)) out.set('error', error);
   try { history.replaceState(null, '', location.pathname); } catch (e) {}
-  location.replace(APP + (out.toString() ? '?' + out.toString() : ''));
+  // Started inside the app's own page (https://this-site/app/)? Then go back there; otherwise to the app link.
+  var here = false; try { here = sessionStorage.getItem('sf_app') === '1'; } catch (e) {}
+  location.replace((here ? '/app/' : APP) + (out.toString() ? '?' + out.toString() : ''));
 })();
 </script>
 </body></html>
