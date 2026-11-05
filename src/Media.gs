@@ -40,7 +40,8 @@ function driveError_(res, what) {
   let msg = '';
   try { msg = (JSON.parse(res.getContentText()).error || {}).message || ''; } catch (e) { msg = ''; }
   if (code === 401 || code === 403 && /scope|insufficient|permission/i.test(msg)) {
-    return new Error(what + ': the app is not allowed to use Google Drive yet. The app administrator must run Install.command again and click Allow (one time).');
+    return new Error(what + ': the app is not allowed to use Google Drive yet (Google says: ' + (msg || code) + '). The app administrator must open the Apps Script editor, ' +
+      'choose "authorize" in the function menu, click Run and follow what the log says.');
   }
   return new Error(what + ' (Google Drive answered ' + code + (msg ? ': ' + msg : '') + '). Try again in a minute.');
 }

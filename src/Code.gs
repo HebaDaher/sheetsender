@@ -99,8 +99,11 @@ function doGet(e) {
   page.oauth = ok ? JSON.stringify({ code: code, state: state, error: err }) : '';
   page.firstJs = safeJs_(page.first);
   page.oauthJs = safeJs_(page.oauth);
+  page.siteJs = safeJs_(publicSite_());
   return page
     .evaluate()
+    // The app may be shown inside the app's own website (https://<site>/app/); the page itself refuses any other site.
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
     .setTitle(APP_NAME)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
@@ -175,8 +178,31 @@ function setup() {
  * (Install.command says when). Running it makes Google ask for the permission once; it changes nothing.
  */
 function authorize() {
-  ScriptApp.getOAuthToken();
-  const msg = 'Thank you — the app has the permissions it needs. Go back to the Install window and press Enter.';
+  const token = ScriptApp.getOAuthToken();
+  // Really try Google Drive (photos and videos are kept there), so a missing permission shows here, not later in the app.
+  const info = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(token), { muteHttpExceptions: true });
+  let scopes = '';
+  try { scopes = String(JSON.parse(info.getContentText()).scope || ''); } catch (e) { scopes = ''; }
+  if (scopes && scopes.indexOf('https://www.googleapis.com/auth/drive.file') === -1) {
+    const m = 'NOT DONE: Google did not give the app the Google Drive permission yet.\n' +
+      '1. Open https://myaccount.google.com/connections (signed in as ' + Session.getEffectiveUser().getEmail() + ').\n' +
+      '2. Click "Shop Follow-ups" -> "Delete all connections you have with Shop Follow-ups" -> Confirm.\n' +
+      '3. Come back here and click Run again: Google now asks for every permission -> Advanced -> Go to Shop Follow-ups -> Allow.\n' +
+      '4. Then in the app: Settings -> Sending -> Restart sender.';
+    Logger.log(m);
+    return m;
+  }
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)&q=' + encodeURIComponent("name = 'sf-permission-check'"),
+    { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) {
+    let why = '';
+    try { why = (JSON.parse(res.getContentText()).error || {}).message || ''; } catch (e) { why = res.getContentText().slice(0, 300); }
+    const m = 'NOT DONE: Google Drive answered: ' + why + (/has not been used|disabled/i.test(why)
+      ? '\nOpen the link in that message, click ENABLE, wait 2 minutes, then click Run again.' : '');
+    Logger.log(m);
+    return m;
+  }
+  const msg = 'Thank you — the app has the permissions it needs (Google Drive works). Go back to the Install window and press Enter.';
   Logger.log(msg);
   return msg;
 }
@@ -599,7 +625,46 @@ function getShopData(shopId) {
     .sort(function (a, b) { return a.created_at < b.created_at ? 1 : -1; });
   return { shop: publicShop_(shop), templates: templates, contacts: contacts, campaigns: campaigns, engine: engineStatus_(),
     waApi: waApiPublic_(false), lists: listSummaries_(ctx.ss, shopId, contactRows, campaigns),
-    media: shopMedia_(ctx.ss, shopId).map(publicMedia_) };
+    media: shopMedia_(ctx.ss, shopId).map(publicMedia_), macSends: macSends_(shopId, logRows, templates) };
+}
+
+/** Mac id of a WhatsApp send (as written in the Send Log). */
+function macCampaignId_(jobId) { return 'WHATSAPP-' + String(jobId).replace(/[^A-Za-z0-9]/g, '').slice(0, 20); }
+
+/**
+ * WhatsApp sends made by the Mac, shaped like email sends for the Progress tab: what the Mac reported (Send Log)
+ * plus the send it is working on right now (its live status). Read only: nothing is saved.
+ */
+function macSends_(shopId, logRows, templates) {
+  const names = {};
+  (templates || []).forEach(function (t) { names[t.template_id] = t.template_name; });
+  const by = {};
+  logRows.forEach(function (l) {
+    if (String(l.campaign_id).indexOf('WHATSAPP-') !== 0) return;
+    const c = by[l.campaign_id] || (by[l.campaign_id] = { campaign_id: l.campaign_id, template_id: l.template_id, sent: 0, failed: 0, pending: 0, skipped: 0,
+      started_at: l.sent_at, last_at: l.sent_at });
+    if (l.status === 'sent') c.sent++; else if (l.status === 'failed') c.failed++;
+    if (l.sent_at && l.sent_at < c.started_at) c.started_at = l.sent_at;
+    if (l.sent_at && l.sent_at > c.last_at) c.last_at = l.sent_at;
+  });
+  let live = null;
+  try { const st = helperStatus_(); if (st.job && st.job.shop_id === shopId) live = st; } catch (e) { live = null; }
+  if (live) {
+    const id = macCampaignId_(live.job.job_id);
+    const c = by[id] || (by[id] = { campaign_id: id, template_id: '', sent: 0, failed: 0, pending: 0, skipped: 0, started_at: '', last_at: '' });
+    c.sent = Math.max(c.sent, Number(live.job.sent) || 0);
+    c.failed = Math.max(c.failed, Number(live.job.failed) || 0);
+    c.pending = Math.max(0, Number(live.job.left) || 0);
+    c.live = { state: live.job.state, message: live.job.message || '', next_at: live.job.next_at || '', online: !!live.online };
+  }
+  return Object.keys(by).map(function (k) {
+    const c = by[k];
+    const running = c.live && c.live.state === 'running';
+    return { campaign_id: c.campaign_id, campaign_name: 'WhatsApp: ' + (names[c.template_id] || 'message'), channel: 'whatsapp_mac',
+      status: running ? 'running' : (c.live && c.live.state === 'paused' ? 'paused' : 'completed'),
+      sent: String(c.sent), failed: String(c.failed), pending: String(c.pending), skipped: String(c.skipped),
+      started_at: c.started_at, created_at: c.started_at || nowIso_(), live: c.live || null };
+  });
 }
 
 /**
@@ -1041,6 +1106,17 @@ function stopCampaign(id) { return setCampaignStatus_(id, 'stop'); }
 
 function getCampaignDetail(campaignId) {
   const ctx = requireUser_();
+  campaignId = String(campaignId || '');
+  if (campaignId.indexOf('WHATSAPP-') === 0) {
+    const log = readTable_(ctx.ss, TABS.LOG).rows.filter(function (l) { return l.campaign_id === campaignId; });
+    const shopId = log.length ? log[0].shop_id : String((helperStatus_().job || {}).shop_id || '');
+    if (!shopId) throw new Error('Send not found.');
+    findShop_(ctx.ss, shopId); // must be a shop of this workspace
+    const tpls = readTable_(ctx.ss, TABS.TEMPLATES).rows.filter(function (t) { return t.shop_id === shopId; });
+    const mac = macSends_(shopId, log, tpls).filter(function (x) { return x.campaign_id === campaignId; })[0];
+    if (!mac) throw new Error('Send not found.');
+    return { campaign: mac, rows: log.map(stripRow_), engine: engineStatus_() };
+  }
   const c = readTable_(ctx.ss, TABS.CAMPAIGNS).rows.filter(function (r) { return r.campaign_id === campaignId; })[0];
   if (!c) throw new Error('Campaign not found.');
   const rows = readTable_(ctx.ss, TABS.LOG).rows

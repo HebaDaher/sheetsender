@@ -47,11 +47,11 @@ function renderIndex(query) {
   const q = new URLSearchParams(query || '');
   // the real doGet decides what goes into the page (same checks and escaping)
   const t = {}; E.real.HtmlService = E.real.HtmlService; // (template object filled like HtmlService does)
-  const fake = { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; } };
+  const fake = { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; }, setXFrameOptionsMode() { return this; } };
   const orig = E.real.HtmlService.createTemplateFromFile;
   E.real.HtmlService.createTemplateFromFile = () => fake;
   try { E.real.doGet({ parameter: Object.fromEntries(q) }); } finally { E.real.HtmlService.createTemplateFromFile = orig; }
-  html = html.replace(/<\?!=\s*firstJs\s*\?>/, fake.firstJs).replace(/<\?!=\s*oauthJs\s*\?>/, fake.oauthJs);
+  html = html.replace(/<\?!=\s*firstJs\s*\?>/, fake.firstJs).replace(/<\?!=\s*oauthJs\s*\?>/, fake.oauthJs).replace(/<\?!=\s*siteJs\s*\?>/, fake.siteJs);
   void t;
   if (/<\?/.test(html.replace(/<script>[\s\S]*?<\/script>/g, ''))) throw new Error('unresolved template tag');
   const inject = forced ? '<script>try{localStorage.setItem("sf_session",' + JSON.stringify(E.sessionFor(forced)) + ')}catch(e){}</script>' : '';

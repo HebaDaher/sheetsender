@@ -162,7 +162,7 @@ t('a forged, changed or expired session is refused; the page cannot pick who it 
 });
 t('a crafted link cannot put code into the page (Google\'s return values are checked and escaped)', () => {
   const page = {}; const R = E.real; const orig = R.HtmlService.createTemplateFromFile;
-  R.HtmlService.createTemplateFromFile = () => Object.assign(page, { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; } });
+  R.HtmlService.createTemplateFromFile = () => Object.assign(page, { evaluate() { return this; }, setTitle() { return this; }, addMetaTag() { return this; }, setXFrameOptionsMode(m) { this.xframe = m; return this; } });
   try {
     ['</script><script>alert(1)</script>', '"><img src=x onerror=alert(1)>', 'a'.repeat(600)].forEach(code => {
       R.doGet({ parameter: { state: 'abc-123', code } });
@@ -172,6 +172,8 @@ t('a crafted link cannot put code into the page (Google\'s return values are che
     R.doGet({ parameter: { state: 'abc-123', code: '4/0AX4XfW-good_code.1~' } });
     assert(/4\/0AX4XfW-good_code\.1~/.test(page.oauthJs) && !/</.test(page.oauthJs));
     assert(!/<\/script/i.test(R.safeJs_('</script><b>')), 'escaped even if something got through');
+    assert.strictEqual(page.xframe, 'ALLOWALL', 'may be shown inside the app\'s own website (the page itself refuses other sites)');
+    assert(typeof page.siteJs === 'string', 'the page knows the app\'s own website');
   } finally { R.HtmlService.createTemplateFromFile = orig; }
 });
 t('anyone calling sign-in or the sender in a loop is slowed down (protects the daily limits)', () => {
@@ -558,6 +560,17 @@ t('automatic WhatsApp: results upload is recorded once; next list skips them', (
   assert(next.items.some(i => i.contact_id === job.items[1].contact_id), 'failed person can be tried again');
   throwsMsg(() => C.importWhatsAppResults({ hello: 1 }), /not a WhatsApp results file/);
   throwsMsg(() => C.getWhatsAppJob({ shopId: 'SHOP1', body: 'Hi {price}' }), /not known/);
+});
+t('Progress shows WhatsApp sends from the Mac next to email sends (with who got it)', () => {
+  const job = global.__job;
+  const d = C.getShopData('SHOP1');
+  const mac = (d.macSends || []).filter(x => x.campaign_id === 'WHATSAPP-' + String(job.job_id).replace(/[^A-Za-z0-9]/g, '').slice(0, 20))[0];
+  assert(mac, 'listed: ' + JSON.stringify(d.macSends));
+  assert.strictEqual(mac.channel, 'whatsapp_mac'); assert.strictEqual(mac.sent, '1'); assert.strictEqual(mac.failed, '1');
+  assert(/^WhatsApp: /.test(mac.campaign_name), mac.campaign_name);
+  const det = C.getCampaignDetail(mac.campaign_id);
+  assert.strictEqual(det.rows.length, 2); assert.strictEqual(det.campaign.channel, 'whatsapp_mac');
+  throwsMsg(() => C.getCampaignDetail('WHATSAPP-nothere'), /not found/);
 });
 t('WhatsApp helper bridge: wrong or missing token refused', () => {
   assert.strictEqual(E.bridge({ token: 'nope', action: 'poll' }).error, 'not allowed');

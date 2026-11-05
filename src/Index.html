@@ -16,7 +16,17 @@
 
   <div id="busy" class="busy hidden"><div class="busy-box"><div class="spinner"></div><p id="busyText">Working…</p></div></div>
 
-  <script>window.SF_FIRST = <?!= firstJs ?>; window.SF_OAUTH = <?!= oauthJs ?>;</script>
+  <script>window.SF_FIRST = <?!= firstJs ?>; window.SF_OAUTH = <?!= oauthJs ?>; window.SF_SITE = <?!= siteJs ?>;
+  // The app may only be shown by Google's own page or inside the app's own website, never inside someone else's site.
+  (function () {
+    try {
+      var a = location.ancestorOrigins; if (!a || !a.length) return;
+      var top = a[a.length - 1];
+      if (top === 'https://script.google.com' || (window.SF_SITE && top === 'https://' + window.SF_SITE)) return;
+      window.SF_BLOCKED = true;
+      document.getElementById('app').innerHTML = '<div class="card"><h2>Open the app at its own address</h2><p>This page is shown inside another website, so it does not open here.</p></div>';
+    } catch (e) { /* older browsers: no check */ }
+  })();</script>
   <?!= include('App'); ?>
 </body>
 </html>

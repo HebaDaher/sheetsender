@@ -330,7 +330,8 @@ function makeEnv(srcDir) {
     HtmlService: {
       createHtmlOutputFromFile: n => ({ getContent: () => fs.readFileSync(path.join(srcDir, n + '.html'), 'utf8') }),
       createHtmlOutput: html => ({ html, setTitle() { return this; }, getContent() { return html; } }),
-      createTemplateFromFile: n => ({ evaluate: () => ({ setTitle() { return this; }, addMetaTag() { return this; }, page: n }) })
+      createTemplateFromFile: n => ({ evaluate: () => ({ setTitle() { return this; }, addMetaTag() { return this; }, setXFrameOptionsMode(m) { this.xframe = m; return this; }, page: n }) }),
+      XFrameOptionsMode: { ALLOWALL: 'ALLOWALL', DEFAULT: 'DEFAULT' }
     },
     Logger: { log: () => {} }
   };
