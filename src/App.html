@@ -15,7 +15,9 @@
     progress: { campaignId: null, detail: null, filter: 'all' },
     wa: { templateId: '', search: '' },
     tpl: { editing: null },
-    refreshTimer: null
+    refreshTimer: null,
+    shopCache: {},       // shopId -> getShopData() result (shown at once, refreshed in the background)
+    screen: ''           // 'home' | 'shop' | 'settings' | 'login' | 'welcome'
   };
 
   var FIELDS = [
@@ -57,7 +59,47 @@
   var SESSION_KEY = 'sf_session';
   var memSession = '';
   function getSession() { try { return localStorage.getItem(SESSION_KEY) || memSession; } catch (e) { return memSession; } }
-  function setSession(v) { memSession = v || ''; try { if (v) localStorage.setItem(SESSION_KEY, v); else localStorage.removeItem(SESSION_KEY); } catch (e) { /* kept in memory */ } }
+  function setSession(v) {
+    memSession = v || '';
+    try { if (v) localStorage.setItem(SESSION_KEY, v); else { localStorage.removeItem(SESSION_KEY); localStorage.removeItem(BOOT_KEY); } } catch (e) { /* kept in memory */ }
+    if (!v) S.shopCache = {};
+  }
+
+  /* ---------- Speed: show what we already have at once, refresh it quietly in the background ---------- */
+  var BOOT_KEY = 'sf_boot';
+  function sessionTag() { var s = getSession(); return s ? s.slice(-24) : ''; }
+  function savedBoot() {
+    try { var v = JSON.parse(localStorage.getItem(BOOT_KEY) || 'null'); return v && v.s === sessionTag() ? v.b : null; } catch (e) { return null; }
+  }
+  function saveBoot(b) { try { localStorage.setItem(BOOT_KEY, JSON.stringify({ s: sessionTag(), b: b })); } catch (e) { /* fine */ } }
+  function same(a, b) { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; } }
+  /** Loads every shop's data in the background (one after another), so opening a shop is instant. */
+  function prefetchShops() {
+    var b = S.boot; if (!b || !b.shops) return;
+    var todo = b.shops.map(function (s) { return s.shop_id; }).filter(function (id) { return !S.shopCache[id]; }).slice(0, 6);
+    var ws = b.workspace && b.workspace.id;
+    (function next() {
+      var id = todo.shift(); if (!id) return;
+      call('getShopData', id).then(function (d) {
+        if (S.boot && S.boot.workspace && S.boot.workspace.id === ws) S.shopCache[id] = d;
+        next();
+      }, function () { /* opened normally later */ });
+    })();
+  }
+  /** The Excel reader (large) is loaded only when a file is chosen. */
+  var xlsxLoading = null;
+  function ensureXLSX() {
+    if (window.XLSX) return Promise.resolve();
+    if (!xlsxLoading) {
+      xlsxLoading = call('getSheetJs').then(function (html) {
+        var code = String(html).replace(/^[\s\S]*?<script>/, '').replace(/<\/script>[\s\S]*$/, '');
+        var el = document.createElement('script'); el.textContent = code; document.head.appendChild(el);
+        if (!window.XLSX) throw new Error('The Excel reader could not be loaded. Reload the page and try again.');
+      });
+      xlsxLoading.catch(function () { xlsxLoading = null; });
+    }
+    return xlsxLoading;
+  }
 
   function rawCall(fn, args) {
     return new Promise(function (resolve, reject) {
@@ -130,7 +172,18 @@
       return;
     }
     if (!getSession()) { renderLogin(); return; }
-    call('getBootstrap').then(useBoot, function (err) {
+    var cached = savedBoot();
+    if (cached && !cached.needsWorkspace) useBoot(cached); // instant; refreshed just below
+    call('getBootstrap').then(function (b) {
+      saveBoot(b);
+      if (!cached || cached.needsWorkspace) { useBoot(b); prefetchShops(); return; }
+      var changed = !same(cached, b);
+      S.boot = b;
+      if (S.screen === 'home' && changed) useBoot(b); else if (changed) drawWho();
+      prefetchShops();
+    }, function (err) {
+      if (/SIGNED_OUT/.test(errText(err))) return;
+      if (cached) { showBanner('error', 'Could not refresh: ' + errText(err)); return; }
       $('app').innerHTML = '<div class="card"><h2>Cannot open the app</h2><p>' + esc(errText(err)) + '</p>' +
         '<p class="muted small">If this keeps happening, send this message to the person who set up the app.</p></div>';
     });
@@ -166,14 +219,16 @@
 
   function renderLogin(message) {
     stopAutoRefresh();
+    S.screen = 'login';
     $('who').innerHTML = '';
     $('app').innerHTML = '<div class="card login-card"><div class="logo-big">✉</div><h1>Shop Follow-ups</h1>' +
       '<p class="muted">Follow up with the people interested in your shops — by email and WhatsApp.</p>' +
       (message ? '<div class="notice warn">' + esc(message) + '</div>' : '') +
       '<div id="loginSlot"><button class="btn primary big gbtn" disabled><span class="g">G</span> Sign in with Google</button></div>' +
       '<p class="small muted" style="margin-top:12px">Google asks only to share your email address with the app. Several Google accounts in this browser? Just choose the one you want.</p>' +
-      '<p class="small muted" style="margin-top:18px"><a href="https://hebadaher.github.io/sheetsender/start.html" target="_blank" rel="noopener">How it works</a> · ' +
-      '<a href="https://hebadaher.github.io/sheetsender/privacy.html" target="_blank" rel="noopener">Privacy</a></p></div>';
+      '<p class="small muted" style="margin-top:18px"><a href="https://followups.goskate.ae/start.html" target="_blank" rel="noopener">How it works</a> · ' +
+      '<a href="https://followups.goskate.ae/privacy.html" target="_blank" rel="noopener">Privacy</a> · ' +
+      '<a href="https://followups.goskate.ae/terms.html" target="_blank" rel="noopener">Terms</a></p></div>';
     rawCall('startLogin', []).then(function (url) {
       if (!$('loginSlot')) return;
       $('loginSlot').innerHTML = googleLink('loginBtn', url, '<span class="g">G</span> Sign in with Google', 'login', 'btn primary big gbtn');
@@ -201,6 +256,7 @@
     }
     if (p.kind === 'gmail') {
       if (!getSession()) { renderLogin('Sign in again, then connect the Gmail account once more.'); return true; }
+      S.settings = null;
       withBusy('Finishing the Gmail connection…', call('finishGmailConnect', o.code || '', o.state || '', o.error || '')).then(function (email) {
         return call('getBootstrap').then(function (b) {
           S.boot = b; drawWho(); renderSettings();
@@ -218,6 +274,7 @@
   }
 
   function useBoot(boot) {
+    if (S.boot && boot.workspace && S.boot.workspace && S.boot.workspace.id !== boot.workspace.id) S.shopCache = {};
     S.boot = boot;
     if (boot.needsWorkspace) { drawWho(); return renderWelcome(); }
     drawWho();
@@ -243,13 +300,14 @@
       var v = this.value;
       if (v === '__new') { renderWelcome(true); return; }
       stopAutoRefresh();
-      withBusy('Opening the workspace…', call('switchWorkspace', v)).then(function (b2) { hideBanner(); useBoot(b2); });
+      withBusy('Opening the workspace…', call('switchWorkspace', v)).then(function (b2) { hideBanner(); S.shopCache = {}; saveBoot(b2); useBoot(b2); prefetchShops(); });
     });
   }
 
   /** First visit (or "Create my own workspace"): one short form. */
   function renderWelcome(extra) {
     stopAutoRefresh();
+    S.screen = 'welcome';
     var b = S.boot;
     var html = '<div class="card" style="max-width:640px;margin:0 auto"><h1 style="margin-top:0">Welcome' + (extra ? '' : ' to ' + esc(b.appName || 'Shop Follow-ups')) + '</h1>' +
       '<p>Signed in as <b>' + esc(b.user) + '</b>. Not you? <button class="link" id="wNotYou">Sign out</button></p>' +
@@ -285,6 +343,7 @@
   /* ---------------- Home ---------------- */
   function renderHome() {
     stopAutoRefresh();
+    S.screen = 'home';
     S.shopId = null; S.data = null;
     var b = S.boot;
     var html = '<h1>Choose a shop</h1><p class="muted">Pick the shop you want to follow up for.</p>';
@@ -379,15 +438,26 @@
     S.wa = { templateId: '', search: '' };
     S.tpl = { editing: null };
     S.aud = { mode: 'all', ids: [] }; S.contactList = ''; S.uploadQueue = []; S.uploadDone = 0;
-    return withBusy('Loading shop…', call('getShopData', shopId)).then(function (data) {
-      S.data = data;
-      S.boot.engine = data.engine;
-      renderShop();
+    S.screen = 'shop';
+    var cached = S.shopCache[shopId];
+    if (cached) { S.data = cached; renderShop(); } // instant; refreshed just below
+    var fresh = call('getShopData', shopId).then(function (data) {
+      S.shopCache[shopId] = data;
+      if (S.shopId !== shopId) return; // they already went somewhere else
+      var changed = !cached || !same(cached, data);
+      S.data = data; S.boot.engine = data.engine;
+      // Re-draw only where nothing is being typed or uploaded.
+      if (!cached || (changed && !S.upload && (S.view === 'contacts' || S.view === 'progress' || S.view === 'templates'))) renderShop();
+      else updateEngineBox();
     });
+    return cached ? fresh.catch(function (e) { showBanner('error', 'Could not refresh: ' + errText(e)); }) : withBusy('Loading shop…', fresh);
   }
 
   function reloadShop() {
-    return call('getShopData', S.shopId).then(function (data) {
+    var id = S.shopId;
+    return call('getShopData', id).then(function (data) {
+      S.shopCache[id] = data;
+      if (S.shopId !== id) return;
       S.data = data; S.boot.engine = data.engine; updateEngineBox();
     });
   }
@@ -417,7 +487,10 @@
     });
     html += '</nav><section id="view"></section>';
     $('app').innerHTML = html;
-    $('backHome').addEventListener('click', function () { hideBanner(); call('getBootstrap').then(useBoot); renderHome(); });
+    $('backHome').addEventListener('click', function () {
+      hideBanner(); renderHome();
+      call('getBootstrap').then(function (b) { saveBoot(b); var ch = !same(S.boot, b); S.boot = b; if (S.screen === 'home' && ch) renderHome(); });
+    });
     if ($('shopRename')) $('shopRename').addEventListener('click', renameShopInline);
     if ($('fixSender')) $('fixSender').addEventListener('click', function () { hideBanner(); renderSettings(); });
     Array.prototype.forEach.call(document.querySelectorAll('[data-view]'), function (el) {
@@ -590,11 +663,14 @@
     if (!/\.(xlsx|xls|csv)$/i.test(file.name)) { showBanner('error', 'Please choose an Excel file (.xlsx, .xls or .csv).'); return; }
     if (file.size > 15 * 1024 * 1024) { showBanner('error', 'This file is too big (over 15 MB).'); return; }
     busy('Reading the file…');
+    ensureXLSX().then(function () { readFileNow(file); }, function (e) { done(); showBanner('error', errText(e)); });
+  }
+  function readFileNow(file) {
     var reader = new FileReader();
     reader.onerror = function () { done(); showBanner('error', 'The file could not be read. Try saving it again in Excel.'); };
     reader.onload = function (e) {
       try {
-        var wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        var wb = window.XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
         var sheets = wb.SheetNames.filter(function (n) { return sheetRows(wb.Sheets[n]).length > 0; });
         if (!sheets.length) throw new Error('The file is empty.');
         S.upload = { fileName: file.name, wb: wb, sheets: sheets, asNew: false };
@@ -625,7 +701,7 @@
     return String(v).trim();
   }
   function sheetRows(ws) {
-    var rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
+    var rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: false });
     return rows.map(function (r) { return r.map(cellText); })
       .filter(function (r) { return r.some(function (c) { return c !== ''; }); });
   }
@@ -2005,9 +2081,20 @@
   function renderSettings() {
     stopAutoRefresh();
     S.shopId = null;
-    $('app').innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Loading settings…</p></div>';
-    call('getSettings').then(function (st) { S.settings = st; S.boot.engine = st.engine; drawSettings(); }, function (e) {
-      $('app').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
+    var coming = S.screen !== 'settings'; // coming from another screen (not re-drawing after a change made here)
+    S.screen = 'settings';
+    var wsId = S.boot && S.boot.workspace ? S.boot.workspace.id : '';
+    var cached = coming && S.settings && S.settings.workspace && S.settings.workspace.id === wsId ? S.settings : null;
+    if (cached) drawSettings(); // instant; refreshed just below
+    else $('app').innerHTML = '<div class="card"><div class="spinner"></div><p class="muted" style="text-align:center">Loading settings…</p></div>';
+    call('getSettings').then(function (st) {
+      var changed = !cached || !same(cached, st);
+      S.settings = st; S.boot.engine = st.engine;
+      if (S.screen !== 'settings') return;
+      var typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+      if (changed && !typing) drawSettings();
+    }, function (e) {
+      if (!cached && S.screen === 'settings') $('app').innerHTML = '<div class="notice bad">' + esc(errText(e)) + '</div>';
     });
   }
 

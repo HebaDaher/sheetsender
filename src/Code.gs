@@ -112,6 +112,11 @@ function safeJs_(s) {
 }
 
 /** Inserts another project file's raw content into the page (not evaluated as a template). */
+/** The Excel reader for the page (loaded only when someone chooses a file: it makes the page much lighter). */
+function getSheetJs() {
+  return HtmlService.createHtmlOutputFromFile('SheetJS').getContent();
+}
+
 function include(name) {
   if (['Styles', 'App', 'SheetJS'].indexOf(name) === -1) throw new Error('Unknown file');
   return HtmlService.createHtmlOutputFromFile(name).getContent();
@@ -238,14 +243,32 @@ function withLock_(fn) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('The app is busy (another action is running). Please try again in a few seconds.');
   IN_LOCK = true;
-  try { return fn(); } finally { IN_LOCK = false; lock.releaseLock(); }
+  // Inside the lock every tab is read again: another request may have changed it while we waited.
+  if (TABLE_MEMO) TABLE_MEMO = {};
+  try { return fn(); } finally { IN_LOCK = false; lock.releaseLock(); if (TABLE_MEMO) TABLE_MEMO = {}; }
 }
 
 /* ------------------------------------------------------------------ */
 /* Sheet helpers                                                        */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Tables already read during this page request (one request = one api() call). Reading a tab costs a round trip to
+ * Google Sheets, and many requests need the same tab several times. Writes go through the same table objects
+ * (appendRows_/updateRow_/saveRows_), so the remembered copy stays correct. Never kept between requests.
+ */
+let TABLE_MEMO = null;
+
 function readTable_(ss, tab) {
+  if (TABLE_MEMO) {
+    const key = ss.getId() + '|' + tab;
+    if (!TABLE_MEMO[key]) TABLE_MEMO[key] = readTableFresh_(ss, tab);
+    return TABLE_MEMO[key];
+  }
+  return readTableFresh_(ss, tab);
+}
+
+function readTableFresh_(ss, tab) {
   const sheet = ss.getSheetByName(tab) || ensureTab_(ss, tab); // a deleted or new tab is made again (empty)
   const values = sheet.getLastRow() > 0 ? sheet.getDataRange().getValues() : [[]];
   let headers = (values[0] || []).map(function (h) { return String(h).trim(); });
@@ -493,12 +516,13 @@ function getBootstrap() {
     return { needsWorkspace: true, remade: !!e.remade, user: signedInEmail_(), admin: adminEmail_(), appName: APP_NAME };
   }
   const props = sp_();
-  const shops = readTable_(ctx.ss, TABS.SHOPS).rows
+  const shopRows = readTable_(ctx.ss, TABS.SHOPS).rows;
+  const shops = shopRows
     .filter(function (s) { return s.shop_id && isActive_(s.active); })
     .map(publicShop_);
   const ids = {};
   const problems = [];
-  readTable_(ctx.ss, TABS.SHOPS).rows.forEach(function (s) {
+  shopRows.forEach(function (s) {
     if (!s.shop_id) problems.push('A row in the Shops tab has no shop_id.');
     else if (ids[s.shop_id]) problems.push('shop_id "' + s.shop_id + '" is used twice in the Shops tab.');
     ids[s.shop_id] = true;

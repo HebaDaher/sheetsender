@@ -32,7 +32,7 @@ function makeRunner() {
     return function() {
       var args = Array.prototype.slice.call(arguments);
       fetch('/rpc/' + name, { method: 'POST', body: JSON.stringify(args) }).then(function(res){ return res.json(); })
-        .then(function(j){ setTimeout(function(){ j.error ? fail(new Error(j.error)) : ok(j.result); }, 50); });
+        .then(function(j){ setTimeout(function(){ j.error ? fail(new Error(j.error)) : ok(j.result); }, ${Number(process.env.RPC_DELAY || 50)}); });
     };
   }});
   return r;

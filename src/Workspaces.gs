@@ -134,10 +134,11 @@ function api(session, name, args) {
   const actions = apiActions_();
   if (!Object.prototype.hasOwnProperty.call(actions, name)) throw new Error('Unknown action.');
   CURRENT_EMAIL = email;
+  TABLE_MEMO = {};
   try {
     return actions[name].apply(null, Array.isArray(args) ? args : []);
   } finally {
-    CURRENT_EMAIL = ''; WS = null;
+    CURRENT_EMAIL = ''; WS = null; TABLE_MEMO = null;
   }
 }
 
@@ -157,7 +158,7 @@ function apiActions_() {
     saveWhatsAppApi: saveWhatsAppApi, refreshWhatsAppTemplates: refreshWhatsAppTemplates, disconnectWhatsAppApi: disconnectWhatsAppApi,
     getWhatsAppApiTemplates: getWhatsAppApiTemplates, getWhatsAppApiPreview: getWhatsAppApiPreview, startWhatsAppApiCampaign: startWhatsAppApiCampaign,
     renameList: renameList, removeList: removeList,
-    saveWebsite: saveWebsite,
+    saveWebsite: saveWebsite, getSheetJs: getSheetJs,
     startMediaUpload: startMediaUpload, uploadMediaChunk: uploadMediaChunk, removeMedia: removeMedia
   };
 }
