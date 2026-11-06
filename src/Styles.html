@@ -228,8 +228,9 @@
     .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap td { display: block; width: 100%; background: transparent; }
     .table-wrap tr.th-row, .table-wrap tr:first-child:has(th), .table-wrap thead { display: none; }
     .table-wrap tr { border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: var(--s2) var(--s3); margin-bottom: var(--s2); }
-    .table-wrap td { border: 0; padding: 4px 0 4px 120px; position: relative; min-height: 28px; }
-    .table-wrap td::before { content: attr(data-label); position: absolute; left: 0; top: 5px; width: 112px; color: var(--muted); font-size: 13px; font-weight: 600; }
+    .table-wrap td { border: 0; padding: 4px 0 4px 120px; min-height: 28px; }
+    .table-wrap td::before { content: attr(data-label); float: left; width: 112px; margin-left: -120px; padding-top: 1px; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1.35; }
+    .table-wrap td::after { content: ''; display: block; clear: both; }
     .table-wrap td[data-label=""], .table-wrap td:not([data-label]) { padding-left: 0; }
     .table-wrap td[data-label=""]::before, .table-wrap td:not([data-label])::before { display: none; }
     .table-wrap td:empty { display: none; }
